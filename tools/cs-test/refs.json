@@ -1,4 +1,22 @@
 {
+  "guest+map/map": {
+    "sha256": "30f1a16bb3569bf7697b8efd7d280655abd28d5b08b378b4dd671f3b4c410373",
+    "size": "1920x1080",
+    "run": "1127-004543-s7-map-guest-map-s7-map-fin-guest-map",
+    "accepted": "2026-11-27"
+  },
+  "guest+map/map-b": {
+    "sha256": "463a5d47702618318f424dacf86bd03f2570830a5e19cb819f60dcc205ef944e",
+    "size": "1920x1080",
+    "run": "1127-004543-s7-map-guest-map-s7-map-fin-guest-map",
+    "accepted": "2026-11-27"
+  },
+  "guest+map/whiterun": {
+    "sha256": "3b9938102c62f1cad7716fdc82bc30aa744b34fa1ad075d7ea0cad2ea07f039e",
+    "size": "1920x1080",
+    "run": "1127-004543-s7-map-guest-map-s7-map-fin-guest-map",
+    "accepted": "2026-11-27"
+  },
   "guest+menu-book/book-open": {
     "sha256": "2ddcf366ff6f26d66c57ceac457dfe9524357f4b35d5d9ea100fa5fe6dda04bf",
     "size": "1920x1080",
@@ -59,6 +77,24 @@
     "run": "1126-174928-dir-guest-quick-dir-s7sp-guest+quick",
     "accepted": "2026-11-26"
   },
+  "native-d3d12+map/map": {
+    "sha256": "78a827575e1ce1d180b851ddb98a89c5d31f8c2a14510a77002deb5c10029016",
+    "size": "1920x1080",
+    "run": "1127-004805-s7-map-native-d3d12-map-s7-map-fin-d3d12-map",
+    "accepted": "2026-11-27"
+  },
+  "native-d3d12+map/map-b": {
+    "sha256": "11ad857547051d93c46c63a21e6f0060546db43e11efa943e0f48ec0604548e8",
+    "size": "1920x1080",
+    "run": "1127-004805-s7-map-native-d3d12-map-s7-map-fin-d3d12-map",
+    "accepted": "2026-11-27"
+  },
+  "native-d3d12+map/whiterun": {
+    "sha256": "c966fea2f02b698b052eb22b6a7ffb02a9021db4c4e3a7541a3b7762f47a1e39",
+    "size": "1920x1080",
+    "run": "1127-004805-s7-map-native-d3d12-map-s7-map-fin-d3d12-map",
+    "accepted": "2026-11-27"
+  },
   "native-d3d12-quick/start": {
     "sha256": "48c2afe822ec47e8a6a5ed27b8d80694828f45401b9251a3dfbbcfe04fd67bc8",
     "size": "1920x1080",
@@ -70,6 +106,24 @@
     "size": "1920x1080",
     "run": "1126-185749-dir-native-vulkan-facegen-dir-s7dk-native-vulkan+facegen",
     "accepted": "2026-11-26"
+  },
+  "native-vulkan+map/map": {
+    "sha256": "55e34f9de8adedca033be89df515d73ae0e89475168e2fc8341eeffd0af5c43b",
+    "size": "1920x1080",
+    "run": "1127-011151-s7-map-native-vulkan-map-s7-map-fin-nvk-map2",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+map/map-b": {
+    "sha256": "cbc63afa281eb7cdd6f594a82d67bdf6227affed0e1811fb8913032b2702a4a0",
+    "size": "1920x1080",
+    "run": "1127-011151-s7-map-native-vulkan-map-s7-map-fin-nvk-map2",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+map/whiterun": {
+    "sha256": "e23332e24306afb9ad9588fbbfe1f8b27c2667a3fc6ca9d3b6a2b111215256b8",
+    "size": "1920x1080",
+    "run": "1127-011151-s7-map-native-vulkan-map-s7-map-fin-nvk-map2",
+    "accepted": "2026-11-27"
   },
   "native-vulkan+menu-book/book-open": {
     "sha256": "a22cc66cad03d43b078573297e21328364de55cacd5040f07fadec911a39fe24",

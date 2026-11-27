@@ -980,3 +980,22 @@ pushes until the user is back.
      cs-test's `loadscreens` command and `menu-loadscreens` config show all 266 distinct loading models through the
      engine's own setup: owned, no fatal, only Main::DrawFrame per main-menu frame. CS computes pass lists fresh each
      render; the engine's cached lists (rebuilt only when inputs change) explain the remaining observe differences.
+
+## 2026-11-27: the world map is native; the local map runs; observe deleted (snap5-map; director accepted)
+
+208. **Closes 203's world map crash:** world map frames kept their end-of-frame effects on the engine path (decision 7),
+     whose `ImageSpaceEffect::Render` (AE 107446) calls `SetDirtyStates` after each pass; with the vertex layout dirty and
+     no engine vertex shader ever bound (since menus5 made the loading model CS's, the last engine render that bound one)
+     it read a null shader (as 188). Native stages the world map slot itself (`WorldMapSteps`, `NativePost.inl`) with
+     rows from `ImageSpaceEffectWorldMap::UpdateParams` (AE 107802; globals AE 415301 / SE 528355). Guest keeps the engine
+     path. World map frames: fatal -> 1.0 engine render call.
+209. **The local map runs in the UI stage in both modes** (native hung before; guest drew it empty): `MapMenu::PreDisplay`
+     runs at DrawInterface's start (as BookMenu's, 202); ISLocalMap is a menu composite step; the skeleton clears
+     `kLOCAL_MAP_SWAP` at the UI places; Scaleform displays read engine targets through declared reads (a new read waits
+     one revision); its two batch clients share their step and its latch is 4 MiB. Its draws are still the engine draw
+     family's (latched): 35 engine render calls per local map frame. In graph mode (both modes) the panel is opaque and
+     some land tiles draw white, unlike plain D3D11.
+210. **`CS_MENU_SCENES_OBSERVE` is deleted:** every light scheme with a 3D scene (1, 2, 3, 4, 6, 7; 0 is the journal with
+     none; nothing pushes 5 on AE) is owned. Left: port the local map (CS visibility for its ortho camera, render mode 0x12
+     passes including tree LOD, the fog of war in mode 0x13, ISLocalMap's row), its graph-mode look, prebuilding its
+     Utility programs 0x10000003 and 0x200001a, scheme 5 on SE.
