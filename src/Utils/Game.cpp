@@ -230,10 +230,14 @@ namespace Util
 			return flag;
 		}
 
+		/** @brief The ImageSpace manager's TAA shader: made with the manager and never replaced, so it is read once. */
 		RE::ImageSpaceManager::UNK_BSImagespaceShaderISTemporalAA* TemporalShader()
 		{
-			auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, Other, globals::game::imageSpaceManager);
-			return imageSpaceManager ? imageSpaceManager->GetRuntimeData().BSImagespaceShaderISTemporalAA : nullptr;
+			static RE::ImageSpaceManager::UNK_BSImagespaceShaderISTemporalAA* shader = nullptr;
+			if (!shader)
+				if (auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, Other, globals::game::imageSpaceManager))
+					shader = imageSpaceManager->GetRuntimeData().BSImagespaceShaderISTemporalAA;
+			return shader;
 		}
 	}
 

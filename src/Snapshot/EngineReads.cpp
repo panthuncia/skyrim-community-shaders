@@ -22,6 +22,8 @@ namespace Snapshot::EngineReads
 
 		thread_local std::uint32_t t_captureDepth = 0;
 		thread_local std::uint32_t t_uiDepth = 0;
+		constexpr std::uint8_t kNoHalf = 0xFF;
+		thread_local std::uint8_t t_half = kNoHalf;
 		thread_local std::uint32_t t_frameStartDepth = 0;
 		std::atomic<Site*> g_sites{ nullptr };
 		std::atomic<std::uint32_t> g_renderThread{ 0 };
@@ -67,10 +69,32 @@ namespace Snapshot::EngineReads
 			return std::string(rest.substr(0, dot));
 		}
 
+		/**
+		* @brief Engine memory only render code writes in native (render-thread snapshots, snap7-split section 2): the target tables,
+		* BSGraphics::State, the shadow state, the shader state, the bound state and the current accumulator. Reading it is not a read
+		* of game state once the game thread runs no engine render code (phase 7 item 5). Every other object is game-mutated.
+		*/
+		constexpr bool RenderOwned(Object a_object)
+		{
+			switch (a_object) {
+			case Object::Renderer:
+			case Object::GraphicsState:
+			case Object::ShadowState:
+			case Object::Shaders:
+			case Object::BoundState:
+			case Object::Accumulator:
+				return true;
+			default:
+				return false;
+			}
+		}
+
 		struct Totals
 		{
 			std::uint64_t live = 0, liveRender = 0, world = 0, captured = 0, ui = 0, frameStart = 0;
 			std::array<std::uint64_t, static_cast<std::size_t>(Category::Count)> worldBy{};
+			std::array<std::array<std::uint64_t, static_cast<std::size_t>(Category::Count)>, kHalves> halfBy{};
+			std::array<std::array<std::uint64_t, static_cast<std::size_t>(Category::Count)>, kHalves> halfGameBy{};  // reads of game-mutated objects
 		};
 	}
 
@@ -79,9 +103,12 @@ namespace Snapshot::EngineReads
 		if (t_captureDepth)
 			captured.fetch_add(1, std::memory_order_relaxed);
 		else {
-			live[ThreadIndex()][g_kind.load(std::memory_order_relaxed)].fetch_add(1, std::memory_order_relaxed);
+			const auto kind = g_kind.load(std::memory_order_relaxed);
+			live[ThreadIndex()][kind].fetch_add(1, std::memory_order_relaxed);
 			if (t_uiDepth)
 				ui.fetch_add(1, std::memory_order_relaxed);
+			else if (t_half != kNoHalf && kind == kWorld)
+				half[t_half].fetch_add(1, std::memory_order_relaxed);
 			if (t_frameStartDepth)
 				frameStart.fetch_add(1, std::memory_order_relaxed);
 		}
@@ -106,6 +133,17 @@ namespace Snapshot::EngineReads
 	CaptureScope::~CaptureScope()
 	{
 		--t_captureDepth;
+	}
+
+	RenderHalfScope::RenderHalfScope(Half a_half) noexcept :
+		outer(t_half)
+	{
+		t_half = static_cast<std::uint8_t>(a_half);
+	}
+
+	RenderHalfScope::~RenderHalfScope()
+	{
+		t_half = outer;
 	}
 
 	bool InCapture() noexcept
@@ -199,18 +237,24 @@ namespace Snapshot::EngineReads
 				t->world += row.world;
 				t->captured += captured;
 				t->worldBy[static_cast<std::size_t>(site->category)] += row.world;
+				for (std::uint32_t h = 0; h < kHalves; ++h) {
+					t->halfBy[h][static_cast<std::size_t>(site->category)] += site->half[h].load(std::memory_order_relaxed);
+					if (!RenderOwned(site->object))
+						t->halfGameBy[h][static_cast<std::size_t>(site->category)] += site->half[h].load(std::memory_order_relaxed);
+				}
 			}
 			rows.push_back(std::move(row));
 		}
 		std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.world != b.world ? a.world > b.world : a.live > b.live; });
 
-		const auto categories = [&](const Totals& a_t) {
+		const auto byCategories = [&](const std::array<std::uint64_t, static_cast<std::size_t>(Category::Count)>& a_counts) {
 			std::string text;
-			for (std::size_t c = 0; c < a_t.worldBy.size(); ++c)
-				if (a_t.worldBy[c])
-					text += fmt::format("{}{} {:.1f}", text.empty() ? "" : ", ", kCategoryNames[c], a_t.worldBy[c] / worldFrames);
+			for (std::size_t c = 0; c < a_counts.size(); ++c)
+				if (a_counts[c])
+					text += fmt::format("{}{} {:.2f}", text.empty() ? "" : ", ", kCategoryNames[c], a_counts[c] / worldFrames);
 			return text.empty() ? std::string("none") : text;
 		};
+		const auto categories = [&](const Totals& a_t) { return byCategories(a_t.worldBy); };
 
 		nlohmann::json features = nlohmann::json::object();
 		for (const auto& [name, t] : byFeature)
@@ -219,12 +263,25 @@ namespace Snapshot::EngineReads
 		nlohmann::json byCategory = nlohmann::json::object();
 		for (std::size_t c = 0; c < all.worldBy.size(); ++c)
 			byCategory[kCategoryNames[c]] = all.worldBy[c] / worldFrames;
+		// The render halves count only native world frames (RecordFrame and the Present hook run in world frames there).
+		nlohmann::json halves = nlohmann::json::object();
+		constexpr std::array<const char*, kHalves> kHalfKeys{ "record", "frame_end" };
+		for (std::uint32_t h = 0; h < kHalves; ++h) {
+			nlohmann::json half = nlohmann::json::object();
+			nlohmann::json game = nlohmann::json::object();
+			for (std::size_t c = 0; c < all.halfBy[h].size(); ++c) {
+				half[kCategoryNames[c]] = all.halfBy[h][c] / worldFrames;
+				game[kCategoryNames[c]] = all.halfGameBy[h][c] / worldFrames;
+			}
+			half["game_mutated"] = game;
+			halves[kHalfKeys[h]] = half;
+		}
 		nlohmann::json kinds = nlohmann::json::object();
 		for (std::uint32_t k = 0; k < kKinds; ++k)
 			kinds[kKindKeys[k]] = frames[k];
 		::Testing::SetReport("engine_reads", { { "mode", RenderGraph::Frame::Driver::ModeName() }, { "frames", kinds }, { "sites", rows.size() }, { "live", all.live },
 												 { "captured", all.captured }, { "ui_frame", all.ui }, { "frame_start", all.frameStart }, { "world_per_frame", all.world / worldFrames }, { "world_per_frame_by_category", byCategory },
-												 { "features", features } });
+												 { "render_half_per_world_frame", halves }, { "features", features } });
 
 		if (!Logging())
 			return;
@@ -234,6 +291,16 @@ namespace Snapshot::EngineReads
 			a_when, RenderGraph::Frame::Driver::ModeName(), frames[0], frames[1], frames[2], frames[3], frames[4], all.live, rows.size(), all.liveRender, all.captured,
 			all.world / worldFrames, categories(all));
 		logger::info("[Snapshot] UI-frame engine reads {}: {} live reads inside the ImGui frame", a_when, all.ui);
+		constexpr std::array<const char*, kHalves> kHalfNames{ "record", "frame end" };
+		for (std::uint32_t h = 0; h < kHalves; ++h) {
+			logger::info("[Snapshot] render-half reads ({}) {}: per world frame {}; of game-mutated objects {}", kHalfNames[h], a_when, byCategories(all.halfBy[h]),
+				byCategories(all.halfGameBy[h]));
+			for (const auto& row : rows)
+				if (const auto n = row.site->half[h].load(std::memory_order_relaxed))
+					logger::info("[Snapshot] render-half read site ({}): {}:{} {} {}{}: per world frame {:.2f}", kHalfNames[h], row.path, row.site->where.line(),
+						kObjectNames[static_cast<std::size_t>(row.site->object)], kCategoryNames[static_cast<std::size_t>(row.site->category)],
+						RenderOwned(row.site->object) ? " (render-owned)" : "", n / worldFrames);
+		}
 		for (const auto& row : rows)
 			if (const auto n = row.site->ui.load(std::memory_order_relaxed))
 				logger::info("[Snapshot] UI-frame read site: {}:{} {}: {}", row.path, row.site->where.line(), kObjectNames[static_cast<std::size_t>(row.site->object)], n);

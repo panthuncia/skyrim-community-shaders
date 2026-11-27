@@ -14,7 +14,6 @@
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
-#include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
 #include "Utils/Logging.h"
 
@@ -111,7 +110,6 @@ namespace RenderGraph::Engine::Native
 		// CS's points inside read the render state from CS's frame (WorldPass), not the shadow state.
 		const WorldPass::RenderWorldScope worldPass;
 		auto* const accumulator = Global<RE::BSShaderAccumulator*>(528064, 415009);
-		auto* const camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
 		// Not written: the render mode (411475, 7 for the world), read only by the engine's RenderSSAO and effect shader setup, which
 		// native does not run; and the reflections' camera (415299), which Main::RenderScene already set to this camera.
 		// Sun::UpdateOcclusionQueries is not called: the game side takes the sun query's answer in its capture (Sky's SunQuery.cpp).
@@ -126,7 +124,7 @@ namespace RenderGraph::Engine::Native
 		// Sun::SubmitOcclusionQuery(1, ...): the sun's occlusion draw into CS's query slot, tagged with the snapshot it is drawn for.
 		if (const auto& snapshot = Snapshot::Current()) {
 			if (const auto* block = snapshot->Block<DCLF::Features::Sky::SunQueryBlock>())
-				DCLF::Features::Sky::SubmitSunQuery(accumulator, DCLF::Features::Sky::SunQueryGeometry(*block), camera, snapshot->id);
+				DCLF::Features::Sky::SubmitSunQuery(accumulator, DCLF::Features::Sky::SunQueryGeometry(*block), snapshot->id);
 		}
 		// Not written: Main::RenderWorld's clears of 414748 and 414749, which nothing reads (Main::Draw's setup sets them, no xref reads them).
 		globals::state->EndPerfEvent();

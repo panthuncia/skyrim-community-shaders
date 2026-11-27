@@ -53,6 +53,18 @@ namespace Snapshot::EngineReads
 	/** @brief 0 for the thread that began the current frame, 1 for any other. */
 	inline constexpr std::uint32_t kThreads = 2;
 
+	/**
+	* @brief The parts of a native world frame that phase 7 moves to the render thread, for the render-half counts: Record is the
+	* skeleton driver's render half (RecordFrame and every stage it records), FrameEnd the Present hook's body.
+	*/
+	enum class Half : std::uint8_t
+	{
+		Record,
+		FrameEnd,
+		Count
+	};
+	inline constexpr std::uint32_t kHalves = static_cast<std::uint32_t>(Half::Count);
+
 	/** @brief One call site's counters. Each CS_ENGINE_READ owns one, constant-initialised, listed at its first read. */
 	struct Site
 	{
@@ -73,6 +85,7 @@ namespace Snapshot::EngineReads
 		Site* next = nullptr;
 		std::atomic<std::uint64_t> captured{ 0 };
 		std::atomic<std::uint64_t> ui{ 0 };  // live reads made inside the ImGui frame (also counted in live)
+		std::atomic<std::uint64_t> half[kHalves]{};  // live reads outside the ImGui frame inside a RenderHalfScope in world frames (also counted in live)
 		std::atomic<std::uint64_t> frameStart{ 0 };  // live reads made inside a FrameStartScope (also counted in live)
 		std::atomic<std::uint64_t> live[kThreads][kKinds]{};
 	};
@@ -85,6 +98,19 @@ namespace Snapshot::EngineReads
 		~CaptureScope();
 		CaptureScope(const CaptureScope&) = delete;
 		CaptureScope& operator=(const CaptureScope&) = delete;
+	};
+
+	/** @brief Live reads on this thread count as a_half's while one is alive (the innermost wins). A diagnostic only. */
+	class RenderHalfScope
+	{
+	public:
+		explicit RenderHalfScope(Half a_half) noexcept;
+		~RenderHalfScope();
+		RenderHalfScope(const RenderHalfScope&) = delete;
+		RenderHalfScope& operator=(const RenderHalfScope&) = delete;
+
+	private:
+		std::uint8_t outer;
 	};
 
 	/** @brief Whether this thread is inside a CaptureScope. */

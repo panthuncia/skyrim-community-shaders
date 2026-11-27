@@ -6,6 +6,8 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
+#include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -70,6 +72,20 @@ namespace DCLF::Features::Sky::Native
 			T value;
 			std::memcpy(&value, static_cast<const std::byte*>(a_object) + a_offset, sizeof(T));
 			return value;
+		}
+
+		/**
+		 * @brief The ImageSpace data's sky brightness (ImageSpaceManager +0xE4), PParams.y's other factor. Native: the update's ImageSpace
+		 * block; guest reads the manager.
+		 */
+		float SkyBrightness()
+		{
+			if (::RenderGraph::Engine::Native::Active())
+				if (const auto& snapshot = Snapshot::Current())
+					if (const auto* block = snapshot->Block<::RenderGraph::Engine::ImageSpace::Block>(); block && block->inputs.read)
+						return block->inputs.At(0xE4);
+			const auto* ism = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
+			return ism ? Field<float>(ism, 0xE4) : 0.0f;
 		}
 
 		// BSSkyShaderProperty fields (SetupGeometry, GetRenderPasses).
@@ -377,8 +393,7 @@ namespace DCLF::Features::Sky::Native
 				// StartAccumulating gives the accumulator the world camera's position, which is the frame camera's eye at native's points.
 				eye = world && frameCamera ? posAdjust : a_accumulator->GetRuntimeData()->eyePosition;
 				vParams = Global<float>(Address::kVParams);
-				const auto* ism = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
-				skyScale = vParams * (ism ? Field<float>(ism, 0xE4) : 0.0f);
+				skyScale = vParams * SkyBrightness();
 				cloudOffsets = reinterpret_cast<const float*>(REL::Offset(Address::kCloudOffsets).address());
 				skyColours = reinterpret_cast<const float*>(REL::Offset(Address::kSkyColours).address());
 				viewport = Family::LatchViewport(0);
@@ -412,8 +427,7 @@ namespace DCLF::Features::Sky::Native
 				previousPosAdjust = {};
 				viewProj = a_view.viewProj;
 				vParams = Global<float>(Address::kVParams);
-				const auto* ism = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
-				skyScale = vParams * (ism ? Field<float>(ism, 0xE4) : 0.0f);
+				skyScale = vParams * SkyBrightness();
 				cloudOffsets = reinterpret_cast<const float*>(REL::Offset(Address::kCloudOffsets).address());
 				skyColours = reinterpret_cast<const float*>(REL::Offset(Address::kSkyColours).address());
 				viewport = Family::LatchViewport(0);

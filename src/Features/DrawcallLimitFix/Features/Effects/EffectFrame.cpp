@@ -1,8 +1,10 @@
 // The Effect port's per-frame inputs. Four constant rows (camera planes, sun colour, blood globals, cloud light colour) and the soft
-// effects' depth. Sampled on the render thread by each commit.
+// effects' depth. Sampled on the render thread by each commit; the game's values among them (the lights, the blood globals) come from
+// the frame's globals, which DCLF's frame start took on the game side.
 
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Features/DrawcallLimitFix/Features/Reflection/ReflectionFaces.h"
 #include "Globals.h"
@@ -43,8 +45,8 @@ namespace DCLF::Features::Effects
 			return { farPlane, nearPlane, farPlane - nearPlane, 0.0f };
 		}
 
-		/** @brief Weapon blood's AlphaTestRef.yz globals (0x1433dccf0, 0x1433dccf4), written only by BSTempEffectWeaponBlood. */
-		std::array<float, 4> SampleEffectBlood()
+		/** @brief Weapon blood's AlphaTestRef.yz globals (0x1433dccf0, 0x1433dccf4), written only by BSTempEffectWeaponBlood. Game side. */
+		std::array<float, 4> CaptureEffectBlood()
 		{
 			static const REL::Relocation<const float*> globals{ REL::Offset(Address::kEffectBlood) };
 			const float* blood = globals.get();
@@ -55,7 +57,7 @@ namespace DCLF::Features::Effects
 		 * @brief DLightColor as SetupGeometry (0x1414eab10) writes it from light 0. Fade (+0x134) times HDR multiplier times NiLight +0x14c.
 		 * A kCloudLOD property uses the cloud light (ShadowSceneNode +0x208) instead of the sun (+0x200).
 		 */
-		std::array<float, 4> SampleLightZero(bool a_cloud)
+		std::array<float, 4> CaptureLightZero(bool a_cloud)
 		{
 			// Multiply in the engine's mulss order, HDR multiplier first. Light 0 is BSLight +0x48's NiLight.
 			static const REL::Relocation<const std::byte* const*> imageSpace{ REL::Offset(Engine::Address::kImageSpaceManager) };
@@ -76,9 +78,33 @@ namespace DCLF::Features::Effects
 			return { scale * read(light, 0x14c), scale * read(light, 0x150), scale * read(light, 0x154), 0.0f };
 		}
 
-		std::array<float, 4> SampleEffectLight() { return SampleLightZero(false); }
+		// The game's rows in the frame's globals: the sun's, the blood's and the cloud light's, four floats each.
+		constexpr std::uint32_t kLightRow = 0, kBloodRow = 4, kCloudLightRow = 8, kGameFloats = 12;
+		Api::FrameGlobalsSlot gameSlot;  // install
 
-		std::array<float, 4> SampleEffectCloudLight() { return SampleLightZero(true); }
+		/** @brief DCLF's frame start, game side: the rows read of the game. */
+		void CaptureGameRows(float* a_out)
+		{
+			const auto light = CaptureLightZero(false), blood = CaptureEffectBlood(), cloud = CaptureLightZero(true);
+			std::memcpy(a_out + kLightRow, light.data(), sizeof(light));
+			std::memcpy(a_out + kBloodRow, blood.data(), sizeof(blood));
+			std::memcpy(a_out + kCloudLightRow, cloud.data(), sizeof(cloud));
+		}
+
+		/** @brief A game row as the frame's ticket took it. */
+		std::array<float, 4> GameRow(std::uint32_t a_row)
+		{
+			std::array<float, 4> row{};
+			if (gameSlot)
+				std::memcpy(row.data(), &FrameGlobals::Current().features[gameSlot.first + a_row], sizeof(row));
+			return row;
+		}
+
+		std::array<float, 4> SampleEffectLight() { return GameRow(kLightRow); }
+
+		std::array<float, 4> SampleEffectBlood() { return GameRow(kBloodRow); }
+
+		std::array<float, 4> SampleEffectCloudLight() { return GameRow(kCloudLightRow); }
 
 		template <std::array<float, 4> (*Sample)()>
 		void SampleRow(float (&a_out)[4])
@@ -98,6 +124,7 @@ namespace DCLF::Features::Effects
 
 	void RegisterFrame(Api::InstallContext& a_context)
 	{
+		gameSlot = a_context.RegisterFrameGlobals({ .name = "effect rows", .floats = kGameFloats, .capture = &CaptureGameRows });
 		// Latched in row order regardless of registration order.
 		a_context.RegisterFrameConstantRow({ "effect camera", kEffectCameraFrameRow, &SampleRow<&SampleEffectCamera> });
 		a_context.RegisterFrameConstantRow({ "effect light", kEffectLightFrameRow, &SampleRow<&SampleEffectLight> });

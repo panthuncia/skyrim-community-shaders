@@ -57,10 +57,11 @@ namespace DCLF::GeometryPort
 	};
 
 	/**
-	 * @brief Render thread, in the engine-read window. Sampled at Prepass, not the frame's start, because only there are the accumulator's eye
-	 * and posAdjust the main camera's. Earlier they still belong to the shadow-map camera.
+	 * @brief The world's sun (ShadowSceneNode 0). Guest samples it at Prepass, not the frame's start, because only there are the accumulator's
+	 * eye and posAdjust the main camera's; earlier they still belong to the shadow-map camera. Native takes it in the frame start's game half
+	 * with a_eyeZero (FrameGlobals::pipeline): its Prepass runs inside RenderWorld, where the eye less posAdjust is zero.
 	 */
-	PipelineFrame SamplePipelineFrame();
+	PipelineFrame SamplePipelineFrame(bool a_eyeZero);
 	/**
 	 * @brief The same for another scene's sun, such as a menu scene node's. With a_eyeZero, EyePosition is zero: the camera that set
 	 * posAdjust is the scene's own, so its eye less posAdjust is zero. a_hdr, when given, is the HDR multiplier DirLightColor scales by

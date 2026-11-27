@@ -1,6 +1,8 @@
 #include "CSEditor.h"
 #include "I18n/I18n.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 
 #define I18N_KEY_PREFIX "feature.cs_editor."
 
@@ -94,7 +96,16 @@ bool CSEditor::HasWidgetJsonFiles()
 
 bool CSEditor::ShouldPreloadEditorResources()
 {
-	return s_dataAvailable && !s_resourcesInitialized && EditorWindow::CanBeOpen() && HasWidgetJsonFiles();
+	if (!s_dataAvailable || s_resourcesInitialized)
+		return false;
+	// Native (Prepass is render side): the player and menus as the update's capture found them. Guest reads them now.
+	bool canOpen = false;
+	if (Snapshot::FrameCamera::Owned()) {
+		const auto& snapshot = Snapshot::Current();
+		canOpen = snapshot && snapshot->worldLoaded && !snapshot->menus.main && !snapshot->menus.loading;
+	} else
+		canOpen = EditorWindow::CanBeOpen();
+	return canOpen && HasWidgetJsonFiles();
 }
 
 void CSEditor::ReloadFormEdits()

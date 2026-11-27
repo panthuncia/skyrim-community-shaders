@@ -23,6 +23,11 @@ namespace RE
 
 struct ID3D11ShaderResourceView;
 
+namespace DCLF::GeometryPort
+{
+	struct PipelineFrame;
+}
+
 namespace DCLF
 {
 	/** @brief What SetupTechnique reads of the engine, sampled at the frame's start so EvaluateTechnique depends only on its inputs. */
@@ -79,6 +84,12 @@ namespace DCLF
 		float lodRadiusBase = 0.0f, lodExponentScale = 0.0f, lodPowBase = 0.0f;  // FUN_14147a430's scale: 0x2032e40, 0x2032e54, 0x2032e44
 		std::array<float, 3> eye{};
 		float lodAdjust = 0.0f;
+		// Native: the pipelines' PerGeometry frame (GeometryPort::SamplePipelineFrame) taken here; its eye is zero where native's Prepass
+		// runs (inside RenderWorld). Null in guest, whose Prepass samples it with the accumulator's eye.
+		std::shared_ptr<const GeometryPort::PipelineFrame> pipeline;
+		// ExtrasFrame's game inputs (CaptureExtrasInputs): the land blend position and ProjectedUVParams3.
+		std::array<float, 2> landBlend{};
+		std::array<float, 4> projectedGlobals{};
 		// The features' frame-globals contributions.
 		std::array<float, Extensions::kFrameGlobalsFloats> features{};
 		// Roots whose hidden bit the culls change around the scene's views, as each view sees it. Sorted.

@@ -1,8 +1,8 @@
-// Skylighting: its probe array (t50), roof coverage (t51, t52) and shadow visibility (t53), frame textures. The render thread's callbacks read the feature live.
+// Skylighting: its probe array (t50), roof coverage (t51, t52) and shadow visibility (t53), frame textures. The render thread's callbacks read the feature live, the sky from the adopted snapshot.
 
 #include "Features/DrawcallLimitFix/Integrations/Skylighting/Skylighting.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
-#include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "State.h"
 
@@ -18,8 +18,10 @@ namespace DCLF::Integrations::Skylighting
 		{
 			if (!globals::features::skylighting.loaded || globals::state->isMapMenuOpen)
 				return false;
-			const auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-			return sky && sky->mode.get() == RE::Sky::Mode::kFull;
+			// The sky's mode as the update's capture took it.
+			const auto& snapshot = Snapshot::Current();
+			const auto* frame = snapshot ? snapshot->Block<::Skylighting::Block>() : nullptr;
+			return frame && frame->fullSky;
 		}
 
 		// Persistent textures that Prepass updates before binding: D3D11 ones, or the graph's exports in graph mode.

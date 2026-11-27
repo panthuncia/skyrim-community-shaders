@@ -8,6 +8,7 @@ namespace DCLF::Features::Shadows::Native
 {
 	struct LightSet;
 }
+struct LightLimitFixLights;
 
 /**
 * @brief Native's world frame skeleton driven by CS (render-thread roadmap, phase 3, decision 70; notes in
@@ -59,6 +60,8 @@ namespace RenderGraph::Engine::Native::Scene
 		float dofFar = 0.0f;
 		// The shadow casters' light set (phase 7 item 2): what the shadow maps, masks and lens flares draw from. Null without DCLF.
 		std::shared_ptr<const DCLF::Features::Shadows::Native::LightSet> shadowLights;
+		// Light Limit Fix's scene lights, taken after the queued lights and the casters. Null without Light Limit Fix.
+		std::shared_ptr<const LightLimitFixLights> pointLights;
 		/** @brief The first-person camera (415007) between the shift and the shift back, and Main::DrawWorld's eye (415027). */
 		struct FirstPersonCamera
 		{

@@ -1,5 +1,7 @@
 #include "Features/DrawcallLimitFix/Features/TextureStreaming/TextureStreaming.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
@@ -43,22 +45,37 @@ namespace DCLF::Features::Streaming
 		// The render thread's only part in the demand: a position, a direction and two ratios a frame, read by the worker.
 		void Commit(const Api::CommitContext&)
 		{
-			const auto* root = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
-			if (!root)
-				return;
-			cameraX.store(root->world.translate.x, std::memory_order_relaxed);
-			cameraY.store(root->world.translate.y, std::memory_order_relaxed);
-			cameraZ.store(root->world.translate.z, std::memory_order_relaxed);
+			// The world camera: native's from the adopted snapshot, guest's read now.
+			RE::NiPoint3 position;
+			RE::NiMatrix3 rotation;
+			RE::NiFrustum frustum;
+			const auto& snapshot = Snapshot::Current();
+			if (const auto* view = snapshot && Snapshot::FrameCamera::Owned() ? &snapshot->cameras.Current(Snapshot::ViewId::Main) : nullptr) {
+				if (!view->valid)
+					return;
+				position = view->position;
+				rotation = view->rotation;
+				frustum = view->frustum;
+			} else {
+				const auto* root = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
+				if (!root)
+					return;
+				position = root->world.translate;
+				rotation = root->world.rotate;
+				frustum = root->GetRuntimeData2().viewFrustum;
+			}
+			cameraX.store(position.x, std::memory_order_relaxed);
+			cameraY.store(position.y, std::memory_order_relaxed);
+			cameraZ.store(position.z, std::memory_order_relaxed);
 			const auto [screenWidth, screenHeight] = RE::BSGraphics::Renderer::GetScreenSize();
-			const auto& frustum = root->GetRuntimeData2().viewFrustum;
 			const float top = frustum.fTop;
 			if (top > 0.0f) {
 				pixelsPerRadian.store(static_cast<float>(screenHeight) / (2.0f * top), std::memory_order_relaxed);
 				viewCos.store(1.0f / std::sqrt(1.0f + top * top + frustum.fRight * frustum.fRight), std::memory_order_relaxed);
 			}
-			forwardX.store(root->world.rotate.entry[0][0], std::memory_order_relaxed);
-			forwardY.store(root->world.rotate.entry[1][0], std::memory_order_relaxed);
-			forwardZ.store(root->world.rotate.entry[2][0], std::memory_order_relaxed);
+			forwardX.store(rotation.entry[0][0], std::memory_order_relaxed);
+			forwardY.store(rotation.entry[1][0], std::memory_order_relaxed);
+			forwardZ.store(rotation.entry[2][0], std::memory_order_relaxed);
 		}
 
 		// The worker's: the bounds it last took (a producer posts the next one when it runs).

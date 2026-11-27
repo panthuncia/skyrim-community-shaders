@@ -822,13 +822,16 @@ void ScreenSpaceGI::DrawSSGI()
 {
 	auto context = globals::d3d::context;
 
-	// A write: the vanilla SSAO's toggle (goes with phase 5's ImageSpace port).
-	auto imageSpaceManager = CS_ENGINE_READ(ImageSpace, Other, globals::game::imageSpaceManager);
-	auto& BSImagespaceShaderISSAOBlurH = imageSpaceManager->GetRuntimeData().BSImagespaceShaderISSAOBlurH;
+	// A write: the vanilla SSAO's toggle (goes with phase 5's ImageSpace port). Only CS writes it. The blur shader is made with the
+	// ImageSpace manager and never replaced, so it is read once.
+	static std::remove_cvref_t<decltype(std::declval<RE::ImageSpaceManager&>().GetRuntimeData().BSImagespaceShaderISSAOBlurH)> saoBlur = nullptr;
+	if (!saoBlur)
+		if (auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, Other, globals::game::imageSpaceManager))
+			saoBlur = imageSpaceManager->GetRuntimeData().BSImagespaceShaderISSAOBlurH;
 
 	// Toggle vanilla SSAO
-	if (BSImagespaceShaderISSAOBlurH)
-		BSImagespaceShaderISSAOBlurH->enableSAO = settings.EnableVanillaSSAO;
+	if (saoBlur)
+		saoBlur->enableSAO = settings.EnableVanillaSSAO;
 
 	// The graph path ran in the DeferredPasses anchor, just before this.
 	if (ORGScreenSpaceGI::Get().IsActive())

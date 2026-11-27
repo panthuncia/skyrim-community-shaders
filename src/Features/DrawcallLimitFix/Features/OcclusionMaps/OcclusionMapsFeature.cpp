@@ -5,6 +5,8 @@
 #include "Features/Skylighting.h"
 #include "Features/Skylighting/ORGSkylighting.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 
 namespace DCLF::Features::OcclusionMaps
 {
@@ -28,8 +30,15 @@ namespace DCLF::Features::OcclusionMaps
 		{
 			const auto& skylighting = globals::features::skylighting;
 			float bottom = skylighting.probeGridBottomZ;
-			if (const auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera()); camera && bottom > -FLT_MAX)
-				bottom = std::min(bottom, skylighting.ProbeGridBottomZ(camera->world.translate.z));
+			if (bottom > -FLT_MAX) {
+				// The world camera's height: native's from the adopted snapshot, guest's read now.
+				const auto& snapshot = Snapshot::Current();
+				if (const auto* view = snapshot && Snapshot::FrameCamera::Owned() ? &snapshot->cameras.Current(Snapshot::ViewId::Main) : nullptr) {
+					if (view->valid)
+						bottom = std::min(bottom, skylighting.ProbeGridBottomZ(view->position.z));
+				} else if (const auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera()))
+					bottom = std::min(bottom, skylighting.ProbeGridBottomZ(camera->world.translate.z));
+			}
 			return bottom - Skylighting::OCCLUSION_BELOW_GRID_MARGIN;
 		}
 		constexpr bool kPrecipitationAvailable = true;

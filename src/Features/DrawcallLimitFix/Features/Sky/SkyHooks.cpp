@@ -604,7 +604,7 @@ namespace DCLF::Features::Sky
 		};
 	}
 
-	void SubmitSunQuery(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, RE::NiCamera* a_camera, std::uint64_t a_tag)
+	void SubmitSunQuery(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, std::uint64_t a_tag)
 	{
 		if (!Queries::Active() || !SkyDraws::HasSunClient()) {
 			SunSkips().Report("the graph does not answer the sun's occlusion query");
@@ -616,7 +616,7 @@ namespace DCLF::Features::Sky
 		const ::RenderGraph::Engine::Native::WorldPass::Scope world(::RenderGraph::Engine::Native::WorldPass::Point::SunQuery);
 		Queries::Bracket bracket;
 		bracket.Begin(Queries::kSunSlot, a_tag);
-		(void)DrawSun(a_accumulator, a_geometry, a_camera, bracket, [] {});
+		(void)DrawSun(a_accumulator, a_geometry, nullptr, bracket, [] {});
 	}
 
 	namespace

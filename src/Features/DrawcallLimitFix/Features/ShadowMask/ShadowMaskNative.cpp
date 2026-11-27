@@ -245,8 +245,12 @@ namespace DCLF::Features::ShadowMask::Native
 				view = a_view;
 				state = globals::state;
 				shader = CS_ENGINE_READ(Shaders, RecordTime, RE::BSUtilityShader::GetSingleton());
-				auto* ism = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
-				auto* quadGeometry = ism ? Field<RE::BSGeometry*>(ism, 0x48) : nullptr;
+				// The ImageSpace manager's screen quad (+0x48): made with the manager, never changed, so it is read once.
+				static RE::BSGeometry* screenQuad = nullptr;
+				if (!screenQuad)
+					if (auto* ism = CS_ENGINE_READ(ImageSpace, Other, RE::ImageSpaceManager::GetSingleton()))
+						screenQuad = Field<RE::BSGeometry*>(ism, 0x48);
+				auto* quadGeometry = screenQuad;
 				if (!state || !shader || !quadGeometry || quadGeometry->GetType().get() != RE::BSGeometry::Type::kTriShape) {
 					a_why = "no CS state, utility shader or screen quad";
 					return false;

@@ -37,6 +37,7 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/Transients.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 
 struct DepthStates
@@ -703,6 +704,22 @@ void Deferred::SetShadowCascadeParameters(T& lightData, DirectionalShadowLightDa
 bool Deferred::GetDirectionalShadowLightData(DirectionalShadowLightData& a_out)
 {
 	ZoneScoped;
+	// Native's render side reads the casters' light set, made on the game side after the maps' bookkeeping.
+	if (const auto* set = DCLF::Features::Shadows::Native::RenderSet(); set && !Snapshot::EngineReads::InCapture()) {
+		if (!set->sun.light)
+			return false;
+		DirectionalShadowLightData dd{};
+		dd.EndSplitDistances = { set->sun.end[0], set->sun.end[1] };
+		dd.StartSplitDistances = { set->sun.start[0], set->sun.start[1] };
+		const auto count = std::min(set->sun.descriptors.size(), std::size(dd.ShadowProj));
+		for (std::size_t i = 0; i < count; i++) {
+			const auto proj = DirectX::XMLoadFloat4x4(reinterpret_cast<const DirectX::XMFLOAT4X4*>(set->sun.descriptors[i].lightTransform.data()));
+			DirectX::XMStoreFloat4x4(&dd.ShadowProj[i], proj);
+			DirectX::XMStoreFloat4x4(&dd.InvShadowProj[i], DirectX::XMMatrixInverse(nullptr, proj));
+		}
+		a_out = dd;
+		return true;
+	}
 	auto* shadowSceneNode = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState)->shadowSceneNode[0];
 	if (!shadowSceneNode)
 		return false;

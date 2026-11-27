@@ -538,6 +538,7 @@ struct IDXGISwapChain_Present
 		RenderGraph::Engine::Targets::CheckFields("at the present");
 
 		ZoneScopedN("CS.Present");
+		const Snapshot::EngineReads::RenderHalfScope half(Snapshot::EngineReads::Half::FrameEnd);
 		{
 			// Instrumentation: the render thread's CPU time over the last Present-to-Present period (its thread cycles at the TSC's
 			// rate against the wall clock), plotted for Tracy. Less than the period means the thread slept or waited in it.

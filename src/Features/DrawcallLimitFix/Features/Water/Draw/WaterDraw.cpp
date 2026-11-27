@@ -4,6 +4,8 @@
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Features/Water/Draw/WaterDraw.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
@@ -12,7 +14,6 @@
 #include "Features/DrawcallLimitFix/Features/Water/Scene/WaterScene.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
-#include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "State.h"
@@ -107,8 +108,7 @@ namespace DCLF::Features::Water::Indirect
 		 */
 		std::uint32_t MaskVariant()
 		{
-			const auto world = ::RenderGraph::Frame::PostChain::ReadWorld(::RenderGraph::Frame::PostChain::Scope::None, {});
-			return world.normals == kNormalMaskSwapTarget ? 1u : 0u;
+			return ::RenderGraph::Engine::Native::WorldPass::NormalsTarget() == static_cast<std::int32_t>(kNormalMaskSwapTarget) ? 1u : 0u;
 		}
 
 		/** @brief The surface writes kMAIN (set 0), or kRAW_WATER (set 1) when ISWaterBlend composites it. The two share a format. */
@@ -172,6 +172,10 @@ namespace DCLF::Features::Water::Indirect
 		 */
 		bool GlobalCubeUnbound()
 		{
+			// Native: the test as the update's capture took it (the water port's game block).
+			if (const auto& snapshot = Snapshot::Current(); snapshot && Snapshot::FrameCamera::Owned())
+				if (const auto* block = snapshot->Block<Port::GameBlock>())
+					return block->inputs.cubemapFixInterior && !(globals::state && globals::state->isMapMenuOpen);
 			auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
 			if (!tes || (globals::state && globals::state->isMapMenuOpen))
 				return false;
