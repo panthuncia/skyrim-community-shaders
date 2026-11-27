@@ -20,9 +20,9 @@ namespace Snapshot
 * WorldPtToScreenPt3 camera, the driver's game half between the scrap heap's mark and release, the volumetric lighting flag, the frame
 * jobs, the UI recorded without render state, the save screenshot request, the scene graph's and the render passes' upkeep), and hands
 * the render half a FramePayload, which the snapshot carries. The render half (RenderHalf) draws it from the payload alone:
-* Renderer::Lock and Begin (CS's adoption and frame start), DrawFrame's render state, DCLF's render half from the payload's ticket, the
-* driver's render half, volumetric lighting, the UI point's replay, Renderer::End (CS's Present hook: the render side's frame end only)
-* and Unlock. A repeated render draws the same payload again.
+* Renderer::Lock around Begin (CS's adoption and frame start), then without the lock DCLF's render half from the payload's ticket and the
+* driver's render half, then Renderer::Lock again around volumetric lighting, the UI point's replay and Renderer::End (CS's Present
+* hook: the render side's frame end only). A repeated render draws the same payload again.
 *
 * The render half runs on CS's render thread, created at the first routed update's publish. Its loop renders the newest published
 * snapshot, or the adopted one again when none is new, and never waits for the game. A producer that must render on its own thread

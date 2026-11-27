@@ -204,15 +204,20 @@ namespace RenderGraph::Engine::Native::RenderThread
 		static REL::Relocation<Begin> begin{ REL::RelocationID(75460, 77245) };
 		using End = void (*)(RE::BSGraphics::Renderer*);
 		static REL::Relocation<End> end{ REL::RelocationID(75461, 77246) };
+		// Renderer::Lock covers only the engine's code: Begin, then volumetric lighting, the interface and End. The record between reads
+		// only the payload, CS's frame and the snapshot, so game-thread engine code that takes the lock (BGSDecalManager's update, AE
+		// 15220, and the task pool) runs meanwhile instead of waiting for a whole render.
 		lock(renderer);
 		// CS's frame start (claim, adoption, OnAdopted, OnBegin) and the engine's Begin body; FaceTint's render frame after it.
 		begin(renderer, 0);
+		unlock(renderer);
 		const auto& snapshot = Snapshot::Current();
 		const auto* payload = snapshot ? static_cast<const FramePayload*>(snapshot->nativeFrame.get()) : nullptr;
 		if (!payload)
 			RenderGraph::Fatal("native render half", fmt::format("the adopted snapshot {} has no routed frame payload", snapshot ? snapshot->id : 0));
 		g_stats.renders.fetch_add(1, std::memory_order_relaxed);
 		Scene::RecordRouted(payload->prepared);
+		lock(renderer);
 		if (payload->volumetricLighting) {
 			using RenderEffect = void (*)(void*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
 			static REL::Relocation<RenderEffect> renderEffect{ REL::RelocationID(99025, 105676) };
