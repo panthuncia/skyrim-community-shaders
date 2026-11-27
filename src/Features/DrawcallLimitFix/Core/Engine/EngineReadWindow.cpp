@@ -1,4 +1,4 @@
-// Open, Close and the render half's hold on the main thread, leases on any worker, and the report's counters.
+// Open and Close on the main thread, leases on any worker, and the report's counters.
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 
@@ -19,9 +19,9 @@ namespace DCLF
 		state.fetch_or(kOpen, std::memory_order_acq_rel);
 	}
 
-	void EngineReadWindow::NoteBoundary(std::uint32_t a_before, bool a_hold)
+	void EngineReadWindow::NoteClose(std::uint32_t a_before)
 	{
-		++(a_hold ? holds : closes);
+		++closes;
 		if (!(a_before & kLeases))
 			return;
 		++closesWaited;
@@ -32,27 +32,16 @@ namespace DCLF
 
 	void EngineReadWindow::Close()
 	{
-		const std::uint32_t before = state.fetch_and(~(kOpen | kHeld), std::memory_order_acq_rel);
-		renderHalfHeld = false;
+		const std::uint32_t before = state.fetch_and(~kOpen, std::memory_order_acq_rel);
 		if (!(before & kOpen))
 			return;
-		NoteBoundary(before, false);
+		NoteClose(before);
 	}
 
-	void EngineReadWindow::HoldForRenderHalf()
+	void EngineReadWindow::CloseAtPresent()
 	{
-		if (renderHalfHeld || !Snapshot::InGameUpdate() || !FrameAnchors::IsMainThread())
-			return;
-		renderHalfHeld = true;
-		NoteBoundary(state.fetch_or(kHeld, std::memory_order_acq_rel), true);
-	}
-
-	void EngineReadWindow::ReleaseRenderHalf()
-	{
-		if (!renderHalfHeld || !FrameAnchors::IsMainThread())
-			return;
-		renderHalfHeld = false;
-		state.fetch_and(~kHeld, std::memory_order_release);
+		if (Snapshot::InGameUpdate() && FrameAnchors::IsMainThread())
+			Close();
 	}
 
 	void EngineReadWindow::Suspend()
@@ -88,7 +77,7 @@ namespace DCLF
 	EngineReadWindow::Lease::Lease()
 	{
 		// Count the lease and check open-and-not-suspended in one step, so Close and Suspend cannot miss it.
-		if ((state.fetch_add(1, std::memory_order_acq_rel) & (kOpen | kHeld | kSuspended)) == kOpen) {
+		if ((state.fetch_add(1, std::memory_order_acq_rel) & (kOpen | kSuspended)) == kOpen) {
 			held = true;
 			++heldHere;
 			if (FrameAnchors::IsMainThread())
@@ -123,16 +112,15 @@ namespace DCLF
 		c.suspendWaitedUs = static_cast<double>(suspendWaitedUs.exchange(0, std::memory_order_relaxed));
 		c.suspendWaitedMaxUs = static_cast<double>(suspendWaitedMaxUs.exchange(0, std::memory_order_relaxed));
 		c.mainThreadLeases = mainThreadLeases.exchange(0, std::memory_order_relaxed);
-		if (!closes && !holds && !c.unleased && !c.suspends && !c.mainThreadLeases)
+		if (!closes && !c.unleased && !c.suspends && !c.mainThreadLeases)
 			return c;
 		c.any = true;
 		c.closes = closes;
-		c.holds = holds;
 		c.closesWaited = closesWaited;
 		c.waitedUs = waitedUs;
 		c.waitedMaxUs = waitedMaxUs;
 		c.refused = refused.exchange(0, std::memory_order_relaxed);
-		closes = holds = closesWaited = 0;
+		closes = closesWaited = 0;
 		waitedUs = waitedMaxUs = 0.0;
 		return c;
 	}

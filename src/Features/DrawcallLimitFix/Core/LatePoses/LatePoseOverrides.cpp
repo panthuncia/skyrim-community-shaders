@@ -11,6 +11,7 @@
 #include <ankerl/unordered_dense.h>
 #include <atomic>
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+#include "Snapshot/EngineReads.h"
 
 namespace DCLF::LatePoses
 {
@@ -201,10 +202,11 @@ namespace DCLF::LatePoses
 			Search search;
 			// No walk while a load shows. A load rebuilds the actors' 3D, the player's too, so a walk can read a freed child and crash.
 			// The player sees none of those frames, so there is nothing to hide.
-			if (Scene::FrameView::LoadShown())
+			if (Scene::FrameView::LoadShownNow())
 				return search;
 			for (const auto& pose : Extensions::LatePoses())
 				if (const void* root = pose.root ? pose.root() : nullptr) {
+					CS_ENGINE_READ_MARK(Scene, RecordTime);
 					search.rooted = true;
 					SearchRoot(const_cast<RE::NiAVObject*>(static_cast<const RE::NiAVObject*>(root)), search);
 				}

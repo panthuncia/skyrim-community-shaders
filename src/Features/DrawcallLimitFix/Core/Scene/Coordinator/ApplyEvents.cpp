@@ -409,7 +409,7 @@ namespace DCLF::Scene
 		// Tracked again within two frames of its detach means a detach and attach split across passes. A load's moves are not counted.
 		for (auto it = erasedByDetach.begin(); it != erasedByDetach.end();)
 			it = sceneFrame - it->second > 2 ? erasedByDetach.erase(it) : std::next(it);
-		const bool noteSplits = !FrameView::LoadShown();
+		const bool noteSplits = !channels.loadingSeen.load(std::memory_order_acquire) && !LoadHold::Active() && !LoadHold::MenuHeld();
 		for (auto* geometry : a_detached) {
 			// Only a tracked geometry is known alive, so it is safe to walk up from.
 			if (!tracked.contains(geometry))

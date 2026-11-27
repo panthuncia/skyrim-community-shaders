@@ -81,6 +81,7 @@ namespace Snapshot
 		{
 			std::vector<CaptureFn> captures;
 			std::vector<UnrenderedFn> unrendered;
+			std::vector<UpdateEndFn> updateEnds;
 			std::shared_ptr<const FrameSnapshot> previous;  // the last published, adopted or not
 			std::uint64_t nextId = 1;
 			RE::FormID previousCell = 0;  // the player's cell at the previous update, by form id (an address can be reused)
@@ -399,8 +400,6 @@ namespace Snapshot
 				Testing::OnGameUpdate();
 				// Native: the render half's game-visible side effects come from the game side (Snapshot/SideEffects.h).
 				SideEffects::AfterCapture(*Game().previous);
-				// The update is done and published: DCLF's workers may read the engine's scene graph until the next update's game logic.
-				DCLF::EngineReadWindow::Open();
 				const bool outer = std::exchange(t_inGameUpdate, true);
 				const auto renders = RendersThisUpdate();
 				// A load that starts inside a render (a console coc) ends the update's repeats: the engine's kept scene lists still name
@@ -410,8 +409,6 @@ namespace Snapshot
 				{
 					const SideEffects::RenderHalfScope scope;
 					for (; rendered < renders && g_loadEpoch.load(std::memory_order_acquire) == epoch; ++rendered) {
-						// The render half writes the scene graph before Main::Draw (the decal manager's attaches).
-						DCLF::EngineReadWindow::HoldForRenderHalf();
 						func(a_main);
 					}
 				}
@@ -420,6 +417,9 @@ namespace Snapshot
 				if (!rendered)
 					for (const auto fn : Game().unrendered)
 						fn(*Game().previous);
+				// The update's game-side end, rendered or not.
+				for (const auto fn : Game().updateEnds)
+					fn(*Game().previous);
 				t_inGameUpdate = outer;
 				// Phase 7's "publish, then wait for the next update slot". Off unless CS_UPDATE_RATE_CAP=1.
 				PaceGameUpdate();
@@ -432,7 +432,7 @@ namespace Snapshot
 				}
 				if (updates % kLifetimeLineUpdates == 0)
 					logger::info("{}", Retire::TakeStatsLine());
-				// Main::Update's game logic follows.
+				// Main::Update's game logic follows. DCLF's game half opened the window; Present usually closed it already.
 				DCLF::EngineReadWindow::Close();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -447,6 +447,11 @@ namespace Snapshot
 	void RegisterUnrenderedUpdate(UnrenderedFn a_fn)
 	{
 		Game().unrendered.push_back(a_fn);
+	}
+
+	void RegisterUpdateEnd(UpdateEndFn a_fn)
+	{
+		Game().updateEnds.push_back(a_fn);
 	}
 
 	void InstallHooks()

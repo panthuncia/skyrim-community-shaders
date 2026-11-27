@@ -153,6 +153,24 @@ namespace DCLF::LoadHold
 			return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
 		}
 
+		/** @brief Render side: the loading menu as the frame sees it (native: the adopted snapshot's menus; guest: the live UI). */
+		bool MenuOpenInFrame()
+		{
+			if (!::RenderGraph::Engine::Native::Active())
+				return MenuOpen();
+			const auto& snapshot = Snapshot::Current();
+			return snapshot && snapshot->menus.loading;
+		}
+
+		// ActorsWithout3D as the game side last counted it (OnFrameStart). Read by the render side.
+		std::atomic<std::uint32_t> s_actorsWithout3D{ 0 };
+
+		/** @brief Render side: the actors without 3D (native: the game half's count; guest: counted now). */
+		std::uint32_t ActorsWithout3DInFrame()
+		{
+			return ::RenderGraph::Engine::Native::Active() ? s_actorsWithout3D.load(std::memory_order_relaxed) : ActorsWithout3D();
+		}
+
 		/** @brief Main thread. Starts a hold. True when the menu's close is kept. */
 		bool Begin()
 		{
@@ -207,7 +225,7 @@ namespace DCLF::LoadHold
 			const char* mode = menu ? "the loading menu kept open" : hold.reentry ? "a re-entry, the presents held" : "the presents held (no loading menu)";
 			if (hold.reentry && a_warn)
 				reentryBlocked = true;
-			if (menu && MenuOpen()) {
+			if (menu && MenuOpenInFrame()) {
 				// The menu closes at the UI's next pass over its messages.
 				StoreState(HoldState::Releasing);
 				if (auto* queue = RE::UIMessageQueue::GetSingleton())
@@ -217,7 +235,7 @@ namespace DCLF::LoadHold
 				StoreState(HoldState::Idle);
 				PostMistEnd();
 			}
-			hold.actorsWithout3DLast = ActorsWithout3D();
+			hold.actorsWithout3DLast = ActorsWithout3DInFrame();
 			if (const auto& samples = hold.undrawnSamples; !samples.empty()) {
 				std::string text;
 				for (const auto& sample : samples)
@@ -446,6 +464,9 @@ namespace DCLF::LoadHold
 	void OnFrameStart()
 	{
 		WatchMapStart();
+		// The render side's measurement of the actors still loading, counted on the game side.
+		if (::RenderGraph::Engine::Native::Active())
+			s_actorsWithout3D.store(ActorsWithout3D(), std::memory_order_relaxed);
 		const auto now = state.load(std::memory_order_acquire);
 		if (now == HoldState::Idle || now == HoldState::Releasing)
 			return;
@@ -462,7 +483,7 @@ namespace DCLF::LoadHold
 		WatchMap();
 		const auto now = state.load(std::memory_order_acquire);
 		if (now == HoldState::Releasing) {
-			if (!MenuOpen())
+			if (!MenuOpenInFrame())
 				StoreState(HoldState::Idle);
 			return;
 		}
@@ -475,7 +496,7 @@ namespace DCLF::LoadHold
 				WatchAfterHold();
 				if (after.actorsWithout3D) {
 					++after.actorFrames;
-					if (ActorsWithout3D() == 0) {
+					if (ActorsWithout3DInFrame() == 0) {
 						logger::info("[DCLF] load hold: the last of the {} actors without 3D at the release got it {} frames later", after.actorsWithout3D,
 							after.actorFrames);
 						after.actorsWithout3D = 0;
@@ -484,7 +505,7 @@ namespace DCLF::LoadHold
 			}
 			return;
 		}
-		if (withMenu.load(std::memory_order_relaxed) && !MenuOpen()) {
+		if (withMenu.load(std::memory_order_relaxed) && !MenuOpenInFrame()) {
 			Release("the loading menu closed by itself", true);
 			return;
 		}
@@ -499,7 +520,7 @@ namespace DCLF::LoadHold
 		}
 		if (!hold.firstFrame) {
 			hold.firstFrame = scene;
-			hold.actorsWithout3DFirst = ActorsWithout3D();
+			hold.actorsWithout3DFirst = ActorsWithout3DInFrame();
 		}
 		hold.frames += snapshot->events.gameUpdates;
 		const auto& passes = PassCapture::Get().GetStats();

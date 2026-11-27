@@ -89,6 +89,9 @@ struct DrawcallLimitFix : Feature
 	/** @brief Called after the Lighting shader's SetupGeometry for every native lighting draw. */
 	void OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags);
 
+	/** @brief Native, main thread: the end of the skeleton driver's game half (before Main::Draw's tail), every render. */
+	void OnNativeGameHalfEnd();
+
 	/**
 	 * @brief The occlusion maps, Skylighting's sky map and the precipitation mask, which DCLF draws in its shadow epoch.
 	 * OcclusionReady, before the shadow maps, decides whether DCLF draws a map this frame. OcclusionNeedsEngine, at the engine's

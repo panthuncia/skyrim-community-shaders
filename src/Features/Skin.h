@@ -11,6 +11,11 @@
 
 #include <mutex>
 
+namespace Snapshot
+{
+	class Builder;
+}
+
 struct Skin : Feature
 {
 	static Skin* GetSingleton()
@@ -155,7 +160,14 @@ private:
 		bool ready = false;
 		bool head = false;
 		bool thickness = false;
+		bool stale = false;  ///< Its actor no longer owns it, or its property is not a skin's (RevalidateOwners).
 	};
+	/**
+	 * @brief Marks the entries whose actor no longer owns the geometry, or whose property is not compatible: walks actors' 3D and
+	 * reads properties, so it is game-side work. Native runs it at the snapshot capture, guest at Prepass.
+	 */
+	void RevalidateOwners();
+	static void Capture(Snapshot::Builder& a_builder);
 	struct ActorWetnessCacheEntry
 	{
 		const RE::TESObjectREFR* actor = nullptr;  // identity check only; never dereferenced from the cache

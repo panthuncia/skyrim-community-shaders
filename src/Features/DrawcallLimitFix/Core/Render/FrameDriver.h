@@ -7,7 +7,9 @@
 #include "RenderGraph/Frame/Revision.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -33,6 +35,24 @@ namespace DCLF
 
 	/** @brief Render thread. Whether the engine's utility shader existed at the frame's ticket. False before the first ticket. */
 	bool TicketUtilityShader();
+
+	/** @brief A feature's values in the frame ticket: taken of the engine by the game half, read by the render half. */
+	enum class TicketPart : std::uint8_t
+	{
+		WaterScene,  // the tracked water shapes (Features/Water/WaterNative.cpp)
+		SkyRoot,     // the sky root's objects (Features/Sky/SkyNative.cpp)
+		Count
+	};
+	inline constexpr std::size_t kTicketParts = static_cast<std::size_t>(TicketPart::Count);
+
+	/** @brief Takes a part's values in the game half, inside its capture scope. Null leaves the part empty. */
+	using TicketPartCapture = std::shared_ptr<const void> (*)();
+
+	/** @brief At install, before the first frame. One capture per part. */
+	void RegisterTicketPart(TicketPart a_part, TicketPartCapture a_capture);
+
+	/** @brief Render thread: the rendered ticket's part, or null (before the first ticket, or when its capture took nothing). */
+	const void* TicketPartOf(TicketPart a_part);
 
 	/** @brief DCLF's scene source, from RegisterSceneSource. */
 	RenderGraph::Frame::Revision::FragmentSourceId SceneSource();
@@ -96,6 +116,13 @@ namespace DCLF
 		/** @brief After Present, in menus too. Ends the frame and writes its report. */
 		void EndFrame();
 		/**
+		 * @brief Native, main thread: the end of the skeleton driver's game half, every render. The late poses are confirmed here: the
+		 * render half changes no scene graph, so the depth commit would see the same nodes.
+		 */
+		void GameHalfEnd();
+		/** @brief Main thread, game side: the end of an update's call of Main::DrawFrame, after its renders (Snapshot::RegisterUpdateEnd). */
+		void UpdateEnd();
+		/**
 		 * @brief Called around the engine's shadow-light selection while DCLF runs. Coverage is decided before the first light is kept,
 		 * so every shadow view's registration follows this frame's coverage.
 		 */
@@ -153,7 +180,9 @@ namespace DCLF
 		std::uint32_t captureFrame = ~0u;
 		std::shared_ptr<const FrameTicket> ticket;
 		bool ticketRendered = false;  // a render took the ticket
-		bool coveredLast = false;     // the last render's coverage of DCLF's claims epochs
+		// The last render's coverage of DCLF's claims epochs: the render half publishes it, the game half reads the latest (never waits).
+		std::atomic<bool> coveredLast{ false };
 		std::uint64_t ticketsMade = 0, ticketsUnrendered = 0, ticketsRemade = 0;
+		bool latePosesHold = false;  // native: the game half's confirmation of this render's late-pose plan
 	};
 }

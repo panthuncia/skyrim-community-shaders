@@ -7,6 +7,7 @@
 #include "RenderGraph/Engine/Native/RenderScene.h"
 
 #include "EngineZones.h"
+#include "Features/DrawcallLimitFix.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/LightLimitFix.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -311,6 +312,8 @@ namespace RenderGraph::Engine::Native::Scene
 				p.dofNear = frustum.fNear;
 				p.dofFar = frustum.fFar;
 			}
+			// DCLF confirms the late poses with the scene graph as the render half sees it.
+			globals::features::drawcallLimitFix.OnNativeGameHalfEnd();
 			// +0xA78, Main::Draw's tail (SE 100425, AE 107143): the sun's occlusion query flag, the engine's per-frame releases (an
 			// accumulator's pass list, a frozen ImageSpace texture, the batch renderer's last state), and the fade enable count (S5, CS's).
 			// Nothing in a native world frame fills what it releases, so it ends the game half.

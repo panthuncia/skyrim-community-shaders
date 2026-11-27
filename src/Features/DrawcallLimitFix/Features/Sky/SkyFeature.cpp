@@ -2,6 +2,7 @@
 // The engine side is SkyHooks.cpp and SkyNative.cpp, the graph side SkyDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
+#include "Features/DrawcallLimitFix/Features/Sky/SkyNative.h"
 #include "RenderGraph/Engine/Native/Native.h"
 
 #include <string>
@@ -15,6 +16,8 @@ namespace DCLF::Features::Sky
 			if (!Enabled())
 				return;
 			InstallHooks();
+			// Native's main view and faces cull the sky root from the frame ticket.
+			Native::RegisterRootCapture();
 			logger::info("[DCLF] sky: on (graph mode): the engine's sky batches and cloud layers are drawn at the Sky and SkyReflections anchors");
 		}
 

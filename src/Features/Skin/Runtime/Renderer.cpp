@@ -1,6 +1,8 @@
 #include "Features/Skin.h"
 
 #include "CSEditor/EditorWindow.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "Snapshot/Publication.h"
 #include "Globals.h"
 #include "State.h"
 
@@ -83,6 +85,21 @@ void Skin::PostPostLoad()
 {
 	stl::write_vfunc<0x6, Hooks::SetupGeometry>(RE::VTABLE_BSLightingShader[0]);
 	stl::write_vfunc<0x7, Hooks::RestoreGeometry>(RE::VTABLE_BSLightingShader[0]);
+	Snapshot::RegisterCapture(&Skin::Capture);
+}
+
+void Skin::Capture(Snapshot::Builder&)
+{
+	// Native: the owners are checked on the game side, once per update. Guest checks them at Prepass, as before.
+	if (RenderGraph::Engine::Native::Active())
+		globals::features::skin.RevalidateOwners();
+}
+
+void Skin::RevalidateOwners()
+{
+	std::lock_guard lock(mutex);
+	for (auto& [geometry, entry] : geometries)
+		entry.stale = (entry.actor && !SkinSurfaces::Belongs(geometry, entry.actor.get().get())) || !SkinMaterials::IsCompatible(entry.property.get());
 }
 
 std::shared_ptr<Skin::TextureEntry> Skin::RequestTexture(const std::string& a_path)
@@ -195,6 +212,7 @@ Skin::GeometryEntry& Skin::Observe(RE::BSGeometry* a_geometry, RE::BSShaderPrope
 		entry.head = SkinSurfaces::IsHead(a_geometry);
 		entry.thickness = SkinSurfaces::HasThickness(a_property);
 		entry.ready = false;
+		entry.stale = false;
 	}
 	return entry;
 }
@@ -251,8 +269,12 @@ void Skin::Prepass()
 		Invalidate();
 	}
 	characterRevision = characters->revision;
+	const bool native = RenderGraph::Engine::Native::Active();
 	for (auto& [geometry, entry] : geometries) {
-		if ((entry.actor && !SkinSurfaces::Belongs(geometry, entry.actor.get().get())) || !SkinMaterials::IsCompatible(entry.property.get())) {
+		// Native took the owners at the capture (RevalidateOwners).
+		if (!native)
+			entry.stale = (entry.actor && !SkinSurfaces::Belongs(geometry, entry.actor.get().get())) || !SkinMaterials::IsCompatible(entry.property.get());
+		if (entry.stale) {
 			preparedRevision += entry.ready;
 			entry.ready = false;
 			continue;

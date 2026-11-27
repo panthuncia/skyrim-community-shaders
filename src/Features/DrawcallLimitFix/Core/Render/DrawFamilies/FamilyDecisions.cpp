@@ -20,7 +20,9 @@ namespace DCLF::Api
 		FamilyPipelines pipelines;
 		const bool built = CatalogFamilyPipelines(catalog, family, pipelines);
 		// Until a revision made from a catalog with these pipelines is adopted, the family waits, so no frame claims it with nothing to draw it.
-		const auto adopted = IndirectDraws::Get().AdoptedFamilyPipelines(family);
+		// The adopted revision is the render side's, as it last published it.
+		const auto* render = IndirectDraws::Get().FamilyInputs();
+		const auto adopted = render ? render->adopted[static_cast<std::size_t>(family)] : nullptr;
 		const bool recorded = adopted && Draws::SameHandle(adopted->depth, pipelines.depth) && Draws::SameHandle(adopted->colour, pipelines.colour) &&
 		                      Draws::SameHandle(adopted->colour2, pipelines.colour2);
 		const bool owned = built && a_drawable && recorded;
@@ -42,8 +44,25 @@ namespace DCLF::Api
 
 namespace DCLF
 {
+	void IndirectDraws::PublishFamilyRenderState()
+	{
+		if (!impl)
+			return;
+		auto state = std::make_shared<FamilyRenderState>();
+		for (std::size_t f = 0; f < Extensions::kDrawFamilies; ++f)
+			state->adopted[f] = AdoptedFamilyPipelines(static_cast<Api::DrawFamily>(f));
+		impl->familyRenderState.store(std::move(state), std::memory_order_release);
+	}
+
+	const FamilyRenderState* IndirectDraws::FamilyInputs() const
+	{
+		return impl ? impl->familyInputs.get() : nullptr;
+	}
+
 	void IndirectDraws::DecideDrawFamilies(std::uint32_t a_frame)
 	{
+		// One render state for the whole decision: the last the render side published.
+		impl->familyInputs = impl->familyRenderState.load(std::memory_order_acquire);
 		auto* scene = impl->scene.get();
 		for (std::size_t f = 0; f < Extensions::kDrawFamilies; ++f) {
 			const auto& entry = Extensions::DrawFamilies()[f];

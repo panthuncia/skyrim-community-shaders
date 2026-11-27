@@ -142,6 +142,8 @@ namespace DCLF
 		source.afterAdoption = [] {
 			TracyCZoneN(afterScene, "CS.DCLF.AfterSceneStep", true);
 			IndirectDraws::Get().AfterSceneStep();
+			// The game half's family decisions read the revision adopted here.
+			IndirectDraws::Get().PublishFamilyRenderState();
 			TracyCZoneEnd(afterScene);
 		};
 		// Native mode with segments: the build point at Renderer::Begin, before the frame's schedule is chosen. BeginFrame then skips it.
@@ -152,6 +154,22 @@ namespace DCLF
 		source.drawsWorld = [] { return DrawsWorld(); };
 		source.epochFailed = [](std::string_view a_label, std::string_view a_error) { DrawcallLimitFix::OnGraphEpochFailed(a_label, std::string(a_error)); };
 		s_sceneSource = Revision::RegisterFragmentSource(std::move(source));
+	}
+
+	namespace
+	{
+		std::array<TicketPartCapture, kTicketParts> s_ticketParts{};  // install
+	}
+
+	void RegisterTicketPart(TicketPart a_part, TicketPartCapture a_capture)
+	{
+		s_ticketParts[static_cast<std::size_t>(a_part)] = a_capture;
+	}
+
+	const void* TicketPartOf(TicketPart a_part)
+	{
+		const auto* ticket = FrameDriver::Get().Ticket();
+		return ticket ? ticket->parts[static_cast<std::size_t>(a_part)].get() : nullptr;
 	}
 
 	bool TicketUtilityShader()
@@ -202,7 +220,7 @@ namespace DCLF
 
 	void FrameDriver::NoteStoppedDrawing()
 	{
-		coveredLast = false;
+		coveredLast.store(false, std::memory_order_release);
 	}
 
 	void FrameDriver::SceneFrameStart()
@@ -267,8 +285,8 @@ namespace DCLF
 		auto& scene = Scene::Coordinator::Get();
 		auto& view = Scene::FrameView::Get();
 		auto& draws = IndirectDraws::Get();
-		// The engine only reads its scene graph from here to Present, so workers may read it in the capture window.
-		EngineReadWindow::ReleaseRenderHalf();
+		// The engine only reads its scene graph from here to Present, so workers may read it.
+		EngineReadWindow::Open();
 		scene.SetScenePassMode(true);
 		// A classify input change drops the cached verdicts, because the caches witness the objects, not the inputs.
 		static Extensions::ClassifyInputSet inputsSeen = Extensions::SampleClassifyInputs();
@@ -310,7 +328,7 @@ namespace DCLF
 			// While DCLF draws, the installed publication's claims install. The first installation, and the first after a stop, waits for a
 			// render whose coverage of DCLF's claims epochs passed: until then the engine draws everything. The render half checks coverage.
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
-			if (view.HasInstalled() && (!view.NotDrawingYet() || coveredLast))
+			if (view.HasInstalled() && (!view.NotDrawingYet() || coveredLast.load(std::memory_order_acquire)))
 				view.InstallClaims();
 			Reports::GateReleases(view.SceneStep());
 			// Release the LOD gates the installed publications flipped, before the culls.
@@ -320,9 +338,14 @@ namespace DCLF
 		// Serve what the coordinator asked of the frame start, outside load screens. Switch catch-ups write engine memory, so they go before the culls.
 		{
 			const auto eventsStart = std::chrono::steady_clock::now();
-			if (!view.NoteLoadingScreen())
+			if (!view.NoteLoadingScreen(t->loading))
 				view.ServeFrameRequests();
 			counters.timing.eventsMs += MillisecondsSince(eventsStart);
+		}
+		// Native answers the scene's material requests here, on the game side (guest at EarlyPrepass).
+		if (RenderGraph::Engine::Native::Active()) {
+			DCLF_ZONE("CS.DCLF.BF.ServeMaterialRequests");
+			view.ServeMaterialRequests();
 		}
 		TracyCZoneN(bfFamilies, "CS.DCLF.BF.SourcesAndFamilies", true);
 		{
@@ -360,6 +383,12 @@ namespace DCLF
 			oneShot->rootViews = FrameValues::Get().TakeRootViews(oneShot->plans, claims.get());
 			t->oneShot.store(oneShot.release(), std::memory_order_release);
 		}
+		// The features' values the render half reads instead of the engine.
+		for (std::size_t part = 0; part < kTicketParts; ++part)
+			if (const auto take = s_ticketParts[part]) {
+				DCLF_ZONE("CS.DCLF.BF.TicketParts");
+				t->parts[part] = take();
+			}
 		return t;
 	}
 
@@ -392,7 +421,7 @@ namespace DCLF
 			// its builds. Load screen frames are the engine's (EngineState::LoadScreen).
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
 			const bool covered = draws.DecideCoverage();
-			coveredLast = covered;
+			coveredLast.store(covered, std::memory_order_release);
 			// Native mode bring-up: log why claims are not installed, once every 300 such frames.
 			if (!(covered && view.HasInstalled()) && RenderGraph::Engine::Native::Active()) {
 				static std::uint32_t s_uncovered = 0;
@@ -463,7 +492,8 @@ namespace DCLF
 	{
 		Extensions::TriggerScope trigger(Draws::CoreTriggerOf(Draws::CoreTrigger::DepthCommitted));
 		// Late poses are parts a plugin hid after the shadow maps. Confirm them before the depth epoch, so later epochs read the late copies.
-		if (LatePoses::ConfirmFrame())
+		// Native confirmed them at the end of its game half.
+		if (RenderGraph::Engine::Native::Active() ? std::exchange(latePosesHold, false) : LatePoses::ConfirmFrame())
 			FrameValues::Get().UseLatePoses();
 		// The depth epoch hosts the view passes, such as reflection faces and first-person depth, so they draw after its index pool copies.
 		// Drawn against the previous frame's pool, a reused slot would read old indices with new vertices and fault the device.
@@ -493,16 +523,32 @@ namespace DCLF
 		// Queue the frame signal before the present. EndFrame runs after the present and would ride the next frame's command list.
 		Direct::QueueFrameSignal();
 		FrameValues::Get().WaitSignalSubmitted();
+		// Native checks at the update's end, on the game side.
+		if (!RenderGraph::Engine::Native::Active())
+			LatePoses::CheckAtPresent();
+	}
+
+	void FrameDriver::GameHalfEnd()
+	{
+		const Snapshot::EngineReads::CaptureScope capture;
+		latePosesHold = LatePoses::ConfirmFrame();
+	}
+
+	void FrameDriver::UpdateEnd()
+	{
+		if (!RenderGraph::Engine::Native::Active())
+			return;
+		const Snapshot::EngineReads::CaptureScope capture;
 		LatePoses::CheckAtPresent();
 	}
 
 	void FrameDriver::EndFrame()
 	{
 		LoadHold::OnFrameEnd();
-		// The engine's next update jobs follow Present, so no worker may be inside its memory from here until the next Main::Draw.
+		// The engine's next update jobs follow Present, so no worker may be inside its memory from here until the next game half.
 		{
 			RenderThreadBudget::Part boundary(RenderThreadBudget::Bucket::EngineBoundary);
-			EngineReadWindow::HoldForRenderHalf();
+			EngineReadWindow::CloseAtPresent();
 		}
 		const auto start = std::chrono::steady_clock::now();
 		TracyCZoneN(efCull, "CS.DCLF.EF.PrimaryCull", true);
@@ -521,7 +567,7 @@ namespace DCLF
 		static std::uint32_t reportedFrame = ~0u;
 		if (const std::uint32_t frame = Scene::FrameView::Get().SceneStep(); std::exchange(reportedFrame, frame) != frame)
 			Reports::RenderThread(frame);
-		Scene::FrameView::Get().NoteLoadingScreen();
+		Scene::FrameView::Get().NoteLoadingScreen(Scene::FrameView::LoadingScreenInFrame());
 		TracyCZoneEnd(efReports);
 		counters.timing.eventsMs += MillisecondsSince(start);
 	}

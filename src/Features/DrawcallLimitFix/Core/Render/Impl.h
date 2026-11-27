@@ -27,6 +27,15 @@ namespace DCLF
 		struct MainCommit;
 	}
 
+	/**
+	 * @brief The adopted revision's family pipelines at an adoption (IndirectDraws::PublishFamilyRenderState): the render side's part
+	 * of the families' decisions. The catalog is the installed publication's, which the game half installs. Immutable once published.
+	 */
+	struct FamilyRenderState
+	{
+		std::array<std::shared_ptr<const FamilyPipelines>, Extensions::kDrawFamilies> adopted;
+	};
+
 	struct IndirectDraws::Impl final : ImplSnapshotBuilder, ImplViews, ImplProducer, ImplStats, ShadowHost
 	{
 		std::shared_ptr<Resources> resources;
@@ -158,6 +167,9 @@ namespace DCLF
 		std::array<bool, Extensions::kDrawFamilies> familyOwned{};
 		// Families whose last decision waited for pipelines. Their passes are withheld and not drawn.
 		std::array<bool, Extensions::kDrawFamilies> familyWaiting{};
+		// The render side's last published family state, and the game half's copy while it decides (one value per decision).
+		std::atomic<std::shared_ptr<const FamilyRenderState>> familyRenderState;
+		std::shared_ptr<const FamilyRenderState> familyInputs;
 		/** @brief Render thread. Creates a view's graph resources once its targets are known. */
 		bool SetupView(ViewKind a_kind);
 		/** @brief Grows a view's latch layout and buffers. */

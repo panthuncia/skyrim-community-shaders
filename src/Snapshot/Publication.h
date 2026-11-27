@@ -33,6 +33,15 @@ namespace Snapshot
 	/** @brief Adds an unrendered update's game half. Call at load (PostPostLoad). */
 	void RegisterUnrenderedUpdate(UnrenderedFn a_fn);
 
+	/**
+	* @brief Game-side work at the end of an update's call of Main::DrawFrame, after its renders (none on a dropped update). Main
+	* thread, once per game update, before the update's game logic. In phase 7 it runs after the publish, beside the render thread.
+	*/
+	using UpdateEndFn = void (*)(const FrameSnapshot& a_snapshot);
+
+	/** @brief Adds an update's game-side end. Call at load (PostPostLoad). */
+	void RegisterUpdateEnd(UpdateEndFn a_fn);
+
 	/** @brief Installs the publication hook at Main::Update's call of Main::DrawFrame (Hooks.cpp calls this). */
 	void InstallHooks();
 

@@ -106,8 +106,8 @@ lane and pool, and every frame draws the newest complete snapshot of it.
 | Point in the frame | Render thread | Scene lane and pool | GPU |
 | --- | --- | --- | --- |
 | `Main::Update`'s entry (main thread) | The frame's engine writes, at the one safe point: `kAccumulated` (`IndirectDraws::WriteAccumulated`), the fade write-back's stores, then the stand-in observers ("Main::Update's entry", below) | | |
-| The game update's capture (main thread, `Snapshot::Capture`) | Pushes the held detaches; after the publish, opens the engine-read window | | |
-| `Main::Draw`, before the main cull (`FrameDriver::SceneFrameStart`, the shell's `Main_Draw_Early` thunk; [The frame start](#the-frame-start)) | **Game half** (`GameFrameStart`, once per game update, makes the `FrameTicket`): ends the render half's hold on the engine-read window; applies the toggles; captures the frame globals and posts the frame inputs; the camera cut; hands over the snapshot the frame revision adopted at this frame's `Renderer::Begin` (`FrameView::HandOverAtFrameStart`), never waiting for a newer one; installs the claims; serves the scene lane's requests (switch catch-ups, the category capture, mirror capture requests); decides the draw families (tree LOD); publishes the scene-list filter; takes the frame values' inputs and samples first person. **Render half** (`BeginFrame`, every render, from the ticket): the graph's build point (`IndirectDraws::BuildPoint`); the coverage decision; kicks the frame values (`FrameValues::Kick`); the frame payload | **Scene pass** (`Coordinator::RunSceneWork`, whenever its producers wake the pump): events applied, walk, joins, `CommitSet`; then, at the snapshot builder's pace, `PublishScene`. **Snapshot builder** (`IndirectDraws::PostSnapshotWork`): payloads built, revision made and sealed, payload published as pooled versions. **FrameValues' producer**: placements, palettes, shading | The frame values' uploads on the upload queue; the payload's catch-up |
+| The game update's capture (main thread, `Snapshot::Capture`) | Pushes the held detaches | | |
+| `Main::Draw`, before the main cull (`FrameDriver::SceneFrameStart`, the shell's `Main_Draw_Early` thunk; [The frame start](#the-frame-start)) | **Game half** (`GameFrameStart`, once per game update, makes the `FrameTicket`): opens the engine-read window; applies the toggles; captures the frame globals and posts the frame inputs; the camera cut; hands over the snapshot the frame revision adopted at this frame's `Renderer::Begin` (`FrameView::HandOverAtFrameStart`), never waiting for a newer one; installs the claims; serves the scene lane's requests (switch catch-ups, the category capture, mirror capture requests); decides the draw families (tree LOD); publishes the scene-list filter; takes the frame values' inputs and samples first person. **Render half** (`BeginFrame`, every render, from the ticket): the graph's build point (`IndirectDraws::BuildPoint`); the coverage decision; kicks the frame values (`FrameValues::Kick`); the frame payload | **Scene pass** (`Coordinator::RunSceneWork`, whenever its producers wake the pump): events applied, walk, joins, `CommitSet`; then, at the snapshot builder's pace, `PublishScene`. **Snapshot builder** (`IndirectDraws::PostSnapshotWork`): payloads built, revision made and sealed, payload published as pooled versions. **FrameValues' producer**: placements, palettes, shading | The frame values' uploads on the upload queue; the payload's catch-up |
 | The engine's list jobs | The engine registers the passes it keeps. `PassCapture` withholds DCLF's objects; `PrimaryCull` stands in for DCLF's entries inside the list jobs; whole entries are out of the scene lists | | |
 | Inside `CalculateAndDrawShadowCasterLights` | The frame's shadow views begun and their coverage decided (`BeforeShadowCasters`), each kept light noted (`ShadowCasterKept`), the views listed from DCLF's selection (`ShadowCastersSelected`) | | |
 | `BeforeShadowMaps` | The shadow views' revision inputs and frame; then, before the engine draws the shadow maps, the occlusion maps DCLF draws this frame taken and set up (Skylighting's `RenderOcclusionAtShadowMaps`: `OcclusionReady`, the camera, `OcclusionView`, `RenderMask`'s clear) | | The maps' clears |
@@ -121,8 +121,8 @@ lane and pool, and every frame draws the newest complete snapshot of it.
 | The main pass's opaque batches | `BeforeOpaquePass`: `CaptureMainPass`. `AfterOpaquePass`: the **colour epoch** (trigger `opaque.after`) | | The drawn set into the G-buffer, depth EQUAL; decals; Terrain Blending's terrain |
 | The engine's blended draw | The **forward epoch** (trigger `blended.draw`) | | Blended objects back to front; refraction normals |
 | `Main::RenderFirstPersonView` | The **first-person colour epoch** | | |
-| `Present` (`FrameDriver::EndFrame`) | Holds the engine-read window for the rest of the render half; binds what the frame read to its last submission (`BindAdopted`, `FrameValues::EndFrame`); writes the reports | | |
-| The end of `Main::Update`'s call of `Main::DrawFrame` (main thread) | Closes the engine-read window before the update's game logic | | |
+| `Present` (`FrameDriver::EndFrame`) | Closes the engine-read window (the next update's jobs start); binds what the frame read to its last submission (`BindAdopted`, `FrameValues::EndFrame`); writes the reports | | |
+| The end of `Main::Update`'s call of `Main::DrawFrame` (main thread) | The update's game-side end (`FrameDriver::UpdateEnd`: native's late-pose check); closes the engine-read window if still open, before the update's game logic | | |
 | The frame-job wait after it (main thread, `MainTick`) | Lets go of the retire queue's engine lane (DCLF's engine references among them): no engine job runs beside it | | |
 
 An epoch's position matters to the work after it. Streamline's upscalers and frame generation must not run on the GPU directly
@@ -353,13 +353,12 @@ push events, and the list jobs `PrimaryCull` stands in for.
 
 ### The engine-read window
 
-When a worker may touch the engine's scene graph (`Core/Engine/EngineReadWindow.h`): the game-side capture window (render-thread
-roadmap, phase 6). It opens on the main thread after the game update's publish and closes at the end of `Main::Update`'s call of
-`Main::DrawFrame`, before the update's game logic. The render side never takes a lease (the report counts main-thread leases).
--   **The render half's hold.** While the engine's render half runs inside the window it writes the scene graph outside `Main::Draw`
-    to Present (the decal manager's attaches before `Main::Draw`; the next update's jobs after Present). The window is held there
-    (`HoldForRenderHalf` at each `DrawFrame` call and at Present, `ReleaseRenderHalf` at the frame start's game half), so leases are
-    taken from `Main::Draw` to Present as before. A dropped cadence update (no render half) leaves the whole window readable.
+When a worker may touch the engine's scene graph (`Core/Engine/EngineReadWindow.h`): open exactly while the engine only reads it.
+It opens in DCLF's game half (`FrameDriver::GameFrameStart`: `Main::Draw`'s SetupSunAndSky, or a dropped update's game half) and
+closes where the engine's next update jobs start (Present today, `CloseAtPresent`, main thread inside a game update only), and at the
+latest at the end of `Main::Update`'s call of `Main::DrawFrame` (`Close`). Before the game half `DrawFrame` writes the scene graph (the
+decal manager's attaches). A repeated render has no game half, so its window stays closed; menus and loading screens never open it. The
+render side never takes a lease (the report counts main-thread leases). Phase 7 moves `CloseAtPresent` to the game thread's publish.
 -   A worker touching engine memory takes a `Lease` per item or per `ParallelFor` chunk. A refused lease means the window closed,
     and the rest waits for the next window: nothing refused is dropped. FrameValues hands a refused shading item back to the next
     Kick (`RefusedShading`): a static object's slot is named once, so a dropped item left its row zero for the session (alpha 0:

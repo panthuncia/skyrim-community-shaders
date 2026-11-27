@@ -31,9 +31,9 @@ namespace DCLF::Reports
 				job("animated cell objects", w.animatedObjects), c.suspends, c.suspendsWaited, c.suspendWaitedUs, c.suspendWaitedMaxUs);
 		}
 		return fmt::format(
-			"[DCLF] engine-read window: {} closes and {} render-half holds, {} of them waited for items in flight ({:.1f} us in all, max {:.1f} us){}; "
+			"[DCLF] engine-read window: {} closes, {} of them waited for items in flight ({:.1f} us in all, max {:.1f} us){}; "
 			"{} leases refused (work left for the next window); main-thread leases {}{}; scene work engine accesses without a lease {}{}{}",
-			c.closes, c.holds, c.closesWaited, c.waitedUs, c.waitedMaxUs, writers, c.refused, c.mainThreadLeases, c.mainThreadLeases ? " <- RENDER-SIDE LEASE" : " <- OK",
+			c.closes, c.closesWaited, c.waitedUs, c.waitedMaxUs, writers, c.refused, c.mainThreadLeases, c.mainThreadLeases ? " <- RENDER-SIDE LEASE" : " <- OK",
 			c.unleased, c.unleased ? " <- LANE ENGINE ACCESS; first: " : " <- OK", c.unleasedFirst ? c.unleasedFirst : "");
 	}
 

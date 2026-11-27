@@ -3,7 +3,9 @@
 // FrameTicket: what DCLF's frame start took of the game, once per game update, for the render half.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -50,6 +52,7 @@ namespace DCLF
 		bool utilityShader = false;     // the engine's utility shader exists (its shadow techniques)
 		std::shared_ptr<const FrameGlobals> globals;
 		std::shared_ptr<const LatePoses::FramePlan> latePlan;  // every render of the ticket uses it
+		std::array<std::shared_ptr<const void>, kTicketParts> parts;  // the features' values (RegisterTicketPart)
 		mutable std::atomic<OneShot*> oneShot{ nullptr };
 	};
 }
