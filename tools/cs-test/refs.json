@@ -1,4 +1,22 @@
 {
+  "guest+menu-loading/loading-model": {
+    "sha256": "a912aafdd74562361936f63cc8be76c59567ba63654fd3e17a4c8d571fab0527",
+    "size": "1920x1080",
+    "run": "1126-204513-s7-menus5-guest-menu-loading-s7-menus5-fin-guest-loading",
+    "accepted": "2026-11-26"
+  },
+  "guest+menu-loading/world": {
+    "sha256": "082a1a9baa02b488cd3ae861593195692374945964680ff7dce9ad45240c71dc",
+    "size": "1920x1080",
+    "run": "1126-204513-s7-menus5-guest-menu-loading-s7-menus5-fin-guest-loading",
+    "accepted": "2026-11-26"
+  },
+  "guest+menu-lockpick/lockpick": {
+    "sha256": "f3545abf1c298dfec791f41146607838d4a829f226690f70d9556b9fb7b3a3ac",
+    "size": "1920x1080",
+    "run": "1126-204635-s7-menus5-guest-menu-lockpick-s7-menus5-fin-guest-lockpick",
+    "accepted": "2026-11-26"
+  },
   "guest+menu-scenes/inventory-item": {
     "sha256": "6524a1b19b84d744256f9257a08df82cf5e959248acba6b09840dfaf0f0e37ed",
     "size": "1920x1080",
@@ -51,6 +69,24 @@
     "sha256": "fa73c553eb61400aef42ebfdf55aee653c218787e1a637300766f4021fe1d43d",
     "size": "1920x1080",
     "run": "1126-195159-s7-menus4-native-vulkan-menu-items-s7-menus4-m1-native-vulkan-menu-items",
+    "accepted": "2026-11-26"
+  },
+  "native-vulkan+menu-loading/loading-model": {
+    "sha256": "c9e116ed5b8f8a26c0cb516f6738a877815823f475e9f14a1d453d47bd0991b1",
+    "size": "1920x1080",
+    "run": "1126-204435-s7-menus5-native-vulkan-menu-loading-s7-menus5-fin-nvk-loading",
+    "accepted": "2026-11-26"
+  },
+  "native-vulkan+menu-loading/world": {
+    "sha256": "4906bc05b1fa89953fc3c552265c75bfe3e5977584bc3243c3cc7066a30a044a",
+    "size": "1920x1080",
+    "run": "1126-204435-s7-menus5-native-vulkan-menu-loading-s7-menus5-fin-nvk-loading",
+    "accepted": "2026-11-26"
+  },
+  "native-vulkan+menu-lockpick/lockpick": {
+    "sha256": "1932daab90362765c77cbf4ed0f6e5fa4cc842fe79c4897fa7c52b600fe794a2",
+    "size": "1920x1080",
+    "run": "1126-204555-s7-menus5-native-vulkan-menu-lockpick-s7-menus5-fin-nvk-lockpick",
     "accepted": "2026-11-26"
   },
   "native-vulkan+menu-scenes/inventory-item": {

@@ -823,3 +823,43 @@ pushes until the user is back.
      loading model (scheme 4 with a depth pass: needs a menu-geometry shadow depth path, then masks and shadow bits;
      about 20 engine calls per loading-model render), lockpick (no cs-test step opens it), book (Scaleform page target
      import), journal (no 3D scene seen), local map.
+
+## 2026-11-26: loading model and lockpicking are native (snap5-menus5; director accepted)
+
+189. **The loading model is CS's** (MistMenu owned whatever the depth-pass flag): `MenuScenesShadows.cpp` runs the menu's
+     shadow-light loop (FUN_140973210) with the native shadow ports; `Shadows::Engine::RenderMenuLight` does the world
+     Render bookkeeping without the camera-state tail; shadow maps and the depth pass are Utility draws CS computes (a
+     port of BSUtilityShader's three Setup functions); `ShadowMask::DrawMenuMasks` builds the menu masks (cleared to
+     white); Lighting gets its shadow bits, ShadowLightMaskSelect and t14. Paraboloid lights draw every caster in the
+     sphere on both hemispheres (the clip drops the far side); shadow maps use write mode 0; the portal light call
+     FUN_1414a2530 is not made. Alpha-test reference is threshold x 0x3B808081 (as the engine). Loading frames: 11.8 ->
+     0.0 engine render calls.
+190. **Lockpicking (scheme 7) is CS's** (observe 0 differences). cs-test gains `lockpick` and `book` commands and the
+     `menu-loading` and `menu-lockpick` configs.
+191. **Open bug: opening a book in native mode is fatal** (independent of menu scene ownership): BookMenu's ImageSpace copy
+     into kBOOK_TEXT_0 (rt105) has no CS pass (frame tap error). Needs that copy as a UI-stage step, the native Scaleform
+     renderer drawing into kBOOK_TEXT_n, and an import of that target. The journal has no 3D scene. Left: the local map;
+     deleting `CS_MENU_SCENES_OBSERVE` waits for the book.
+
+## 2026-11-26: CS drives the native frame skeleton; phase 3's goal met (snap3-skeleton; director accepted)
+
+192. **Decision 70 built:** in native, a call-site thunk on DrawFrame's world call of RenderScene (SE 35556 +0x2DC, AE
+     36555 +0x4C8; byte-checked, native only) runs `Native/RenderScene.cpp` instead of Main::RenderScene and
+     RenderPlayerView. It calls CS's points in the engine's order through each call site's hook chain
+     (`EngineZones::CallTarget`, so every feature's wrapper still runs). Game-side work stays in place in engine order:
+     the reflections camera 415299, the list processes' camera and frustum with ProcessAllQueuedLights (106337), the
+     first-person root's hidden bits and the sky node around the casters, the first-person shift (40573 with
+     107123/107124, whose camera DCLF reads), sky colours copied into the lighting shader and the SAO and snow helpers,
+     the first-person camera port, Main::Draw's tail (107143). The three clears before RenderWorld go through the
+     skeleton. Dropped: SetCameraData and the State camera cache, clear colours, viewport and target binds, dirty bits,
+     eye writes, 107122, the 76557 resets, the map-menu flag, 107018, the refraction group count and clears,
+     GetFirstPersonNodePosition, stage events 6/7 and 39034 (CS does them). Observe: only the shadow state's binds and
+     viewport differed, which every native reader takes from `WorldPass::Current()` or sets itself.
+193. **Native SSR takes the snapshot camera's view** (the State camera cache entry it read is no longer filled). Guest
+     keeps the old lookup.
+194. **Phase 3's detector goal is met:** native world frames make 1 engine render call (Main::DrawFrame, CS's hook; was
+     9-17), loading frames 0 (189), main-menu frames 1. What remains in DrawFrame (Renderer Lock/Begin/End, UI and
+     input helpers, 51639's camera globals for WorldPtToScreenPt3, 107698/107646/107502 for engine-drawn menu scenes) goes
+     with phase 7. Open: after a pov switch from third person, native never runs the first-person block (the root stays
+     hidden since ClearMasks is skipped; pre-existing, an engine-only build shows the same); first person still draws
+     through DCLF's Z-prepass.

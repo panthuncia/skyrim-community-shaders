@@ -1,15 +1,12 @@
 # Native rendering on its own thread: roadmap
 
-Status (2026-11-26, late): phases 0, 1 and 2 done (`snap0-*.md`, `snap1-*.md`, `snap2-*.md`). Phase 3: game-side side
-effects, stealth lights, native shadow casters, the main sky and water from game data, no main registration jobs and no
-engine list culls in native (`snap1-sidefx.md`, `snap3-lights.md`, `snap3-scene.md`, `snap3-lists.md`, `snap3-culls.md`);
-native Main::RenderWorld with no resolve function and screen blood (`snap3-rworld.md`, `snap3-resolve.md`, `snap3-engstate.md`, `snap3-accum.md`); left: decision 127. Phase 4 done in-frame: native makes no game UI renderer call
-(`snap0-ui.md`, `snap4-ui2.md`). Phase 5: ImageSpace selection and constants, the TAA reset, vanilla and save screenshots,
-and every frame kind as a snapshot are done (`snap5-imagespace.md`, `snap5-isrest.md`, `snap5-kinds.md`); menu scenes and
-the image-based lens flares are left. Phase 6 is done: the retire queue (`snap6-life.md`) and DCLF on it, with the
-engine-read window game-side (`snap6-dclf.md`). Phase 7 is prepared and planned (`snap7-prep.md`). Live engine reads in native Vulkan's world frame:
-1,848 at the phase 0 baseline, about 560-780 now (scene-dependent); engine render calls per native world frame: 74 at the
-baseline, about 20-33 now.
+Status (2026-11-26, night): phases 0, 1 and 2 done. Phase 3 done: native world frames make 1 engine render call
+(Main::DrawFrame, CS's hook; 74 at the baseline), CS drives the frame skeleton (`snap3-skeleton.md`); all the snap3-*
+notes cover the steps. Phase 4 done in-frame (`snap0-ui.md`, `snap4-ui2.md`). Phase 5: ImageSpace, frame kinds, and the
+menu scenes for stats, main menu, loading model (loading frames 0 calls), inventory and lockpicking are native
+(`snap5-*.md`); the book (fatal in native today), the local map and the image-based lens flares are left. Phase 6 done
+(`snap6-life.md`, `snap6-dclf.md`). Phase 7 is prepared and planned (`snap7-prep.md`); what is left in DrawFrame
+(Renderer Lock/Begin/End and UI helpers) goes with it.
 Every decision since the roadmap, with the
 side-effect fates, is in [render-thread-decisions.md](render-thread-decisions.md); add new ones there. It follows round 3
 of the render-thread work (`render-thread-window.md`) and the fully native direction.
