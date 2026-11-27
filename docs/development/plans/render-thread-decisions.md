@@ -1190,3 +1190,17 @@ pushes until the user is back.
      the device-fault report lists those near the faulting address (DL-b; BasicRHI branch snap7/devloss). Merge checks:
      resize passed; native-d3d12-quick's shot once showed the land as a flat grey plane (rerun passed; possibly the same
      race, passed to snap7-devloss2).
+
+## 2026-11-27: cleanup pass, first round (post-cleanup; director accepted)
+
+230. **Cleanup round 1** (roadmap "After phase 7" item 1; `post-cleanup.md`). No migration-only switch was left; the
+     roadmap's three (`CS_SNAPSHOT_DETECT`, `CS_SNAPSHOT_CADENCE`, `CS_ENGINE_ZONES`) stay, the last because it feeds
+     cs-test's engine render counts. Consolidated: `Snapshot::CurrentBlock<T>()`, `Snapshot::StepOnce`, `Builder::Set(T&&)`;
+     one `Native/EngineAccess.h` (engine globals, fields, required calls, memory context) replacing copies in six passes and
+     the shadow code; one engine-state writer for guest and native; one frame start for both detectors; shadow camera tests
+     in ShadowCameras; test tasks through `GameThread::Post`; UiStream and the replay share blend/perspective rules; `Park`
+     takes a `ParkReason` (unrendered updates counted on their own). Removed unread snapshot fields, flags and API, observe
+     leftovers (written masks, the Scaleform repeat check, the GameCall census) and dead local-map imports. The native
+     bring-up log now prints in guest too, and test tasks run earlier in MainTick (both accepted). Proposals P1-P26 go to
+     post-cleanup2 (P14/P15 after snap7-devloss2). Full suite on the merge: 24/24 after native-interior's vl-exterior shot
+     caught a random foggy weather once; that config now forces clear weather (`fw 81a`) outside.

@@ -60,8 +60,15 @@ frames = 1
 do = "console"
 arg = "coc Whiterun"
 
+# Clear weather: a random foggy weather outside hides the scene and fails the shot.
 [[steps]]
 at = "world-ready"
+frames = 0
+do = "console"
+arg = "fw 81a"
+
+[[steps]]
+at = "previous"
 frames = 400
 do = "shot"
 arg = "vl-exterior"
