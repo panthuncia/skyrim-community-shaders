@@ -263,6 +263,18 @@
     "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+native-tour/start": {
+    "sha256": "c6849db483f02913b84e3b7f54e342272408b0d57af93fdc1a77a0ee3236747f",
+    "size": "1920x1080",
+    "run": "1127-173705-post-refs-native-vulkan-native-tour-post-refs-n1-tour",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+native-tour/whiterun": {
+    "sha256": "2f47bfb1a1ae8c3c66deffb6c15b3f0cfdaf98c3338451781db2d5b9c75276cf",
+    "size": "1920x1080",
+    "run": "1127-173705-post-refs-native-vulkan-native-tour-post-refs-n1-tour",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+post-effects/bloom-blend": {
     "sha256": "d141367a942471c0c23119fb16bf3075b26a8774ae9a673fad1df192e049e268",
     "size": "1920x1080",
@@ -387,6 +399,24 @@
     "sha256": "204f804ebf3f305f3de6ca0f43cc17716e49d86f69ce753f49ffdbe2d1e91dbd",
     "size": "1920x1080",
     "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap30/settled": {
+    "sha256": "97411bd87850e1c352a1c24ffe6dc28cee5ec7b8c96958cc823a3e923281b018",
+    "size": "1920x1080",
+    "run": "1127-172648-post-refs-native-vulkan-update-cap30-post-refs-n1-uc30",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap30/start": {
+    "sha256": "9378d631b1162ed191ef882edebf1d4cb77b85e0f4c7fd7a6104283a91d3af66",
+    "size": "1920x1080",
+    "run": "1127-172648-post-refs-native-vulkan-update-cap30-post-refs-n1-uc30",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap30/turn": {
+    "sha256": "717a87000fd3e43c3073e8b77520924455a620dbda1d9a54aa7e76eee8d7c01c",
+    "size": "1920x1080",
+    "run": "1127-172648-post-refs-native-vulkan-update-cap30-post-refs-n1-uc30",
     "accepted": "2026-11-27"
   }
 }
