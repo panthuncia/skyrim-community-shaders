@@ -419,6 +419,30 @@
     "run": "1127-175639-post-refs-native-vulkan-rain-post-refs-n1-rain",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+save-screenshot/loaded": {
+    "sha256": "46f97c6370fc0accbc40bc1d306b5e69f3e65f10260a885978fc3eb05624d841",
+    "size": "1920x1080",
+    "run": "1127-185146-post-refs-native-vulkan-save-screenshot-post-refs-n1-ss",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+save-screenshot/saved": {
+    "sha256": "6e24406b51951f3eea1c4ba5777200998e87fa6a527ada739017a55d221fd6d4",
+    "size": "1920x1080",
+    "run": "1127-185146-post-refs-native-vulkan-save-screenshot-post-refs-n1-ss",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+screen-blood/blood": {
+    "sha256": "52d7c904bb7a870759b0cf76cafe837d046b6780a24a4c2e948551d09d517f78",
+    "size": "1920x1080",
+    "run": "1127-180512-post-refs-native-vulkan-screen-blood-post-refs-n1-blood",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+screen-blood/blood2": {
+    "sha256": "d821cf0acb23f960c7fe97a0c7e7be83832d88eac3c1a9a4cd05bba03697d523",
+    "size": "1920x1080",
+    "run": "1127-180512-post-refs-native-vulkan-screen-blood-post-refs-n1-blood",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+shadows-blend/blend-off": {
     "sha256": "61d7c2617b8e161ba9343710445408c02f4042017d845bff7e50ccc97e0a2a89",
     "size": "1920x1080",

@@ -20,6 +20,25 @@ frames = 1
 do = "console"
 arg = "player.restoreav health 100000"
 
+# Time stopped at 13:00 and the weather locked, so the shots compare with references (AI must stay on until the bandit hits).
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
 [[steps]]
 at = "previous"
 frames = 1
@@ -80,3 +99,5 @@ no_log = ["frame tap error", "blood splatter: a native draw is left out: the fla
 
 [expect.graph_frames.min]
 "cs.blood-splatter" = 1
+
+shot_refs = ["blood", "blood2"]   # the splatters are random: these hold only the coarse check (8 wrong tiles at most between native runs)
