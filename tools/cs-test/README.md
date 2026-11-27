@@ -124,11 +124,10 @@ A step after a coc or a `load` is anchored at that load's `world-ready` instead 
 ### Steps
 
 - `at` is a milestone or `previous`. A milestone anchors the step at its first occurrence at or after the previous step ran.
-  Every load records `load-start` and `world-ready` again: a loading menu (a save loaded, a coc into another cell) or a
-  teleport, a player move of more than 1024 units between two Presents (a coc nearby loads with no loading menu;
-  `loading-screen` is recorded only when the menu shows). A `player.setpos` that far counts too. So a step after a coc or
-  `load` uses `at = "world-ready"` with `frames` to settle: 60-120 for a shot (a Riverwood coc's fade-in was still black 36
-  frames after world-ready), more where the scene needs it. Counting frames from the coc with `previous` lands on the loading
+  Every load records `load-start` and `world-ready` again: every load calls ServingThread::SetLoadingScreenActive, which
+  the runner counts (a coc nearby calls only its false half and shows no loading menu, so `loading-screen` is recorded only
+  when the menu shows). A `player.setpos` is not a load. So a step after a coc or `load` uses `at = "world-ready"` with
+  `frames` to settle: 400 for a shot (120 still fell inside the fade-in at full frame rate), more where the scene needs it. Counting frames from the coc with `previous` lands on the loading
   screen or the fade-in when the load is slow.
 - A step waiting for its milestone while the world is ready and no load is under way fails after `wait_s` (else
   `timeouts.step_wait`): `step N: waited 60 s for world-ready after the previous step, and no load started` (a coc to where

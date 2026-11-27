@@ -166,7 +166,7 @@ The game rewrites this file about once a second and at every milestone and outco
   snapshot <id> (render frame <n>)`): a shot asked at game frame N is the first render of snapshot N or later.
   `expect.live_frames` and the graph-frames report count rendered frames.
 - **`phase`** is one of `boot`, `compiling`, `menu`, `loading`, `world` and `exiting`.
-- **Milestones** are recorded the first time each is reached. Every later load records `load-start` and `world-ready` again (and `loading-screen` and `held-frame` when it shows them), in a `loads` array of the same shape. A load is a loading menu (a save loaded, a coc into another cell) or a teleport: the player moved more than 1024 units between two Presents, as a coc nearby does, which loads with no loading menu.
+- **Milestones** are recorded the first time each is reached. Every later load records `load-start` and `world-ready` again (and `loading-screen` and `held-frame` when it shows them), in a `loads` array of the same shape. A load is any ServingThread::SetLoadingScreenActive call, which the runner counts: a loading menu (a save loaded, a coc into another cell) or a coc nearby, which calls only the false half and shows no loading menu.
 - **`config.unchecked`** lists `CS_DCLF_*` names that may be DCLF feature switches but could not be checked, because DCLF did not install.
 - **held-frame** is recorded at the first world frame of a load drawn under the loading menu DCLF's load hold keeps up.
 - **world-ready** is recorded when all of these hold:

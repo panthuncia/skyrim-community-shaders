@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 /**
 * @brief The loading screen and the startup logo on the render graph, in the graph modes.
 *
@@ -12,4 +14,10 @@ namespace RenderGraph::Engine::LoadingScreen
 {
 	/** @brief Main thread, at plugin load. Detours SetLoadingScreenActive in every mode. */
 	void Install();
+
+	/**
+	* @brief How many SetLoadingScreenActive calls have returned, true or false. Any thread. Every load makes at least one: a coc
+	* nearby makes only the false call, with no loading menu.
+	*/
+	std::uint64_t Calls();
 }

@@ -804,3 +804,6 @@ pushes until the user is back.
      not seen (the step fails after 60 s). An exact signal (counting `SetLoadingScreenActive(false)` in
      Snapshot/Publication) was not added: the lead's edit outside its boundary was refused by the permission system;
      left for the user to decide.
+186. **Refines 185 (user):** cs-test sees every load by counting ServingThread::SetLoadingScreenActive calls
+     (`LoadingScreen::Calls()`, both halves; a coc nearby makes only the false call). The 1024-unit jump test is gone, so
+     a `player.setpos` is no longer a load and a coc to the player's own spot is seen.

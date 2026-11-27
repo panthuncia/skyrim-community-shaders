@@ -11,6 +11,8 @@ namespace RenderGraph::Engine::LoadingScreen
 {
 	namespace
 	{
+		std::atomic<std::uint64_t> g_calls{ 0 };
+
 		/**
 		* @brief ServingThread::SetLoadingScreenActive (SE 34552, AE 35407), on the main thread. False returns only after the loop's last iteration.
 		* Logged only, since the frames claim rendering at their own Begin.
@@ -26,6 +28,7 @@ namespace RenderGraph::Engine::LoadingScreen
 				func(a_active);
 				if (!a_active)
 					Frame::Driver::OnLoadingScreen(false);
+				g_calls.fetch_add(1, std::memory_order_release);
 				if (!GraphMode())
 					return;
 				if (a_active) {
@@ -48,4 +51,6 @@ namespace RenderGraph::Engine::LoadingScreen
 		// Hooked for the frame driver in every mode.
 		stl::detour_thunk<SetLoadingScreenActive>(REL::RelocationID(34552, 35407));
 	}
+
+	std::uint64_t Calls() { return g_calls.load(std::memory_order_acquire); }
 }
