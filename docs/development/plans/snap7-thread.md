@@ -111,7 +111,7 @@ point (`Scaleform::ReplaySnapshotUi`), with DrawInterface's render-side detours 
 
 | # | Package | Single-thread testable | Status |
 |---|---|---|---|
-| P | Game-half accessors and thread-identity cleanups: `Snapshot::Building()` for game-half readers; FrameGlobals scope over the whole game half; `SampleEngine` into the capture; `FrameOnlySource`/`FreezeTestAtBegin` without `IsMainThread`; the engine-read window closed at the update's end; `MakeRegistered` at install; the kept rows handed to the render side as copies or views; the fade statics and the per-render fade kick's camera from the ticket | yes | see section 6 |
+| P | Game-half accessors and thread-identity cleanups: `Snapshot::Building()` for game-half readers; FrameGlobals scope over the whole game half; `SampleEngine` into the capture; `FrameOnlySource`/`FreezeTestAtBegin` without `IsMainThread`; the engine-read window closed at the update's end; `MakeRegistered` at install; the kept rows handed to the render side as copies or views; the fade statics and the per-render fade kick's camera from the ticket | yes | done (snap7/thread-prep), section 6 |
 | U | UI producer record-only (3.5) | yes (record, then replay at once) | see section 6 |
 | S1 | CS's game frame in place of Main::DrawFrame for routed updates, game half before the render half, scene pairing (3.2, 3.4), still one thread | yes | |
 | S2 | The render thread (3.3), parking, cross-thread checks, PaceGameUpdate on | - | |
@@ -125,7 +125,92 @@ point (`Scaleform::ReplaySnapshotUi`), with DrawInterface's render-side detours 
 
 ## 6. Steps landed
 
-(none yet)
+### Package P (sub-lead `th-prep`, branch `snap7/thread-prep`)
+
+Still one thread; no visible change. What each item changed, and what the render thread needs from it:
+
+1. **Game-half readers of the snapshot.** New `Snapshot::Building()` (Publication.h): the newest game update's snapshot `Capture()`
+   built, set only by `Capture` (a frame-only snapshot never replaces it); its id is the existing `LastGameId()`. Today it equals the
+   adopted one inside an update; a cadence repeat renders it again; a dropped update's is never adopted (its game half gets it passed).
+   Converted: `RenderScene` (the snapshot `PrepareFrame` gets), `FirstPersonLatch`, the ticket's id in `SceneFrameStart`
+   (`MakeTicket(LastGameId())`), and the map's re-entry (`LoadHold::BeginReentry(why, frame)` and `FrameView::LoadShownIn(frame)` /
+   `LoadingScreenIn(frame)` take the asking half's snapshot). Left on `Current()` because they are render half: `WaterEffects::Render`
+   (it records water faces; it still runs at SetupSunAndSky inside the game half, the lead must move it to the render half),
+   `HoldsScene`, the load checks at the frame end. For S1: `Building()` is set after the feature captures, just before the publish;
+   when DrawInterface records between build and publish (th-ui), it must be set when the snapshot is built.
+2. **FrameGlobals.** The driver's game half binds the ticket's globals from DCLF's frame start to its end
+   (`FrameGlobals::BeginGameHalf`/`EndGameHalf`, bracketed by the new `FrameDriver::GameHalfStart`, called from `PrepareFrame` through
+   `DrawcallLimitFix::OnNativeGameHalfStart`); `Current()` order is scope, game half, render owner's latest. The render owner (not "the
+   thread that last adopted") reads the latest adopted capture. The unscoped-read error (snap7-sky open item 5) was a loading screen's
+   menu scene on the serving thread (`MenuViews::Scenes::Native::SampleInputs -> MaterialPort::SampleFrame`, 31,722 reads in quick's
+   loading frames) and 90 reads in main-menu frames before the first adoption: both are render-owner reads, now served the latest.
+   The error line logs its thread and callers (module+offset) if it ever fires again. Render thread: nothing; it reads the latest
+   because it owns rendering after its Begin.
+3. **Native::Scene::Current()** is the `Prepared` handed to `RecordFrame`, set only while it records (`g_rendering`); the game half
+   writes no global. `PrepareFrame` takes the normals target by the engine's rule (`WorldPass::EngineNormalsTarget`); the skeleton's
+   clear reads `a_frame.normalsTarget`. Render thread: call `RecordFrame(payload.prepared, ...)`; its readers (WorldPass,
+   FirstPersonEpochs, NativeCasters, LightLimitFix, NativePost) need nothing else.
+4. **Frame driver thread checks.** `SampleEngine`: the game thread takes the values into `FrameSnapshot::engine`
+   (`Snapshot::EngineValues`: TES interior, the VL descriptor's size) in `Capture` and in a main-thread `CaptureFrame`; a loading
+   screen's or movie's frame-only snapshot keeps the last. OnBegin sets the variables from the adopted snapshot on any thread.
+   `FrameOnlySource`: marks instead of `IsMainThread`: movie ticks (as before), a new detour of the serving thread's loop
+   (`RunLoadingScreen`, SE 38085 / AE 39039, `void()`), `Snapshot::InGameUpdate()`, and the hook point
+   `Frame::Driver::GameSnapshotRenderScope` (FrameDriver.h): **the render thread opens one for its loop**, so its Begin adopts the
+   newest published snapshot without a frame-only publish. `FreezeTestAtBegin` reads the freeze answer its own Begin decided on the
+   same thread (thread-locals set by `DecideKind`), so a Begin on the render thread cannot race it. `State::loading` was only the
+   warning's and is gone.
+5. **Engine-read window.** Native closes it at the end of the update's renders in `MainUpdate_DrawFrame`, before
+   `SideEffects::AfterRenderHalf` raises the job stages; DCLF's `EndFrame` closes at Present in guest only (`CloseAtPresent` without the
+   thread check: only the main thread is ever inside a game update). The close/wait counters are atomics (`Take` from any thread).
+   A cadence repeat now renders with the window open (it was closed at the first render's Present): only sampling jobs take leases,
+   and the game half kicks those. Lead: move `Close()` to the publish.
+6. **FrameValues.** The upload job takes copy-on-write views of the kept rows (`KeptWholeArray::Shared()`) just before `done`;
+   `RowsIfDone`/`PalettesIfDone`/`ShadingIfDone` return `const KeptChunks<T>*` of those views; `EndFrame` releases them once the job
+   is done, so in today's frame no sampling job ever copies. With a render thread a sampling job that runs while a render still holds
+   them copies the array first (the store's own copy-on-write). `ForwardRowsFilled` was already safe (the job fills a render-owned
+   slot before `done`). Registered pools are made with the built-in ones at FrameValues' construction (a magic static), with a fatal
+   check that every feature registered first; no lazy make from either side. The chain stays lock-free.
+7. **Fades.** New ticket part `TicketPart::Fades` (`FadeState::TakeTicketPart`, game half): the engine's fade values (one update's
+   step), the main camera's position, LOD factor and frustum, the tree height test. `SampleFrame`, `FadeEye`, `TreeHeightTest`,
+   `LatchGlobals` and the new `MainCameraFrustum` read it; native's render side reads only the ticket, guest keeps reading the fade
+   values and the camera live at its render points. `FadeState::BeginFrame`, its statics, `MainCamera` and the root states'
+   `frameStart` hook are gone. The fade counter and step time are written only in Main::Update before its DrawFrame call (Ghidra
+   xrefs), so the game half's values equal the old per-render reads in native.
+8. **Thread-locals.** `t_renderHalf` (SideEffects) is read only by the `SetJobTaskEvent` detour on the thread inside Main::DrawFrame;
+   the render thread never calls DrawFrame, so nothing changes. `t_inGameUpdate` readers: `FrameOnlySource` (the render thread uses
+   `GameSnapshotRenderScope` instead), guest's `CloseAtPresent`, the harness (`Testing::Shot`'s minimum snapshot on the game thread and
+   `Testing::OnGamePresent` at Present: package I must give the harness's Present its update explicitly).
+
+Runs (stage `s7-thprep`, Dev-Fast; build a = all items before the render-owner fix, b = final code; all passed):
+
+| Config | Label | Result |
+|---|---|---|
+| native-vulkan+quick, `CS_SNAPSHOT_DETECT=1` | s7-thprep-a-nvk-quick | passed with the shot reference; record game-mutated 0.00, frame start 0.04 (render-owned target tables, as snap7-ticket); one unscoped FrameGlobals read logged (the loading screen's menu scene) |
+| guest+quick | s7-thprep-b-guest-quick | passed |
+| native-vulkan+quick, `CS_SNAPSHOT_DETECT=1` | s7-thprep-b-nvk-quick | passed with the shot reference; record game-mutated 0.01 + 0.01 (one-time Grass ini and SSGI reads, as snap7-sky), frame end none, frame start 0.05 (8 reads, render-owned); no unscoped FrameGlobals read |
+| native-vulkan+cadence-drop-cells | s7-thprep-b-nvk-cadence-drop-cells | passed, 3 shots |
+| native-vulkan+cadence-repeat | s7-thprep-b-nvk-cadence-repeat | passed, 3 shots |
+| native-vulkan+first-person-switch | s7-thprep-b-nvk-first-person-switch | passed, 7 shots |
+| native-vulkan+native-interior | s7-thprep-b-nvk-native-interior | passed, 4 shots |
+| native-vulkan+llf-local-shadows | s7-thprep-b-nvk-llf-local-shadows | passed, 6 shots |
+| native-vulkan+menu-loading | s7-thprep-b-nvk-menu-loading | passed, 2 shots |
+
+No run in build b logged the unscoped-read error. Skipped: native-d3d12-quick (no ORG, BasicRHI or native device code changed).
+
+Left for the lead: split `FrameDriver::SceneFrameStart` (game: `MakeTicket` + `BeginGameHalf`; render: `BeginFrame` from the
+payload's ticket); move `WaterEffects::Render` out of the game half; `EngineReadWindow`'s `mainThreadLeases` diagnostic still uses
+`IsMainThread`; LoadHold's `hold` struct is written by both halves (game half's map re-entry, render half's occlusion re-entry and
+frame end): a render-thread design needs the map's re-entry posted as a message.
+
+Decided by the agent, to confirm:
+- P-a. Registered frame-value pools are made at FrameValues' construction rather than literally at install: the built-in pools are
+  made there too, and making either before the graph host exists is untested.
+- P-b. A thread that begins a frame outside a movie tick, the serving loop and a game update counts as a main-thread frame (it was a
+  loading screen with a warning); none is known.
+- P-c. Native closes the engine-read window after all of an update's renders, so cadence repeats render with it open.
+- P-d. Guest keeps live fade values and camera at its render points (as SKY-a); it reads eye and tree height from the ticket, which it
+  already took at the frame start.
+- P-e. A movie's or loading screen's frame-only snapshot keeps the last engine values (the old code did not sample off the main thread).
 
 ## 7. Decided by the agent, to confirm
 
