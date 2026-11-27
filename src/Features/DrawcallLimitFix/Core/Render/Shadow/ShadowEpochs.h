@@ -1,6 +1,11 @@
 #pragma once
 
-// Helpers shared by the shadow epoch files. Include it after Internal.h.
+// Helpers shared by the shadow epoch files.
+
+#include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowFrame.h"
+#include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowPayload.h"
+
+#include <cstdint>
 
 namespace DCLF::Draws
 {

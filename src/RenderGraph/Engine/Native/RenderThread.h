@@ -2,6 +2,7 @@
 
 #include "RenderGraph/Engine/Native/RenderScene.h"
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -104,9 +105,27 @@ namespace RenderGraph::Engine::Native::RenderThread
 	 */
 	void Superseded(const Snapshot::FrameSnapshot& a_old, const Snapshot::FrameSnapshot& a_fresh);
 
+	/** @brief The waits the stats line totals: the game thread's and the render thread's, by what they wait on. */
+	enum class Wait : std::uint8_t
+	{
+		UpdateCap,    // game thread: the update-rate cap (Snapshot::PaceGameUpdate)
+		FrameJobs,    // game thread: the game frame's wait for the UI jobs
+		ReflexSleep,  // render thread: Reflex's sleep before a render's adoption (the input poll's without the render thread)
+		RenderLock,   // render thread: taking Renderer::Lock
+		LastRender,   // render thread: the depth commit's wait for the last render's GPU work
+		Count
+	};
+
+	/** @brief Adds a_duration to a_wait's total for the stats line. Any thread. */
+	void CountWait(Wait a_wait, std::chrono::steady_clock::duration a_duration);
+
 	/** @brief Whether this thread is inside a routed render half: its Present belongs to no game update. */
 	bool InRoutedRender();
 
-	/** @brief One line for the snapshot log: routed and unrouted updates, inline interfaces, since the last line. Empty outside native. */
+	/**
+	* @brief One line for the snapshot log, since the last line: routed and unrouted updates, inline interfaces, parks; renders of fresh
+	* and repeated snapshots, the time from a snapshot's publish to its first render's adoption and end; each thread's waits. Empty
+	* outside native.
+	*/
 	std::string TakeStatsLine();
 }

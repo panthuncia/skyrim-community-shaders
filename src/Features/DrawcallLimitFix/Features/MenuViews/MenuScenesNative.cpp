@@ -1102,9 +1102,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				for (std::uint32_t r = 0; r < 3; ++r)
 					for (std::uint32_t i = 0; i < 4; ++i)
 						c.vsGeometry[1 + r][i] = rows[r * 4 + i];
-				const float last[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
+				const float lastRow[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
 				for (std::uint32_t i = 0; i < 4; ++i)
-					c.vsGeometry[4][i] = last[i];
+					c.vsGeometry[4][i] = lastRow[i];
 			}
 			if (t & 0x200u) {
 				a_why = std::format("a Utility technique with an eye position row ({:#x})", t);
@@ -1663,10 +1663,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				return why;
 		// Draws of one camera share its rows: the previous draw's are taken when they are the same.
 		const auto frame = std::as_bytes(std::span<const float[4]>(a_view.frame, kFrameRows));
-		const auto* last = a_run.draws.empty() ? nullptr : &a_run.draws.back();
-		const bool same = last && last->frameOffset + frame.size() <= a_run.latch.size() &&
-		                  std::memcmp(a_run.latch.data() + last->frameOffset, frame.data(), frame.size()) == 0;
-		draw.frameOffset = same ? last->frameOffset : a_run.Append(frame);
+		const auto* previous = a_run.draws.empty() ? nullptr : &a_run.draws.back();
+		const bool same = previous && previous->frameOffset + frame.size() <= a_run.latch.size() &&
+		                  std::memcmp(a_run.latch.data() + previous->frameOffset, frame.data(), frame.size()) == 0;
+		draw.frameOffset = same ? previous->frameOffset : a_run.Append(frame);
 		draw.latchOffset = a_run.Append(std::as_bytes(std::span<const UtilitySceneConstants, 1>(&c, 1)));
 		if (draw.latchOffset == ~0u || draw.frameOffset == ~0u)
 			return "more constants than the batch's latch holds";

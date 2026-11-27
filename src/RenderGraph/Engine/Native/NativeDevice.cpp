@@ -2330,7 +2330,13 @@ namespace RenderGraph::Engine::Native
 			 * @brief Queues the present on the submission thread after the frame's epochs. Render owner only.
 			 * It queues only once the previous present finished, so the render thread runs at most one frame ahead.
 			 */
-			HRESULT QueuePresent(UINT a_syncInterval)
+			/**
+			 * @brief Render owner: waits until the next queued present may go. The previous present must have finished, and the present
+			 * frame latency + 1 back must have finished on the GPU (its copy is that frame's last work). The swap chain allows one frame
+			 * more (SetSwapchainLatency), so its own wait on the submission thread never blocks the epochs queued behind a present.
+			 * QueuePresent calls it; the native render thread calls it earlier too, before it takes Renderer::Lock for the frame's end.
+			 */
+			void PaceQueuedPresent()
 			{
 				// Pace before taking presentLock. The previous present holds it through its frame latency wait.
 				const uint64_t queued = queuedPresents.load(std::memory_order_relaxed);
@@ -2339,8 +2345,26 @@ namespace RenderGraph::Engine::Native
 					for (auto done = donePresents.load(std::memory_order_acquire); done < queued; done = donePresents.load(std::memory_order_acquire))
 						donePresents.wait(done, std::memory_order_acquire);
 				}
-				PresentSource source;
 				uint32_t latency = 0;
+				{
+					std::lock_guard guard(presentLock);
+					latency = (std::min)(frameLatency, kPacedPresents - 2);
+				}
+				if (queued > latency) {
+					const uint64_t paced = queued - 1 - latency;
+					if (const uint64_t copy = pacedCopies[paced % kPacedPresents].load(std::memory_order_acquire);
+						copy && presentTimeline && presentTimeline->GetCompletedValue() < copy) {
+						ZoneScopedN("CS.Native.FrameLatencyWait");
+						(void)presentTimeline->HostWait(copy);
+					}
+				}
+			}
+
+			HRESULT QueuePresent(UINT a_syncInterval)
+			{
+				PaceQueuedPresent();
+				const uint64_t queued = queuedPresents.load(std::memory_order_relaxed);
+				PresentSource source;
 				{
 					std::lock_guard guard(presentLock);
 					if (lost.load(std::memory_order_relaxed) || !backBuffer)
@@ -2349,17 +2373,6 @@ namespace RenderGraph::Engine::Native
 					source = CurrentSource();
 					if (!source.graph)
 						return S_OK;
-					latency = (std::min)(frameLatency, kPacedPresents - 2);
-				}
-				// Frame latency: this present waits until the frame latency + 1 presents back has finished on the GPU. Its copy is
-				// that frame's last work. The swap chain allows one frame more (SetSwapchainLatency), so its own wait on the submission
-				// thread never blocks the epochs queued behind a present.
-				if (queued > latency) {
-					const uint64_t paced = queued - 1 - latency;
-					if (const uint64_t copy = pacedCopies[paced % kPacedPresents].load(std::memory_order_acquire); copy && presentTimeline->GetCompletedValue() < copy) {
-						ZoneScopedN("CS.Native.FrameLatencyWait");
-						(void)presentTimeline->HostWait(copy);
-					}
 				}
 				queuedPresents.store(queued + 1, std::memory_order_relaxed);
 				RenderGraphRuntime::Get().QueueOnSubmitThread([this, source = std::move(source), a_syncInterval, queued, waits = RenderGraphRuntime::Get().TakePresentWaits()] {
@@ -4865,6 +4878,12 @@ namespace RenderGraph::Engine::Native
 	HRESULT Present(UINT a_syncInterval, UINT a_flags)
 	{
 		return g_device ? g_device->Present(a_syncInterval, a_flags) : E_FAIL;
+	}
+
+	void PacePresent()
+	{
+		if (g_device && RenderGraphRuntime::Get().QueuesPresent())
+			g_device->PaceQueuedPresent();
 	}
 
 	bool EmitCommands(void (*a_record)(void*, rhi::CommandList&), void* a_user, const rhi::TimelinePoint* a_waits, std::uint32_t a_waitCount,

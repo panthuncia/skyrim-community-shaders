@@ -372,6 +372,7 @@ namespace Snapshot
 				stats.replaced.fetch_add(1, std::memory_order_relaxed);
 				Retire::LetGo(std::move(dropped));
 			}
+			a_fresh->published = std::chrono::steady_clock::now();
 			std::shared_ptr<const FrameSnapshot> published = std::move(a_fresh);
 			Retire::LetGo(std::exchange(Game().previous, published));
 			Slot().Post(std::make_unique<std::shared_ptr<const FrameSnapshot>>(std::move(published)));
@@ -766,6 +767,7 @@ namespace Snapshot
 			due.QuadPart = -(std::max<LONGLONG>)(1, std::chrono::duration_cast<std::chrono::nanoseconds>(next - now).count() / 100);
 			if (!::SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE) || ::WaitForSingleObject(timer, INFINITE) != WAIT_OBJECT_0)
 				RenderGraph::Fatal("snapshot publication", fmt::format("the update-rate cap's wait failed (error {})", ::GetLastError()));
+			RenderGraph::Engine::Native::RenderThread::CountWait(RenderGraph::Engine::Native::RenderThread::Wait::UpdateCap, clock::now() - now);
 		}
 		next += period;
 	}

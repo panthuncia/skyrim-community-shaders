@@ -14,6 +14,7 @@
 #include "../../Globals.h"
 #include "../../RenderGraph/Backend.h"
 #include "../../RenderGraph/Engine/Native/Native.h"
+#include "../../RenderGraph/Engine/Native/RenderThread.h"
 #include "../../RenderGraph/Backend.h"
 #include "../../RenderGraph/RenderGraphRuntime.h"
 #include "ORGUpscaling.h"
@@ -21,6 +22,7 @@
 #include "../../State.h"
 #include "../../Utils/Game.h"
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -85,6 +87,15 @@ namespace
 		// The render frame's Streamline frame id: its render identity (Snapshot::Render().frame). Tags, constants and the
 		// render-thread PCL markers use it. See Streamline::BeginRenderFrame.
 		std::atomic<uint32_t> renderFrameId = { 0 };
+		// The simulation frame ids of the newest game updates, by update (snapshot id). The game thread writes them at its input poll
+		// (SimFrameId); the render frame that first renders an update's snapshot reads its id (BeginRenderFrame).
+		static constexpr std::size_t kSimFrames = 16;
+		std::array<std::atomic<std::uint64_t>, kSimFrames> simFrameUpdate{};
+		std::array<std::atomic<uint32_t>, kSimFrames> simFrameId{};
+		// Native's render thread: the frame id its Reflex sleep used, taken by the render frame that follows (0: none).
+		std::atomic<uint32_t> sleptRenderFrameId = { 0 };
+		// Reflex sleeps each frame: low-latency mode or a frame limit is set (UpdateReflex).
+		std::atomic<bool> reflexSleeps = { false };
 		// PCL markers only feed Reflex and DLSS-G latency. With neither active, emitting them is pure
 		// per-frame cross-DLL overhead -- 7 slGetNewFrameToken+slPCLSetMarker pairs per frame on a path
 		// the D3D11 branch does not have at all. Streamline is now always initialised for in-game
@@ -827,13 +838,35 @@ static sl::Result cs_DiscardFSRFrameGenerationPreparedFrame(const sl::ViewportHa
 // PCL markers, tags and constants must all agree on one index per frame, or Reflex never sees a frame
 // close and its frame limiter falls back to open-loop sleeping.
 //
-// The simulation markers' frame id: the newest adoption's render frame plus one (Snapshot::LastRenderFrame, any thread). It stands
-// for the render frame that first renders the snapshot this game update publishes: the next adoption. BeginRenderFrame takes
-// the render frame's own identity, so both sides read one counter and cannot drift (they once came from separate counters
-// and were off by one on 92-98% of frames).
+// The simulation frame id of the game update in progress (the snapshot it will publish). Game thread. Each update takes one id,
+// and ids only grow: at least the next render frame's id, and above the last update's. With the render thread, two updates can
+// publish before one render (the first is never rendered); a shared id gave Reflex two SimulationStart markers for one frame.
+// The render frame that first renders the update's snapshot takes this id when no render frame has taken it yet
+// (BeginRenderFrame), so the update's simulation markers and its render's markers share one frame.
 static uint32_t SimFrameId()
 {
-	return static_cast<uint32_t>(Snapshot::LastRenderFrame()) + 1u;
+	static std::uint64_t s_update = UINT64_MAX;
+	static uint32_t s_id = 0;
+	const std::uint64_t update = Snapshot::LastGameId() + 1;
+	if (update != s_update) {
+		s_update = update;
+		s_id = (std::max)(g_sl.renderFrameId.load(std::memory_order_acquire) + 1u, s_id + 1u);
+		const std::size_t slot = update % g_sl.kSimFrames;
+		g_sl.simFrameUpdate[slot].store(0, std::memory_order_release);
+		g_sl.simFrameId[slot].store(s_id, std::memory_order_release);
+		g_sl.simFrameUpdate[slot].store(update, std::memory_order_release);
+	}
+	return s_id;
+}
+
+// The simulation frame id a_update took, or 0 when it took none or a newer update reused its slot. Any thread.
+static uint32_t SimFrameIdOf(std::uint64_t a_update)
+{
+	const std::size_t slot = a_update % g_sl.kSimFrames;
+	if (g_sl.simFrameUpdate[slot].load(std::memory_order_acquire) != a_update)
+		return 0;
+	const uint32_t id = g_sl.simFrameId[slot].load(std::memory_order_acquire);
+	return g_sl.simFrameUpdate[slot].load(std::memory_order_acquire) == a_update ? id : 0;
 }
 
 void Streamline::BeginRenderFrame()
@@ -854,7 +887,14 @@ void Streamline::BeginRenderFrame()
 	// frame collapsing towards a corner.
 	const uint32_t frame = static_cast<uint32_t>(Snapshot::Render().frame);
 	const uint32_t previous = g_sl.renderFrameId.load(std::memory_order_acquire);
-	g_sl.renderFrameId.store(frame > previous ? frame : previous + 1u, std::memory_order_release);
+	uint32_t id = frame > previous ? frame : previous + 1u;
+	// Native's render thread slept for this frame with the id it reserved (ReflexSleepRender).
+	id = (std::max)(id, g_sl.sleptRenderFrameId.exchange(0, std::memory_order_acq_rel));
+	// The first render of a game update's snapshot takes the update's simulation id when it is still ahead: Reflex then sees the
+	// update's simulation and its render as one frame. A repeat has no simulation of its own.
+	if (const auto& snapshot = Snapshot::Current(); snapshot && !Snapshot::Render().repeat)
+		id = (std::max)(id, SimFrameIdOf(snapshot->id));
+	g_sl.renderFrameId.store(id, std::memory_order_release);
 	g_sl.dlssgTaggedThisFrame = false;
 	g_sl.fsrfgPreparedThisFrame.store(false, std::memory_order_release);
 }
@@ -966,16 +1006,43 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 	// FSR-FG path's cap "could not be applied": frameLimitUs was handed to Reflex and then never
 	// given a chance to sleep on it, so the cap fell through to DXVK's limiter, which applies it
 	// from the submission thread after the present instead of in the render loop.
-	if (mode != sl::ReflexMode::eOff || a_frameLimitUs != 0u) {
+	const bool sleeps = mode != sl::ReflexMode::eOff || a_frameLimitUs != 0u;
+	g_sl.reflexSleeps.store(sleeps, std::memory_order_release);
+	// With native's render thread the render thread sleeps (ReflexSleepRender): the frame limit paces renders, and the game thread
+	// never waits for the render side's pacing.
+	if (sleeps && !RenderGraph::Engine::Native::RenderThread::Running()) {
 		// PollInputDevices can run more than once per rendered frame.
 		static uint32_t s_lastSleepFrame = UINT32_MAX;
 		const uint32_t simFrame = SimFrameId();
 		if (s_lastSleepFrame != simFrame) {
 			s_lastSleepFrame = simFrame;
-			if (sl::FrameToken* token = TokenForFrame(simFrame))
+			if (sl::FrameToken* token = TokenForFrame(simFrame)) {
+				ZoneScopedN("CS.Streamline.ReflexSleep");
+				const auto start = std::chrono::steady_clock::now();
 				g_sl.slReflexSleep(*token);
+				RenderGraph::Engine::Native::RenderThread::CountWait(RenderGraph::Engine::Native::RenderThread::Wait::ReflexSleep,
+					std::chrono::steady_clock::now() - start);
+			}
 		}
 	}
+}
+
+void Streamline::ReflexSleepRender()
+{
+	if (!initialized || !featureReflex || !g_sl.reflexSleeps.load(std::memory_order_acquire))
+		return;
+	// The render frame about to start: the next id, or the newest update's simulation id when that is ahead (the frame that renders
+	// it takes it, BeginRenderFrame).
+	const uint32_t id = (std::max)(g_sl.renderFrameId.load(std::memory_order_acquire) + 1u, SimFrameIdOf(Snapshot::LastGameId()));
+	sl::FrameToken* token = TokenForFrame(id);
+	if (!token)
+		return;
+	g_sl.sleptRenderFrameId.store(id, std::memory_order_release);
+	ZoneScopedN("CS.Streamline.ReflexSleep");
+	const auto start = std::chrono::steady_clock::now();
+	g_sl.slReflexSleep(*token);
+	RenderGraph::Engine::Native::RenderThread::CountWait(RenderGraph::Engine::Native::RenderThread::Wait::ReflexSleep,
+		std::chrono::steady_clock::now() - start);
 }
 
 void Streamline::SetPCLMarker(PclMarker a_marker)
