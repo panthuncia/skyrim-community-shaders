@@ -291,6 +291,9 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			// An Effect draw's soft depth (t3): the depth copy, or kMAIN's.
 			a_inputs.AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
 			a_inputs.AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL::kMAIN_COPY);
+			// The book's pages: its model's page material samples the kBOOK_TEXT targets the page copies and Scaleform drew.
+			for (const auto page : { RE::RENDER_TARGET::kBOOK_TEXT_0, RE::RENDER_TARGET::kBOOK_TEXT_1, RE::RENDER_TARGET::kBOOK_TEXT_2, RE::RENDER_TARGET::kBOOK_TEXT_3 })
+				a_inputs.AddEngine(page);
 		}
 
 		/** @brief Makes the client of a_view. Null, logged, when a target cannot be imported. */

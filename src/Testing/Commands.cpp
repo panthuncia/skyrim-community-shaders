@@ -1038,15 +1038,23 @@ namespace Testing
 				return true;
 			});
 			// "book": [<form id, hex>], a book opened in the book menu as reading it from the inventory does; without an id, the first
-			// book that teaches nothing and is no note.
+			// book that teaches nothing, is no note and has a book model (a Clutter\Books file named for a book), so it opens with two pages.
 			RegisterCommand("book", [](const std::string& a_arg, std::string&) {
+				static constexpr auto IsBookModel = [](const char* a_model) {
+					std::string model = a_model ? a_model : "";
+					std::ranges::transform(model, model.begin(), [](char a_c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(a_c))); });
+					// Notes and recipes keep their models under Clutter\Books too, so the file name decides.
+					const auto name = model.substr(model.find_last_of("\\/") + 1);
+					return model.find("books\\") != std::string::npos && name.find("book") != std::string::npos && name.find("note") == std::string::npos;
+				};
 				const auto id = a_arg.empty() ? 0u : static_cast<RE::FormID>(std::strtoul(a_arg.c_str(), nullptr, 16));
 				AddTask([id] {
 					RE::TESObjectBOOK* book = id ? RE::TESForm::LookupByID<RE::TESObjectBOOK>(id) : nullptr;
 					if (!id)
 						if (auto* data = RE::TESDataHandler::GetSingleton())
 							for (auto* candidate : data->GetFormArray<RE::TESObjectBOOK>())
-								if (candidate && !candidate->TeachesSpell() && !candidate->TeachesSkill() && !candidate->IsNoteScroll()) {
+								if (candidate && !candidate->TeachesSpell() && !candidate->TeachesSkill() && !candidate->IsNoteScroll() &&
+									IsBookModel(candidate->GetModel())) {
 									book = candidate;
 									break;
 								}
@@ -1056,6 +1064,18 @@ namespace Testing
 					}
 					RE::BookMenu::OpenMenuFromBaseForm(book);
 					logger::info("[TEST] book: {:08X} ({}) opened", book->GetFormID(), book->GetName());
+				});
+				return true;
+			});
+			// "page": next|prev, the book menu's page turn: the NextPage or PrevPage user event BookMenu::ProcessMessage turns a page for.
+			RegisterCommand("page", [](const std::string& a_arg, std::string& a_error) {
+				if (a_arg != "next" && a_arg != "prev") {
+					a_error = fmt::format("'{}' is not next or prev", a_arg);
+					return false;
+				}
+				AddTask([next = a_arg == "next"] {
+					RE::BSUIMessageData::SendUIStringMessage(RE::BookMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kUserEvent, next ? "NextPage" : "PrevPage");
+					logger::info("[TEST] page: {} sent to the book menu", next ? "NextPage" : "PrevPage");
 				});
 				return true;
 			});

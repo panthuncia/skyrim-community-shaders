@@ -2725,10 +2725,61 @@ namespace RenderGraph::Engine::Scaleform
 		 * each of its displays is drawn from the snapshot's stream where GFx ends its own, the rest at the end. Menu scenes and the
 		 * interface's ImageSpace effect still run where DrawInterface calls them.
 		 */
+		/**
+		* @brief BookMenu::PreDisplay (SE 50121 / AE 51052): the page copies into kBOOK_TEXT_n and the pages' displays. Main::DrawFrame
+		* calls it before the world, through the offscreen menus' loop (SE 79948 / AE 82085). In graph mode, native and guest, it runs
+		* at DrawInterface's start instead, inside the UI stage, where the copies and the displays are CS's steps. Nothing in the world
+		* reads the pages, so the move changes no image. The map menu's offscreen work stays where it is.
+		*/
+		struct BookPreDisplay
+		{
+			static void thunk(void* a_menu)
+			{
+				if (!FrameAnchors::IsRenderOwner() || running)
+					return func(a_menu);
+				due = a_menu;
+			}
+
+			/** @brief DrawInterface's start: the call DrawFrame left, under the movie lock its loop takes, with the target and depth put back. */
+			static void RunDue()
+			{
+				auto* menu = std::exchange(due, nullptr);
+				if (!menu)
+					return;
+				// DrawInterface keeps the bound target and depth when one is set, so the pages' targets must not stay bound.
+				auto& shadow = CS_ENGINE_READ(ShadowState, RecordTime, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
+				const auto target = shadow.renderTargets[0];
+				const auto depth = shadow.depthStencil;
+				const auto slice = shadow.depthStencilSlice;
+				static const REL::Relocation<void (*)(void*)> lock{ RELOCATION_ID(80605, 82732) };
+				static const REL::Relocation<void (*)(void*)> unlock{ RELOCATION_ID(80606, 82733) };
+				auto* movies = *reinterpret_cast<void**>(reinterpret_cast<std::byte*>(RE::BSScaleformManager::GetSingleton()) + 0x10);
+				running = true;
+				lock(movies);
+				func(menu);
+				unlock(movies);
+				running = false;
+				if (shadow.renderTargets[0] != target || shadow.depthStencil != depth || shadow.depthStencilSlice != slice) {
+					shadow.renderTargets[0] = target;
+					shadow.setRenderTargetMode[0] = RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
+					shadow.depthStencil = depth;
+					shadow.depthStencilSlice = slice;
+					shadow.setDepthStencilMode = RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
+					shadow.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+				}
+			}
+
+			static inline void* due = nullptr;
+			static inline bool running = false;
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		struct DrawInterface
 		{
 			static void thunk(void* a_manager)
 			{
+				if (FrameAnchors::IsRenderOwner())
+					BookPreDisplay::RunDue();
 				if (!NativeUi() || !FrameAnchors::IsRenderOwner())
 					return func(a_manager);
 				auto& recorder = Rec();
@@ -2860,8 +2911,12 @@ namespace RenderGraph::Engine::Scaleform
 		logger::info("[ORG] Scaleform: hooking the renderer's factory");
 		stl::detour_thunk<CreateRenderer>(REL::RelocationID(82831, 84952));
 		GfxTextures::Install();
-		if (Native::Requested() && !REL::Module::IsVR())
+		if (!REL::Module::IsVR()) {
 			stl::detour_thunk<DrawInterface>(REL::RelocationID(79947, 82084));
+			stl::detour_thunk<BookPreDisplay>(REL::RelocationID(50121, 51052));
+			if (!DrawInterface::func.address() || !BookPreDisplay::func.address())
+				RenderGraph::Fatal("Scaleform", "DrawInterface or BookMenu::PreDisplay could not be hooked");
+		}
 	}
 
 	bool OwnsRenderer()
