@@ -41,6 +41,18 @@
     "run": "1126-185749-dir-native-vulkan-facegen-dir-s7dk-native-vulkan+facegen",
     "accepted": "2026-11-26"
   },
+  "native-vulkan+menu-items/inventory-enchanted-armour": {
+    "sha256": "c6aa23c40c58e4a0e9994158b7e2fa89bbaaffb9613690f65b5cf89e718dcfa6",
+    "size": "1920x1080",
+    "run": "1126-195159-s7-menus4-native-vulkan-menu-items-s7-menus4-m1-native-vulkan-menu-items",
+    "accepted": "2026-11-26"
+  },
+  "native-vulkan+menu-items/inventory-enchanted-weapon": {
+    "sha256": "fa73c553eb61400aef42ebfdf55aee653c218787e1a637300766f4021fe1d43d",
+    "size": "1920x1080",
+    "run": "1126-195159-s7-menus4-native-vulkan-menu-items-s7-menus4-m1-native-vulkan-menu-items",
+    "accepted": "2026-11-26"
+  },
   "native-vulkan+menu-scenes/inventory-item": {
     "sha256": "57629d2473c8099440bc3b217291c3150a269f0b8362387228f8afe0351b0074",
     "size": "1920x1080",

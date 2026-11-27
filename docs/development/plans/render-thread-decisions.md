@@ -807,3 +807,19 @@ pushes until the user is back.
 186. **Refines 185 (user):** cs-test sees every load by counting ServingThread::SetLoadingScreenActive calls
      (`LoadingScreen::Calls()`, both halves; a coc nearby makes only the false call). The 1024-unit jump test is gone, so
      a `player.setpos` is no longer a load and a coc to the player's own spot is seen.
+
+## 2026-11-26: the inventory scenes are native (snap5-menus4; director accepted)
+
+187. **The inventory (schemes 1 and 2) is CS's:** enchantment glows (the membrane pass of a Lighting property with effect
+     data) are computed by CS (descriptor from property flags and effect data, technique rows, textures, geometry rows
+     with Linear Lighting's PropertyColor conversion, the exe's alpha-test constants, the membrane group's states: blend
+     from the effect data, depth test without write, depth bias 10 through `Family::DepthBiasViewportOffset`, write mode
+     11), drawn after the batches and before the blended list (FinishAccumulating's order); every menu glow is hint 3 (all
+     76 observed). Skinned Effect draws are allowed. A draw whose texture is still streaming in is left out of that render
+     (as 169 and 184). World frames with the inventory open: 20.6 -> 9.0 engine render calls.
+188. **MistMenu renders without a depth pass are CS's in loading frames too.** The menus3 crash was the menu mask hook
+     applying the engine's pending state with "vertex layout changed" set and no vertex shader ever bound (the first
+     engine-drawn menu render after only CS renders); the hook clears the flag when no vertex shader is bound. Left: the
+     loading model (scheme 4 with a depth pass: needs a menu-geometry shadow depth path, then masks and shadow bits;
+     about 20 engine calls per loading-model render), lockpick (no cs-test step opens it), book (Scaleform page target
+     import), journal (no 3D scene seen), local map.
