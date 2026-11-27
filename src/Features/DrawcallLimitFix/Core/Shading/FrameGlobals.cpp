@@ -19,6 +19,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Scene/RootViewEvents.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "Utils/Game.h"
 
 #include <algorithm>
@@ -240,8 +241,7 @@ namespace DCLF
 		std::shared_ptr<const FrameGlobals> latest = std::make_shared<FrameGlobals>();
 		std::array<std::shared_ptr<const FrameGlobals>, 8> recent;
 		std::uint32_t recentNext = 0;
-		std::atomic<std::uint32_t> renderThread{ 0 };
-		// A read off the render thread with no capture bound, counted by the live-read detector.
+		// A read off the render owner with no capture bound, counted by the live-read detector.
 		constinit Snapshot::EngineReads::Site unscopedRead{ Snapshot::EngineReads::Object::FrameGlobals, Snapshot::EngineReads::Category::RecordTime, std::source_location::current() };
 		std::uint64_t unscopedTaken = 0;
 		thread_local const FrameGlobals* scoped = nullptr;
@@ -382,7 +382,6 @@ namespace DCLF
 
 	void FrameGlobals::Adopt(std::shared_ptr<const FrameGlobals> a_globals)
 	{
-		renderThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
 		if (!a_globals || a_globals == latest)
 			return;
 		recent[recentNext++ % recent.size()] = std::move(latest);
@@ -405,12 +404,14 @@ namespace DCLF
 			return *scoped;
 		if (gameHalf)
 			return *gameHalf;
-		if (::GetCurrentThreadId() == renderThread.load(std::memory_order_relaxed))
+		// The thread that owns rendering reads the latest adopted capture: the one that adopted it, or a loading screen's serving thread
+		// (its menu scene) or the main menu's frames, which take ownership inside Renderer::Lock after it.
+		if (::FrameAnchors::IsRenderOwner())
 			return *latest;
 		unscopedRead.Count();
 		if (unscopedRead.Live() == 1)
-			logger::error("[DCLF] the frame's engine globals were read off the render thread with no frame's capture bound (step 6e F2); it got the "
-						  "render thread's latest. Reader: {}",
+			logger::error("[DCLF] the frame's engine globals were read off the render owner with no frame's capture bound (step 6e F2); it got the "
+						  "latest adopted. Reader: {}",
 				UnscopedReader());
 		return *latest;
 	}

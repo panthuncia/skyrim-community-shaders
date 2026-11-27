@@ -107,7 +107,7 @@ namespace DCLF
 
 		/** @brief Game half of the frame start (FrameDriver::GameFrameStart), once per game update. The update's capture. */
 		static std::shared_ptr<const FrameGlobals> Capture();
-		/** @brief Render half of the frame start. The ticket's capture, which Current() hands the render thread from now on. */
+		/** @brief Render half of the frame start. The ticket's capture, which Current() hands the render owner from now on. */
 		static void Adopt(std::shared_ptr<const FrameGlobals> a_globals);
 		/**
 		 * @brief Render thread, at RenderDepth's first-person draw. Records every node's hidden bit under a_root as the engine's culls saw them.
@@ -121,9 +121,9 @@ namespace DCLF
 		static void BeginGameHalf(std::shared_ptr<const FrameGlobals> a_globals);
 		/** @brief Native, game thread: the end of the driver's game half. */
 		static void EndGameHalf();
-		/** @brief The capture this thread reads: its Scope's, the game half's on the game thread, or the latest on the render thread. */
+		/** @brief The capture this thread reads: its Scope's, the game half's on the game thread, or the latest adopted on the thread that owns rendering. */
 		static const FrameGlobals& Current();
-		/** @brief Reads since the last call from a thread with neither a scope nor the render thread's identity. The live-read detector's FrameGlobals site holds the count. */
+		/** @brief Reads since the last call from a thread with neither a scope nor render ownership. The live-read detector's FrameGlobals site holds the count. */
 		static std::uint64_t TakeUnscopedReads();
 
 		/** @brief Binds a capture to this thread for the scene work's frame. Engine reads inside it count as captures (Snapshot/EngineReads.h). */
