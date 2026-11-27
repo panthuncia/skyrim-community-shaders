@@ -793,3 +793,14 @@ pushes until the user is back.
      crashed DCLF's shadow-mask path once (vertex shader dirty with none bound), cause not found. Left: loading model
      (depth pass, shadow maps and mask), inventory (membrane pass, skinned Effects; `menu-items` config shows Chillrend
      and Savior's Hide), lockpick, journal, book, local map; the light fade-distance swap is not ported.
+
+## 2026-11-26: cs-test steps wait for each load (snap3-cocwait; director accepted)
+
+185. **Closes 182:** cs-test records every load again, including a coc with no loading menu, seen as a player jump of
+     more than 1024 units between two Presents (the snapshot's teleport distance; logged as `[TEST] teleport at frame
+     ...`); `held-frame` counts as a load milestone. Steps after a coc or `load` anchor at `world-ready` (39 configs;
+     shots 400 rendered frames after it: 120 fell inside the post-load fade at full frame rate), and a step whose milestone never comes in a ready, non-loading world fails after
+     `wait_s` / `step_wait` with a clear reason. `quick` starts with `tgm`. Limits: a coc to where the player stands is
+     not seen (the step fails after 60 s). An exact signal (counting `SetLoadingScreenActive(false)` in
+     Snapshot/Publication) was not added: the lead's edit outside its boundary was refused by the permission system;
+     left for the user to decide.

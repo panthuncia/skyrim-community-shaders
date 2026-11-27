@@ -29,7 +29,7 @@ arg = "coc Whiterun"
 
 [[steps]]
 at = "world-ready"
-frames = 120
+frames = 400
 do = "shot"
 arg = "exterior"
 
@@ -41,7 +41,7 @@ arg = "coc WhiterunDragonsreach"
 
 [[steps]]
 at = "world-ready"
-frames = 120
+frames = 400
 do = "shot"
 arg = "interior"
 
@@ -53,7 +53,7 @@ arg = "coc Whiterun"
 
 [[steps]]
 at = "world-ready"
-frames = 120
+frames = 400
 do = "shot"
 arg = "exterior-again"
 

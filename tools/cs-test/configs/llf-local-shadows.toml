@@ -33,7 +33,7 @@ arg = "coc WhiterunDragonsreach"
 
 [[steps]]
 at = "world-ready"
-frames = 120
+frames = 400
 do = "shot"
 arg = "start"
 
