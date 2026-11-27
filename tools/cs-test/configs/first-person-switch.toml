@@ -1,0 +1,93 @@
+# The first-person view after pov switches, back and forth twice, then in an interior after a coc. Each first-person shot should
+# match the others and a load into first person. Compose it: guest+first-person-switch, native-vulkan+first-person-switch.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "pov"
+arg = "first"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "first-1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "pov"
+arg = "third"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "third-1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "pov"
+arg = "first"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "first-2"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "pov"
+arg = "third"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "pov"
+arg = "first"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "first-3"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 400
+do = "shot"
+arg = "interior-first"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["first-1", "third-1", "first-2", "first-3", "interior-first"]

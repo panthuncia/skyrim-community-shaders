@@ -238,6 +238,7 @@ namespace Snapshot
 		Cameras cameras{};
 		bool interior = false;                                // the player's cell is an interior
 		bool worldLoaded = false;                             // the player has 3D and a parent cell: a frozen menu can draw the world behind it
+		bool firstPersonShown = false;                        // the player's first-person root is not hidden at the capture's start (Main::RenderPlayerView's test)
 		std::shared_ptr<const DCLF::ScenePublication> scene;  // the scene publication it pairs with (empty in phase 0)
 		std::shared_ptr<const UiCommandStream> ui;            // the UI command stream (native; set at the update's DrawInterface end)
 		Events events{};
