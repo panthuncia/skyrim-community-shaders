@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Integrations/Skylighting/Skylighting.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/Publication.h"
 
 #include "State.h"
@@ -19,9 +20,7 @@ namespace DCLF::Integrations::Skylighting
 			if (!globals::features::skylighting.loaded || globals::state->isMapMenuOpen)
 				return false;
 			// The sky's mode as the update's capture took it.
-			const auto& snapshot = Snapshot::Current();
-			const auto* frame = snapshot ? snapshot->Block<::Skylighting::Block>() : nullptr;
-			return frame && frame->fullSky;
+			return Snapshot::Core().fullSky;
 		}
 
 		// Persistent textures that Prepass updates before binding: D3D11 ones, or the graph's exports in graph mode.

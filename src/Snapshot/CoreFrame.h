@@ -47,6 +47,7 @@ namespace Snapshot
 		/** @brief Sky state. Directions are zero for a body the sky does not have. */
 		bool hasSky = false;
 		bool hideSky = false;
+		bool fullSky = false;  // Sky::mode is kFull: an exterior sky
 		float4 sunDirection{};
 		float4 masserDirection{};
 		float4 secundaDirection{};

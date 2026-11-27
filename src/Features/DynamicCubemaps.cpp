@@ -1,4 +1,5 @@
 #include "DynamicCubemaps.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
 
@@ -962,26 +963,12 @@ void DynamicCubemaps::CreateD3D11Textures()
 	}
 }
 
-void DynamicCubemaps::PostPostLoad()
-{
-	Snapshot::RegisterCapture(&DynamicCubemaps::Capture);
-}
-
-void DynamicCubemaps::Capture(Snapshot::Builder& a_builder)
-{
-	if (!globals::features::dynamicCubemaps.loaded)
-		return;
-	const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
-	a_builder.Set(Block{ .skyHidden = sky && sky->flags.any(RE::Sky::Flags::kHideSky) });
-}
-
 void DynamicCubemaps::Reset()
 {
 	activeReflections = globals::state->activeReflections;
 
 	// The adopted snapshot's sky: the game state after the update this frame rendered, as the live sky was here.
-	const Block* block = Snapshot::CurrentBlock<Block>();
-	fakeReflections = activeReflections && block && block->skyHidden;
+	fakeReflections = activeReflections && Snapshot::Core().hideSky;
 
 	if (!activeReflections && !Util::IsInterior()) {
 		activeReflections = true;

@@ -169,18 +169,14 @@ namespace Snapshot
 		ProceduralSun,         // Features/ProceduralSun.h, ProceduralSun::Block
 		ProceduralAurora,      // Features/ProceduralAurora.h, ProceduralAurora::Block
 		CloudShadows,          // Features/CloudShadows.h, CloudShadows::Block
-		Skylighting,           // Features/Skylighting.h, Skylighting::Block
 		TerrainShadows,        // Features/TerrainShadows.h, TerrainShadows::Block
 		InteriorSun,           // Features/InteriorSun.h, InteriorSun::Block
 		VolumetricLighting,    // Features/VolumetricLighting.h, VolumetricLighting::Block
 		WetnessEffects,        // Features/WetnessEffects.h, WetnessEffects::Block
 		PrecipitationOcclusion,  // Snapshot/PrecipitationOcclusion.h, Snapshot::PrecipitationOcclusion::Block
-		ExponentialHeightFog,  // Features/ExponentialHeightFog.h, ExponentialHeightFog::Block
 		// The post group: post-processing, upscaling and the other non-DCLF features.
 		GrassCollision,      // Features/GrassCollision.h, GrassCollision::Block
 		UnifiedWater,        // Features/UnifiedWater.h, UnifiedWater::Block
-		DynamicCubemaps,     // Features/DynamicCubemaps.h, DynamicCubemaps::Block
-		ScreenSpaceShadows,  // Features/ScreenSpaceShadows.h, ScreenSpaceShadows::Block
 		PostProcessing,      // Features/PostProcessing.h, PostProcessing::Block
 		Effects11,           // Features/Effects11.h, Effects11::Block
 		ImageSpace,          // RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h, RenderGraph::Engine::ImageSpace::Block

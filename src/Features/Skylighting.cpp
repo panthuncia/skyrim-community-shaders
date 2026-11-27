@@ -1,4 +1,5 @@
 #include "Skylighting.h"
+#include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/PrecipitationOcclusion.h"
 #include "Snapshot/Publication.h"
@@ -353,8 +354,7 @@ void Skylighting::Prepass()
 		return;
 
 	// Probes update under a full sky only, as the capture found it.
-	const Block* frame = Snapshot::CurrentBlock<Block>();
-	if (!frame || !frame->fullSky)
+	if (!Snapshot::Core().fullSky)
 		return;
 
 	CS_GPU_ZONE(globals::state->tracyCtx, "Skylighting - Update Probes");
@@ -421,17 +421,8 @@ void Skylighting::Prepass()
 	}
 }
 
-void Skylighting::Capture(Snapshot::Builder& a_builder)
-{
-	if (!globals::features::skylighting.loaded)
-		return;
-	const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
-	a_builder.Set(Block{ .fullSky = sky && sky->mode.get() == RE::Sky::Mode::kFull });
-}
-
 void Skylighting::PostPostLoad()
 {
-	Snapshot::RegisterCapture(&Skylighting::Capture);
 	logger::info("[SKYLIGHTING] Hooking BSLightingShaderProperty::GetPrecipitationOcclusionMapRenderPassesImp");
 	stl::write_vfunc<0x2D, BSLightingShaderProperty_GetPrecipitationOcclusionMapRenderPassesImpl>(RE::VTABLE_BSLightingShaderProperty[0]);
 	stl::write_thunk_call<Main_Precipitation_RenderOcclusion>(REL::RelocationID(35560, 36559).address() + Util::VersionedRelocation::Select(0x3A1, 0x3A1, 0x3BF));

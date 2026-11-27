@@ -270,19 +270,6 @@ D3D11_SAMPLER_DESC ExponentialHeightFog::SamplerDesc(bool a_comparison)
 	return samplerDesc;
 }
 
-void ExponentialHeightFog::PostPostLoad()
-{
-	Snapshot::RegisterCapture(&ExponentialHeightFog::Capture);
-}
-
-void ExponentialHeightFog::Capture(Snapshot::Builder& a_builder)
-{
-	if (!globals::features::exponentialHeightFog.loaded)
-		return;
-	const auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
-	a_builder.Set(Block{ .hideSky = sky && sky->flags.any(RE::Sky::Flags::kHideSky) });
-}
-
 void ExponentialHeightFog::SetupResources()
 {
 	ORGExponentialHeightFog::Get().Setup();

@@ -45,6 +45,7 @@ namespace Snapshot
 				return;
 			a_core.hasSky = true;
 			a_core.hideSky = sky->flags.any(RE::Sky::Flags::kHideSky);
+			a_core.fullSky = sky->mode.get() == RE::Sky::Mode::kFull;
 			const auto& skySync = globals::features::skySync;
 			const auto toFloat4 = [](const RE::NiPoint3& a_dir) { return float4{ a_dir.x, a_dir.y, a_dir.z, 0.0f }; };
 			const auto moonColor = [&](const RE::Moon* a_moon, const Util::ColorSpace::LightColor& a_base) {
