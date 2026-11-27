@@ -530,6 +530,7 @@ namespace DCLF::Features::Sky::Native
 		PassResult BuildPass(const Frame& a_frame, RE::BSRenderPass* a_pass, std::uint32_t a_technique, const Modes& a_modes, std::int32_t* a_cloudLayers, Draw& a_draw,
 			Family::Owners& a_owners, std::string& a_why)
 		{
+			CS_ENGINE_READ_MARK(Scene, RecordTime);
 			auto* geometry = a_pass->geometry;
 			auto* property = a_pass->shaderProperty;
 			if (!geometry || !property || !a_pass->shader || a_pass->shader->shaderType.get() != RE::BSShader::Type::Sky) {
@@ -1045,6 +1046,7 @@ namespace DCLF::Features::Sky::Native
 			cull.passes.clear();
 			cull.why.clear();
 			cull.skipEffects = !a_face;
+			CS_ENGINE_READ_MARK(Scene, RecordTime);
 			cull.noBounds = !a_face;
 			// TESWaterReflections::Update holds the sky root always drawn while it renders the faces (AE 0x140520570).
 			cull.Visit(sky->root.get(), a_face);

@@ -35,6 +35,7 @@ namespace Snapshot::EngineReads
 		BoundState,          // GPU state the engine bound to the D3D11 context
 		FrameGlobals,        // DCLF's FrameGlobals read off the render thread with no capture bound
 		ShadowLights,        // ShadowSceneNode's shadow lights: their NiLights, descriptors, cameras and the selection's results
+		Scene,               // a walk of the scene graph: nodes, geometry, properties and materials (counted once per walk)
 		Count
 	};
 

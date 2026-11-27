@@ -742,6 +742,7 @@ namespace DCLF::Scene
 	void FrameView::ServeMaterialRequests()
 	{
 		channels.materialRequests.Drain([&](MaterialRequest&& a_request) {
+			CS_ENGINE_READ_MARK(Scene, RecordTime);
 			// A property whose material changed since is stale, and the join asks again. The reference is dropped here on the render thread.
 			const bool current = a_request.property && a_request.property->material == a_request.material;
 			if (current)

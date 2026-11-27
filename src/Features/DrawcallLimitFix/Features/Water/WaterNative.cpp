@@ -437,6 +437,7 @@ namespace DCLF::Features::Water::Native
 		/** @brief One pass's draw, as SetupTechnique, SetupMaterial, SetupGeometry and CS's hooks on them would make it. */
 		bool BuildPass(const Frame& a_frame, RE::BSRenderPass* a_pass, Modes& a_modes, Draw& a_draw, Family::Owners& a_owners, std::string& a_why)
 		{
+			CS_ENGINE_READ_MARK(Scene, RecordTime);
 			auto* geometry = a_pass->geometry;
 			const auto* property = a_pass->shaderProperty;
 			if (!geometry || !property || property->GetRTTI() != globals::rtti::BSWaterShaderPropertyRTTI.get()) {
@@ -670,6 +671,7 @@ namespace DCLF::Features::Water::Native
 			// Render thread: kept between batches.
 			static std::vector<const void*> shapes;
 			WaterScene::TrackedShapes(shapes);
+			CS_ENGINE_READ_MARK(Scene, RecordTime);
 			// The frame's claims: a shape DCLF draws, or waits to draw, in the main phase is its epochs', not the batch's.
 			const auto claims = PassCapture::Get().CurrentSet();
 			const auto* worldRoot = static_cast<const RE::NiAVObject*>(CS_ENGINE_READ(Data, RecordTime, RE::Main::WorldRootNode()));
