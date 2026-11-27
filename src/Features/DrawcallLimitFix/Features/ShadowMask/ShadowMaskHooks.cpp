@@ -24,6 +24,7 @@
 #include "Utils/VersionedRelocation.h"
 
 #include <format>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -103,9 +104,17 @@ namespace DCLF::Features::ShadowMask
 					func(a_arg1, a_arg2, a_arg3, a_arg4);
 					return;
 				}
-				// The clear lands before the anchor's run, as at the engine's first draw.
+				// The clear lands before the anchor's run, as at the engine's first draw. The engine applies the vertex layout from the bound
+				// vertex shader; when none was ever bound (every render before this one was CS's, as at the first loading screen after a
+				// native main menu) there is no layout to apply, and applying it would read the null shader.
 				{
 					DCLF_ZONE("CS.DCLF.ShadowMask.Clear");
+					auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
+					if (!rss.currentVertexShader && rss.stateUpdateFlags.any(RE::BSGraphics::ShaderFlags::DIRTY_VERTEX_DESC)) {
+						static std::once_flag logged;
+						std::call_once(logged, [] { logger::info("[DCLF] shadow mask: a {} batch with no vertex shader bound; its vertex layout is not applied", NameOf(kView)); });
+						rss.stateUpdateFlags.reset(RE::BSGraphics::ShaderFlags::DIRTY_VERTEX_DESC);
+					}
 					Engine::ApplyPendingState();
 				}
 				// The sun's cascades for Volumetric Shadows, Exponential Height Fog and Skylighting, which take them at the mask draw.

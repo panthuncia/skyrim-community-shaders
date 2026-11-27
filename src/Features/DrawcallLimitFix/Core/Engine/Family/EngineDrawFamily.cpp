@@ -405,6 +405,11 @@ namespace DCLF::Family
 		return viewport;
 	}
 
+	float DepthBiasViewportOffset(std::uint32_t a_depthBias)
+	{
+		return kBiasViewportOffsets[(std::min)(a_depthBias, 11u)];
+	}
+
 	Viewport LatchViewport(std::uint32_t a_depthBias)
 	{
 		// Native's RenderWorld points draw into the adopted revision's targets: the viewport follows them, not the engine's.

@@ -523,7 +523,16 @@ namespace DCLF::Features::MenuViews::Scenes
 					return "its sampler modes have no graph sampler";
 			}
 
-			Observe::Effect(a_capture.pass, constants);
+			if (Observe::Enabled()) {
+				std::array<const ID3D11ShaderResourceView*, kEffectSlots> views{};
+				std::array<std::uint32_t, kEffectSlots> address{}, filter{};
+				for (std::uint32_t t = 0; t < kEffectSlots; ++t) {
+					views[t] = rss.PSTexture[t];
+					address[t] = rss.PSTextureAddressMode[t].underlying();
+					filter[t] = rss.PSTextureFilterMode[t].underlying();
+				}
+				Observe::Effect(a_capture.pass, constants, views.data(), address.data(), filter.data());
+			}
 			std::vector<std::byte> bytes(sizeof(EffectSceneConstants) + (texCoordIndex ? kEffectIndexedTexCoordBytes : 0));
 			std::memcpy(bytes.data(), &constants, sizeof(EffectSceneConstants));
 			if (texCoordIndex) {

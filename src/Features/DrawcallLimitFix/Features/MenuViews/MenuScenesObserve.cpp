@@ -59,7 +59,7 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			// The batch's draws in the engine's order, and CS's order for the same root.
 			std::vector<const RE::BSGeometry*> engineOrder;
 			std::vector<std::uint32_t> engineHints;  // each engine draw's accumulation hint, for the order log
-			std::vector<RE::BSGeometry*> mineOrder;
+			std::vector<Native::ScenePass> mineOrder;
 			std::uint64_t orderBatches = 0, orderDiffer = 0;
 		};
 
@@ -157,9 +157,9 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			++s.orderBatches;
 			// The blended list's order (hint 1 in the engine's passes, BlendedList in CS's), and whether the two agree on membership.
 			std::vector<const RE::BSGeometry*> mine, engine;
-			for (auto* g : s.mineOrder)
-				if (Native::BlendedList(*g))
-					mine.push_back(g);
+			for (const auto& p : s.mineOrder)
+				if (!p.membrane && Native::BlendedList(*p.geometry))
+					mine.push_back(p.geometry);
 			bool membership = true;
 			for (std::size_t i = 0; i < s.engineOrder.size(); ++i) {
 				const bool hint1 = s.engineHints[i] == 1;
@@ -339,7 +339,8 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 				Note("frame", false, {});
 	}
 
-	void Effect(const RE::BSRenderPass* a_pass, const EffectSceneConstants& a_engine)
+	void Effect(const RE::BSRenderPass* a_pass, const EffectSceneConstants& a_engine, const ID3D11ShaderResourceView* const* a_views, const std::uint32_t* a_address,
+		const std::uint32_t* a_filter)
 	{
 		auto& s = Get();
 		if (!s.active || !a_pass || !a_pass->geometry || !s.camera)
@@ -351,7 +352,9 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		}
 		Native::EffectResult mine;
 		std::string why;
-		const bool made = s.inputsMade && Native::ComputeEffect(s.inputs, *a_pass->geometry, mine, why);
+		// A Lighting property's extra Effect pass is its membrane.
+		const bool membrane = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_pass->shaderProperty) != nullptr;
+		const bool made = s.inputsMade && (membrane ? Native::ComputeMembrane(s.inputs, *a_pass->geometry, mine, why) : Native::ComputeEffect(s.inputs, *a_pass->geometry, mine, why));
 		Note("effect computed", !made, std::format("{}: {}", name, why));
 		if (made) {
 			const std::uint32_t pass = a_pass->passEnum - Effects::kEffectPassEnumBase;
@@ -371,12 +374,28 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			constexpr auto kAlphaBlend = static_cast<std::uint32_t>(State::ExtraShaderDescriptors::SourceAlphaBlend);
 			Note("effect permutation", permutation.renderToUI != a_engine.renderToUI || (permutation.extra & kAlphaBlend) != (a_engine.descriptors[2] & kAlphaBlend),
 				std::format("{}: engine ui {} extra {:#x}, mine ui {} extra {:#x}", name, a_engine.renderToUI, a_engine.descriptors[2], permutation.renderToUI, permutation.extra));
-			compare("effect vs technique", a_engine.vsTechnique, c.vsTechnique, w.vsTechnique, kEffectVSTechniqueRows);
-			compare("effect ps technique", a_engine.psTechnique, c.psTechnique, w.psTechnique, kEffectPSTechniqueRows);
-			compare("effect vs material", a_engine.vsMaterial, c.vsMaterial, w.vsMaterial, kEffectVSMaterialRows);
-			compare("effect ps material", a_engine.psMaterial, c.psMaterial, w.psMaterial, kEffectPSMaterialRows);
-			compare("effect vs geometry", a_engine.vsGeometry, c.vsGeometry, w.vsGeometry, kEffectVSGeometryRows);
-			compare("effect ps geometry", a_engine.psGeometry, c.psGeometry, w.psGeometry, kEffectPSGeometryRows);
+			// A membrane's rows are counted apart, as their own port.
+			const std::string prefix = membrane ? "membrane" : "effect";
+			const auto field = [&](const char* a_name) { return prefix + a_name; };
+			compare(field(" vs technique").c_str(), a_engine.vsTechnique, c.vsTechnique, w.vsTechnique, kEffectVSTechniqueRows);
+			compare(field(" ps technique").c_str(), a_engine.psTechnique, c.psTechnique, w.psTechnique, kEffectPSTechniqueRows);
+			compare(field(" vs material").c_str(), a_engine.vsMaterial, c.vsMaterial, w.vsMaterial, kEffectVSMaterialRows);
+			compare(field(" ps material").c_str(), a_engine.psMaterial, c.psMaterial, w.psMaterial, kEffectPSMaterialRows);
+			compare(field(" vs geometry").c_str(), a_engine.vsGeometry, c.vsGeometry, w.vsGeometry, kEffectVSGeometryRows);
+			compare(field(" ps geometry").c_str(), a_engine.psGeometry, c.psGeometry, w.psGeometry, kEffectPSGeometryRows);
+			if (membrane) {
+				Note("membrane shader descriptors", a_engine.descriptors[0] != mine.vertex || a_engine.descriptors[1] != (mine.rawPixel & ~mine.pixel),
+					std::format("{}: engine {:#x} {:#x}, mine {:#x} {:#x}", name, a_engine.descriptors[0], a_engine.descriptors[1], mine.vertex, mine.rawPixel & ~mine.pixel));
+				for (std::uint32_t t = 0; t < kEffectSlotsRead; ++t) {
+					if (!((mine.record.textureWritten >> t) & 1))
+						continue;
+					const auto* view = ::RenderGraph::Engine::Tripwire::Unwrap(mine.record.textures[t]);
+					const auto* engine = ::RenderGraph::Engine::Tripwire::Unwrap(a_views[t]);
+					Note(std::format("membrane texture t{}", t), view != engine, std::format("{}: engine {} mine {}", name, static_cast<const void*>(engine), static_cast<const void*>(view)));
+					Note(std::format("membrane sampler t{}", t), mine.record.addressModes[t] != a_address[t] || mine.record.filterModes[t] != a_filter[t],
+						std::format("{}: engine {}/{} mine {}/{}", name, a_address[t], a_filter[t], mine.record.addressModes[t], mine.record.filterModes[t]));
+				}
+			}
 		}
 		static std::map<std::string, int> dumped;
 		if (dumped[name]++ != 0)
@@ -408,6 +427,16 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			alpha ? std::format("flags {:#x} threshold {}", alpha->alphaFlags, alpha->alphaThreshold) : std::string("none"));
 		if (s.others[key]++ == 0)
 			logger::info("[DCLF] menu scenes observe: state {}", key);
+		const bool membrane = netimmerse_cast<const RE::BSLightingShaderProperty*>(property) && a_pass->passEnum >= Effects::kEffectPassEnumBase &&
+		                      ((a_pass->passEnum - Effects::kEffectPassEnumBase) & Effects::EffectFlag::Membrane) != 0;
+		if (membrane) {
+			const auto* manager = RE::UI3DSceneManager::GetSingleton();
+			Native::DrawState mine;
+			const bool made = manager && Native::MembraneStateOf(*a_pass->geometry, Native::SortsByClosestPoint(*manager), mine);
+			Note("membrane state", !made || mine.blend != a_blend || mine.write != a_write || mine.depth != a_depth || mine.cull != a_cull || mine.depthBias != a_depthBias || a_alphaRef >= 0.0f || a_pass->accumulationHint != 3,
+				std::format("{}: engine blend {} write {} depth {} cull {} bias {} alphaRef {} hint {}; mine blend {} write {} depth {} cull {} bias {}", GeometryName(a_pass->geometry),
+					a_blend, a_write, a_depth, a_cull, a_depthBias, a_alphaRef, a_pass->accumulationHint, mine.blend, mine.write, mine.depth, mine.cull, mine.depthBias));
+		}
 	}
 
 	void Bones(const RE::BSRenderPass* a_pass, std::span<const std::byte> a_engine)

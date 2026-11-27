@@ -33,6 +33,8 @@ namespace DCLF::Features::Effects
 
 	inline constexpr std::uint32_t kEffectPSPropertyColor = 0;
 	inline constexpr std::uint32_t kEffectPSAlphaTestRef = 1;
+	inline constexpr std::uint32_t kEffectPSMembraneRimColor = 2;
+	inline constexpr std::uint32_t kEffectPSMembraneVars = 3;
 	inline constexpr std::uint32_t kEffectPSPLightPositionX = 4;  // first PerGeometry PS variable
 	inline constexpr std::uint32_t kEffectPSDLightColor = 11;
 	inline constexpr std::uint32_t kEffectPSVPOSOffset = 12;

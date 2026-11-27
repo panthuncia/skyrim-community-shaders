@@ -249,6 +249,9 @@ namespace DCLF::Family
 	 */
 	Viewport FrameViewport(std::int32_t a_colour, std::int32_t a_depth, std::uint32_t a_depthBias, bool a_shifted = false);
 
+	/** @brief What depth bias mode a_depthBias takes off a viewport's maximum depth (CreateDepthBiasViewportOffsets' table). */
+	float DepthBiasViewportOffset(std::uint32_t a_depthBias);
+
 	namespace Constants = ::RenderGraph::Engine::Constants;
 	namespace Flush = ::RenderGraph::Engine::Flush;
 
