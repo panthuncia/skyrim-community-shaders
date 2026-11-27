@@ -42,7 +42,6 @@ namespace DCLF::Api
 		void (*test)(const RootTestInput& a_input, RootTestOutput& a_out) = nullptr;
 		void (*globalsKey)(const RootTestInput& a_input, std::uint32_t& a_witness) = nullptr;
 		void (*kick)() = nullptr;
-		void (*frameStart)() = nullptr;
 		void (*latchGlobals)(float (&a_eye)[4], float (&a_treeHeight)[2]) = nullptr;
 	};
 }

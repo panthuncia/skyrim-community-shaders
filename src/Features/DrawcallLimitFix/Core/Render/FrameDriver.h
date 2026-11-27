@@ -41,6 +41,7 @@ namespace DCLF
 	{
 		WaterScene,  // the tracked water shapes (Features/Water/WaterNative.cpp)
 		SkyRoot,     // the sky root's objects (Features/Sky/SkyNative.cpp)
+		Fades,       // the fade update's engine inputs (Features/Fades/FadeState.cpp)
 		Count
 	};
 	inline constexpr std::size_t kTicketParts = static_cast<std::size_t>(TicketPart::Count);

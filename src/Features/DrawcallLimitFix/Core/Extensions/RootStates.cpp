@@ -100,12 +100,6 @@ namespace DCLF::Extensions
 			states->contribution.kick();
 	}
 
-	void RootStatesFrameStart()
-	{
-		if (const auto* states = RootStates(); states && states->contribution.frameStart)
-			states->contribution.frameStart();
-	}
-
 	void RootStatesLatchGlobals(float (&a_eye)[4], float (&a_treeHeight)[2])
 	{
 		if (const auto* states = RootStates(); states && states->contribution.latchGlobals) {

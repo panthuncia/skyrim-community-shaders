@@ -2,12 +2,18 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
 
 namespace DCLF
 {
+	namespace ShadowCameras
+	{
+		struct Planes;
+	}
+
 	/**
 	 * @brief A CPU port of the engine's fade OnVisible for BSFadeNode, BSLeafAnimNode and BSTreeNode (AE 1.6.1170).
 	 * It follows the engine instruction for instruction, including MINSS/MAXSS and unordered comparisons,
@@ -23,22 +29,27 @@ namespace DCLF
 		/** @brief The animation job's fade update, repeated a_updates times. */
 		void AnimatedUpdate(FadeNodeState& a_state, const FadeRootStatic& a_root, const float a_centre[3], const FadeFrame& a_frame, std::uint32_t a_updates);
 
-		/** @brief Render thread. a_camera may be null. */
+		/**
+		 * @brief Render side. The fade update's inputs for this render: native takes the engine's values from the frame ticket
+		 * (TicketPart::Fades); guest reads them now. The step scales with the game updates the adopted snapshot stands for.
+		 * a_camera may be null.
+		 */
 		FadeFrame SampleFrame(const RE::NiCamera* a_camera);
 
 		/**
-		 * @brief Render thread, at frame start after the camera setup and before the culls.
-		 * Measures from the main camera so the results do not depend on the engine's list processes running.
+		 * @brief Game half (DCLF's frame start, the ticket's parts): the fade update's engine inputs, the main camera's position, LOD
+		 * factor and frustum, and the tree height test. Measured from the main camera, so they do not depend on the engine's list
+		 * processes running.
 		 */
-		void BeginFrame();
-		/** @brief Main camera position and LOD factor (NiCamera +0x184). Zero when no camera was seen. */
+		std::shared_ptr<const void> TakeTicketPart();
+		/** @brief Render side. Main camera position and LOD factor (NiCamera +0x184) from the ticket. Zero when no camera was seen. */
 		std::array<float, 4> FadeEye();
-		/** @brief Tree height test base and limit. The limit is +infinity when off. */
+		/** @brief Render side. Tree height test base and limit from the ticket. The limit is +infinity when off. */
 		std::array<float, 2> TreeHeightTest();
 		/** @brief Render thread, at the depth commit. */
 		void LatchGlobals(float (&a_eye)[4], float (&a_treeHeight)[2]);
-		/** @brief Render thread. Null when there is none. */
-		const RE::NiCamera* MainCamera();
+		/** @brief Render side. The main camera's frustum planes; false without a camera. Native: the ticket's; guest reads now. */
+		bool MainCameraFrustum(ShadowCameras::Planes& a_out);
 
 		FadeNodeState ReadNode(const RE::NiAVObject& a_node);
 		/**

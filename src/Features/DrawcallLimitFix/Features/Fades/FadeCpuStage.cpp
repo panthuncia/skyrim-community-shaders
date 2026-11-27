@@ -277,11 +277,7 @@ namespace DCLF::Features::Fades
 			input->treeHeight = FadeState::TreeHeightTest();
 			std::copy_n(input->fadeEye.data(), 3, input->frame.eye);
 			input->frame.lodAdjust = input->fadeEye[3];
-			if (const auto* camera = FadeState::MainCamera()) {
-				ShadowCameras::Camera matrices;
-				ShadowCameras::CameraMatrices(*camera, matrices);
-				input->camera = matrices.frustum;
-			}
+			(void)FadeState::MainCameraFrustum(input->camera);
 			const auto list = Extensions::RootListOf(*tables);
 			TakeAnimated(*input);
 			{

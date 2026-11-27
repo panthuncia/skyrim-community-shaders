@@ -98,8 +98,6 @@ namespace DCLF::Extensions
 	Api::TableFamilyId RootStatesFamily();
 	/** @brief Render thread, once per frame. The producer's kick. */
 	void RootStatesKick();
-	/** @brief Render thread, once per frame after the camera cut, only with the primary cull installed. The producer's frameStart. */
-	void RootStatesFrameStart();
 	/** @brief Render thread, at the depth commit. The fade test's latch words, or a zero eye and a {0, +infinity} height without a producer. */
 	void RootStatesLatchGlobals(float (&a_eye)[4], float (&a_treeHeight)[2]);
 }

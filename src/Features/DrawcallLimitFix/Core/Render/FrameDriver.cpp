@@ -287,8 +287,6 @@ namespace DCLF
 		const FrameGlobals::Scope globals(t->globals);
 		TracyCZoneN(bfCamera, "CS.DCLF.BF.Camera", true);
 		PrimaryCull::Get().BeginFrameCamera();
-		if (PrimaryCull::Get().Installed())
-			Extensions::RootStatesFrameStart();
 		Extensions::PaletteRowsFrameStart();
 		TracyCZoneEnd(bfCamera);
 		// Load screen frames have no claims, so they are never waited for or required to be covered.
