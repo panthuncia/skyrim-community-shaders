@@ -375,6 +375,8 @@ public:
 	void BlendGradedAmbient(RE::Sky* a_sky, DirectionalAmbientColors& a_graded);
 
 	void ModifySky(RE::BSRenderPass* Pass);
+	/** @brief The same from a sky object's type (DCLF's native sky reads captured values). */
+	void ModifySky(std::uint32_t a_skyObjectType);
 	/**
 	 * @brief Whether Effects11 wants to replace the vanilla tonemap this frame.
 	 *

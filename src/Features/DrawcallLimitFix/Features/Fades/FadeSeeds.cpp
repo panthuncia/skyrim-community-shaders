@@ -56,7 +56,7 @@ namespace DCLF::Features::Fades
 
 		Api::FrameValuePoolId fadeSeedsPool;
 
-		// Render thread. idleSeeds is reused while nothing is new, to avoid an allocation every frame.
+		// Game half. idleSeeds is reused while nothing is new, to avoid an allocation every frame.
 		std::vector<SeedCopy> unsentSeeds;
 		std::uint32_t seedRows = 0;
 		std::shared_ptr<const SeedInput> idleSeeds;
@@ -68,7 +68,7 @@ namespace DCLF::Features::Fades
 		// For the diagnostic capture.
 		std::atomic<std::size_t> unsentSeedCount{ 0 }, owedSeedCount{ 0 };
 
-		// Render thread, before this frame's culls update the nodes. FadeStateCS's first update is this frame's.
+		// Game half, before this frame's culls update the nodes. FadeStateCS's first update is this frame's.
 		void FadeSeedsFrameStart(const Api::FrameValuePoolFrameStart& a_start)
 		{
 			auto seeds = Scene::FrameView::Get().TakeComponentSeeds(Scene::FadeRootComponentId());

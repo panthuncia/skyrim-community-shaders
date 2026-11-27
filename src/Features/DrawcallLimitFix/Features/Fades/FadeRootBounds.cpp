@@ -31,7 +31,7 @@ namespace DCLF::Features::Fades
 		};
 
 		Api::FrameValuePoolId boundsPool;
-		// Render thread.
+		// Game half.
 		std::uint64_t boundRows = 0;
 		std::shared_ptr<const BoundsInput> idleBoundsInput = std::make_shared<BoundsInput>();
 		// Producer only, one at a time in frame order.

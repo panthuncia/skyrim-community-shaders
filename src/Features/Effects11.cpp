@@ -1210,13 +1210,19 @@ void Effects11::ModifySky(RE::BSRenderPass* Pass)
 		return;
 	}
 
-	auto skyProperty = static_cast<const RE::BSSkyShaderProperty*>(Pass->shaderProperty);
+	ModifySky(static_cast<const RE::BSSkyShaderProperty*>(Pass->shaderProperty)->uiSkyObjectType.underlying());
+}
+
+void Effects11::ModifySky(std::uint32_t a_skyObjectType)
+{
+	if (!enableEffect)
+		return;
 
 	auto state = globals::state;
 
 	state->permutationData.ExtraShaderDescriptor &= ~static_cast<uint32_t>(State::ExtraShaderDescriptors::IsSun);
 
-	if (skyProperty->uiSkyObjectType == RE::BSSkyShaderProperty::SkyObject::SO_SUN) {
+	if (static_cast<RE::BSSkyShaderProperty::SkyObject>(a_skyObjectType) == RE::BSSkyShaderProperty::SkyObject::SO_SUN) {
 		state->permutationData.ExtraShaderDescriptor |= static_cast<uint32_t>(State::ExtraShaderDescriptors::IsSun);
 	}
 }

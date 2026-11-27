@@ -36,12 +36,13 @@ namespace DCLF::Api
 	/**
 	 * @brief A frame-value pool. The feature journals its rows, and each frame only the missing runs are sent.
 	 *
-	 * - frameStart: render thread at every kick, before it is known whether the frame has a producer.
+	 * - frameStart: the game half, once per ticket, before it is known whether the ticket has a sampling job.
 	 *   Read frame-start engine state here and drain the frame's queued requests.
-	 * - kick: render thread. Not called on a frame without a producer.
-	 * - sample: on DCLF's pool. Producers run one at a time in frame order, so state only they touch needs no lock.
-	 *   Read the engine only under an EngineReadWindow lease.
-	 * - send: hands the rows to FrameValuePoolProducer::Send.
+	 * - kick: the game half with the ticket's sampling job (a perRender pool: the render thread with each upload job).
+	 * - sample: on DCLF's pool, in the ticket's sampling job (perRender: in the render's upload job). Jobs run one at a time in kick
+	 *   order, so state only they touch needs no lock. Read the engine only under an EngineReadWindow lease, and never in a perRender
+	 *   pool: the render side takes no lease.
+	 * - send: in each render's upload job, hands the rows to FrameValuePoolProducer::Send.
 	 * A throw from sample or send fails the frame's values. The frame then draws what its backings already held.
 	 */
 	struct FrameValuePool
@@ -52,6 +53,8 @@ namespace DCLF::Api
 		bool deviceAddress = false;
 		// The GPU writes to the rows. D3D12 needs this, or the UAV is a null view and every store is dropped.
 		bool unorderedAccess = false;
+		// Kicked and sampled with each render's upload, from render-side state (the render's view batches, its placement rows).
+		bool perRender = false;
 		void (*frameStart)(const FrameValuePoolFrameStart& a_start) = nullptr;
 		FrameValueInput (*kick)(const FrameValuePoolKick& a_kick) = nullptr;
 		void (*sample)(FrameValuePoolProducer& a_producer) = nullptr;
@@ -80,7 +83,7 @@ namespace DCLF::Api
 	 * @brief A palette rows class. Its items are sampled every frame whether or not they moved, and the feature writes their blocks.
 	 *
 	 * - geometrySource: scene lane, per record write. Returns false when no geometry slot exists yet, so the record waits.
-	 * - kick: render thread, only on frames with a producer. The input stays all zero without a kick.
+	 * - kick: the game half, with each ticket's sampling job. The input stays all zero without a kick.
 	 * - beginRun: lists this run's items of the class and sets each one's state.
 	 * - sampleChunk: runs concurrently with other chunks, and chunks hold distinct items. Writes every row of each block.
 	 *   May also supply the placement row's world and bound. No engine reads, because no lease is held.

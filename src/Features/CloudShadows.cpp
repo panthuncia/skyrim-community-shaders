@@ -270,14 +270,14 @@ void CloudShadows::Capture(Snapshot::Builder& a_builder)
 	a_builder.Set(block);
 }
 
-int CloudShadows::FindCloudLayer(RE::BSRenderPass* Pass)
+int CloudShadows::FindCloudLayer(const void* a_geometry)
 {
 	const auto& snapshot = Snapshot::Current();
 	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
 	if (!frame)
 		return -1;
 	for (std::uint32_t i = 0; i < frame->layerCount; i++) {
-		if (frame->layers[i].Names(Pass->geometry))
+		if (frame->layers[i].Names(a_geometry))
 			return static_cast<int>(i);
 	}
 	return -1;
@@ -291,12 +291,15 @@ void CloudShadows::ModifySky(RE::BSRenderPass* Pass)
 
 void CloudShadows::ModifySky(RE::BSRenderPass* Pass, bool a_reflectionFace)
 {
-	auto skyProperty = static_cast<const RE::BSSkyShaderProperty*>(Pass->shaderProperty);
+	ModifySky(static_cast<const RE::BSSkyShaderProperty*>(Pass->shaderProperty)->uiSkyObjectType.underlying(), Pass->geometry, a_reflectionFace);
+}
 
-	if (skyProperty->uiSkyObjectType != RE::BSSkyShaderProperty::SkyObject::SO_CLOUDS)
+void CloudShadows::ModifySky(std::uint32_t a_skyObjectType, const void* a_geometry, bool a_reflectionFace)
+{
+	if (static_cast<RE::BSSkyShaderProperty::SkyObject>(a_skyObjectType) != RE::BSSkyShaderProperty::SkyObject::SO_CLOUDS)
 		return;
 
-	int layer = FindCloudLayer(Pass);
+	int layer = FindCloudLayer(a_geometry);
 	if (layer < 0)
 		return;
 

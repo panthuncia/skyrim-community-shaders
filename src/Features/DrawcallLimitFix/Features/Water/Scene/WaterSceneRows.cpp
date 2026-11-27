@@ -406,7 +406,7 @@ namespace DCLF::Features::Water::WaterScene
 		KeptWholeArray<WaterMaterialRow> producedMaterials;
 		KeptWholeArray<WaterFrameRow> producedFrame;
 
-		/** @brief Render thread, right after this frame's capture: every live row, evaluated with this frame. */
+		/** @brief Game half, right after this frame's capture: every live row, evaluated with this frame. */
 		Api::FrameValueInput KickMaterials(const Api::FrameValuePoolKick&)
 		{
 			auto& state = Pool();

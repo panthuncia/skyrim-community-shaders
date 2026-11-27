@@ -52,8 +52,6 @@ namespace DCLF::Features::Sky::Native
 			inline constexpr Engine::Offset kSkyShader{ { 415143 }, { 528198 } };       // BSSkyShader*: the sun query's pass shader
 		}
 
-		// The pass id the sun's occlusion query draws with (FUN_1414b4c00's MakeRenderPass).
-		constexpr std::uint32_t kSunOcclusionPass = 2;
 		// FinishAccumulating's alpha reference for the sky batch (AE 0x1414b2d90: 0.5019608).
 		constexpr float kFaceAlphaRef = 128.0f / 255.0f;
 		// RenderBatches' flags at a face's sky batch: SubmitAccumulator's 8 (BSCubeMapCamera::RenderFaces, AE 0x1414ed920).
@@ -329,6 +327,33 @@ namespace DCLF::Features::Sky::Native
 			return renderer ? Unwrap(Field<ID3D11ShaderResourceView*>(renderer, 0x10)) : nullptr;
 		}
 
+		/** @brief The engine globals a sky draw reads (SetupGeometry, SetupTechnique). Native takes them in the game half. */
+		struct SkyGlobals
+		{
+			float vParams = 0.0f;
+			std::array<float, 2 * kCloudLayers> cloudOffsets{};  // each cloud layer's texture offset
+			std::array<float, 12> skyColours{};                  // the atmosphere's BlendColor, three NiColorA
+			ID3D11ShaderResourceView* defaultView = nullptr;     // t0 of SunOcclude and Stars without a base texture
+			ID3D11ShaderResourceView* whiteView = nullptr;       // t0 of the others without one
+			ID3D11ShaderResourceView* noiseView = nullptr;       // t2, the noise gradient
+
+			/** @brief Reads them now. */
+			static SkyGlobals Take()
+			{
+				SkyGlobals out;
+				out.vParams = Global<float>(Address::kVParams);
+				std::memcpy(out.cloudOffsets.data(), reinterpret_cast<const void*>(REL::Offset(Address::kCloudOffsets).address()), sizeof(out.cloudOffsets));
+				std::memcpy(out.skyColours.data(), reinterpret_cast<const void*>(REL::Offset(Address::kSkyColours).address()), sizeof(out.skyColours));
+				out.defaultView = ViewOf(Global<const void*>(Address::kDefaultTexture));
+				out.whiteView = ViewOf(Global<const void*>(Address::kWhiteTexture));
+				out.noiseView = ViewOf(Global<const void*>(Address::kNoiseTexture));
+				return out;
+			}
+		};
+
+		/** @brief Native, render thread: the sky globals the frame's ticket took, or null before the first ticket. */
+		const SkyGlobals* TicketGlobals();
+
 		/** @brief The vertex shader's VertexDesc for a raw technique: the engine keys its layout on the vanilla shader's. */
 		std::uint64_t VertexDescOf(const RE::BSShader& a_shader, std::uint32_t a_technique)
 		{
@@ -355,14 +380,14 @@ namespace DCLF::Features::Sky::Native
 			State* state = nullptr;
 			RE::NiPoint3 posAdjust, previousPosAdjust, eye;
 			std::array<float, 16> viewProj{};
-			float vParams = 0.0f, skyScale = 0.0f, alphaRef = 0.0f;
-			const float* cloudOffsets = nullptr;
-			const float* skyColours = nullptr;
+			SkyGlobals sky;
+			float skyScale = 0.0f, alphaRef = 0.0f;
 			Family::Viewport viewport;
 			std::uint32_t reflection = 0;
 			std::uint32_t stencilRef = 0;
 
-			bool Read(RE::BSShaderAccumulator* a_accumulator, const BatchInputs& a_inputs, std::string& a_why)
+			/** @brief a_sky: the ticket's globals (native), or null to read them now. */
+			bool Read(RE::BSShaderAccumulator* a_accumulator, const BatchInputs& a_inputs, const SkyGlobals* a_sky, std::string& a_why)
 			{
 				inputs = a_inputs;
 				// The first-person accumulator adjusts the world by its camera (SetupGeometry's +0x128 branch). The sky is never drawn there.
@@ -393,10 +418,8 @@ namespace DCLF::Features::Sky::Native
 				}
 				// StartAccumulating gives the accumulator the world camera's position, which is the frame camera's eye at native's points.
 				eye = world && frameCamera ? posAdjust : a_accumulator->GetRuntimeData()->eyePosition;
-				vParams = Global<float>(Address::kVParams);
-				skyScale = vParams * SkyBrightness();
-				cloudOffsets = reinterpret_cast<const float*>(REL::Offset(Address::kCloudOffsets).address());
-				skyColours = reinterpret_cast<const float*>(REL::Offset(Address::kSkyColours).address());
+				sky = a_sky ? *a_sky : SkyGlobals::Take();
+				skyScale = sky.vParams * SkyBrightness();
 				viewport = Family::LatchViewport(0);
 				// Native's RenderWorld points take the references from CS's frame.
 				if (!rss) {
@@ -415,7 +438,7 @@ namespace DCLF::Features::Sky::Native
 			 * and posAdjust are the face camera's (SetCameraData), the eye is the accumulator's (the camera position), the alpha
 			 * reference is FinishAccumulating's 128/255, and the viewport is the face's.
 			 */
-			bool ReadFace(const FaceView& a_view, const BatchInputs& a_inputs, std::string& a_why)
+			bool ReadFace(const FaceView& a_view, const BatchInputs& a_inputs, const SkyGlobals* a_sky, std::string& a_why)
 			{
 				inputs = a_inputs;
 				state = globals::state;
@@ -427,10 +450,8 @@ namespace DCLF::Features::Sky::Native
 				posAdjust = eye = a_view.eye;
 				previousPosAdjust = {};
 				viewProj = a_view.viewProj;
-				vParams = Global<float>(Address::kVParams);
-				skyScale = vParams * SkyBrightness();
-				cloudOffsets = reinterpret_cast<const float*>(REL::Offset(Address::kCloudOffsets).address());
-				skyColours = reinterpret_cast<const float*>(REL::Offset(Address::kSkyColours).address());
+				sky = a_sky ? *a_sky : SkyGlobals::Take();
+				skyScale = sky.vParams * SkyBrightness();
 				viewport = Family::LatchViewport(0);
 				viewport.rect = a_view.rect;
 				alphaRef = kFaceAlphaRef;
@@ -528,32 +549,30 @@ namespace DCLF::Features::Sky::Native
 		 * @brief One pass's draw, as SetupTechnique, SetupGeometry and the engine's state for it would make it. a_cloudLayers is the
 		 * cloud group's last face layer when the pass is a cloud layer of the group, else null.
 		 */
-		PassResult BuildPass(const Frame& a_frame, RE::BSRenderPass* a_pass, std::uint32_t a_technique, const Modes& a_modes, std::int32_t* a_cloudLayers, Draw& a_draw,
+		PassResult BuildPass(const Frame& a_frame, const PassObject& a_object, std::uint32_t a_technique, const Modes& a_modes, std::int32_t* a_cloudLayers, Draw& a_draw,
 			Family::Owners& a_owners, std::string& a_why)
 		{
-			CS_ENGINE_READ_MARK(Scene, RecordTime);
-			auto* geometry = a_pass->geometry;
-			auto* property = a_pass->shaderProperty;
-			if (!geometry || !property || !a_pass->shader || a_pass->shader->shaderType.get() != RE::BSShader::Type::Sky) {
+			if (!a_object.drawable) {
 				a_why = "a pass that is not a BSSkyShader draw";
 				return PassResult::Failed;
 			}
-			if (geometry->GetType().get() != RE::BSGeometry::Type::kTriShape) {
+			if (!a_object.triShape) {
 				a_why = "a sky pass that is not a TriShape";
 				return PassResult::Failed;
 			}
 			auto* state = a_frame.state;
 			const auto& inputs = a_frame.inputs;
-			const auto type = Field<std::uint32_t>(property, kSkyObjectType);
+			const auto& shader = *a_object.shader;
+			const auto type = a_object.type;
 			// CS's per-pass sky bits (sun, moon, Secunda, cloud scattering), as its SetupGeometry hook sets them (Hooks.cpp), and
 			// Cloud Shadows' layer for a cloud draw, as its SetupMaterial hook finds it (CloudShadows.cpp).
-			state->UpdateSkyShaderPermutation(a_pass);
+			state->UpdateSkyShaderPermutation(type, a_object.geometry);
 			if (globals::features::effects11.loaded)
-				globals::features::effects11.ModifySky(a_pass);
+				globals::features::effects11.ModifySky(type);
 			auto& cloudShadows = globals::features::cloudShadows;
 			CloudPart cloud;
 			if (a_cloudLayers && cloudShadows.loaded) {
-				cloudShadows.ModifySky(a_pass, inputs.view == View::Face);
+				cloudShadows.ModifySky(type, a_object.geometry, inputs.view == View::Face);
 				cloud.occlusion = inputs.view == View::Face && cloudShadows.overrideSky && cloudShadows.cloudShadowBlendState;
 				cloud.layer = cloudShadows.currentLayerForDraw;
 			}
@@ -564,7 +583,7 @@ namespace DCLF::Features::Sky::Native
 
 			std::uint32_t vertexDescriptor = a_technique;
 			std::uint32_t pixelDescriptor = a_technique;
-			state->ModifyShaderLookup(*a_pass->shader, vertexDescriptor, pixelDescriptor);
+			state->ModifyShaderLookup(shader, vertexDescriptor, pixelDescriptor);
 			a_draw.stencilRef = a_frame.stencilRef;
 			auto* depthStencil = Pipeline::EngineDepthStencilState(a_modes.depth, a_modes.stencil);
 			auto* blend = cloud.occlusion ? cloudShadows.cloudShadowBlendState :
@@ -574,8 +593,7 @@ namespace DCLF::Features::Sky::Native
 				a_why = "a state with no description";
 				return PassResult::Failed;
 			}
-			ProgramInputs programInputs{ .blend = blend, .depthStencil = depthStencil, .raster = raster, .shader = a_pass->shader, .descriptor = pixelDescriptor,
-				.variant = inputs.view != View::Main ? kVariantFaces : 0u, .occlusion = cloud.occlusion ? 1u : 0u };
+			ProgramInputs programInputs{ .blend = blend, .depthStencil = depthStencil, .raster = raster, .shader = &shader, .descriptor = pixelDescriptor, .variant = inputs.view != View::Main ? kVariantFaces : 0u, .occlusion = cloud.occlusion ? 1u : 0u };
 			if (inputs.view == View::Main) {
 				std::copy(inputs.colourFormats.begin(), inputs.colourFormats.end(), programInputs.colourFormats.begin());
 				programInputs.depthFormat = inputs.depthFormat;
@@ -601,7 +619,7 @@ namespace DCLF::Features::Sky::Native
 				a_draw.key.colourFormats = programInputs.colourFormats;
 				a_draw.key.depthFormat = programInputs.depthFormat;
 				bool building = false;
-				a_draw.program = SkyDraws::Program(a_draw.key, *a_pass->shader, &building);
+				a_draw.program = SkyDraws::Program(a_draw.key, shader, &building);
 				if (!a_draw.program) {
 					a_why = "a program that cannot be built";
 					return building ? PassResult::LeftOut : PassResult::Failed;
@@ -609,7 +627,7 @@ namespace DCLF::Features::Sky::Native
 				if (cloud.occlusion) {
 					auto occlusionKey = a_draw.key;
 					occlusionKey.maskedTargets = 1;
-					a_draw.occlusionProgram = SkyDraws::Program(occlusionKey, *a_pass->shader, &building);
+					a_draw.occlusionProgram = SkyDraws::Program(occlusionKey, shader, &building);
 					if (!a_draw.occlusionProgram) {
 						a_why = "an occlusion program that cannot be built";
 						return building ? PassResult::LeftOut : PassResult::Failed;
@@ -632,11 +650,9 @@ namespace DCLF::Features::Sky::Native
 			}
 
 			// Geometry: the TriShape's buffers and its whole index range, as the dispatcher draws it.
-			const auto* shape = reinterpret_cast<const Family::TriShape*>(geometry->GetGeometryRuntimeData().rendererData);
-			const auto triangles = static_cast<RE::BSTriShape*>(geometry)->GetTrishapeRuntimeData().triangleCount;
 			Family::Geometry latched;
 			std::string detail;
-			if (const auto result = Family::LatchGeometry(shape, 0, triangles, VertexDescOf(*a_pass->shader, a_technique), D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
+			if (const auto result = Family::LatchGeometry(a_object.shape, 0, a_object.triangles, VertexDescOf(shader, a_technique), D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
 					latched, a_owners, &detail);
 				result != Family::GeometryResult::Ok) {
 				a_why = std::format("geometry: {} {}", Family::ReasonOf(result), detail);
@@ -645,19 +661,17 @@ namespace DCLF::Features::Sky::Native
 
 			// SetupGeometry's constants.
 			auto& c = a_draw.constants;
-			const auto* world = reinterpret_cast<const float*>(reinterpret_cast<const std::byte*>(geometry) + kWorld);
-			const auto* previous = reinterpret_cast<const float*>(reinterpret_cast<const std::byte*>(geometry) + kPreviousWorld);
-			const auto m = MatrixOf(world, a_frame.posAdjust);
+			const auto m = MatrixOf(a_object.world.data(), a_frame.posAdjust);
 			MultiplyTranspose(m, a_frame.viewProj.data(), c.worldViewProj);
 			Transpose(m, c.world);
-			Transpose(MatrixOf(previous, a_frame.previousPosAdjust), c.previousWorld);
+			Transpose(MatrixOf(a_object.previousWorld.data(), a_frame.previousPosAdjust), c.previousWorld);
 			c.eyePosition[0] = a_frame.eye.x - a_frame.posAdjust.x;
 			c.eyePosition[1] = a_frame.eye.y - a_frame.posAdjust.y;
 			c.eyePosition[2] = a_frame.eye.z - a_frame.posAdjust.z;
-			c.vParams = a_frame.vParams;
+			c.vParams = a_frame.sky.vParams;
 			switch (type) {
 			case 2:
-				std::memcpy(c.blendColor, a_frame.skyColours, sizeof(c.blendColor));
+				std::memcpy(c.blendColor, a_frame.sky.skyColours.data(), sizeof(c.blendColor));
 				break;
 			case 0:
 			case 1:
@@ -665,16 +679,19 @@ namespace DCLF::Features::Sky::Native
 			case 5:
 			case 6:
 			case 7:
-				std::memcpy(c.blendColor, reinterpret_cast<const std::byte*>(property) + kBlendColor, 16);
+				std::memcpy(c.blendColor, a_object.blendColor.data(), sizeof(c.blendColor));
 				break;
 			default:
 				c.blendColor[3] = 1.0f;
 				break;
 			}
 			if (type == 3) {
-				const float blendValue = Field<float>(property, kBlendValue);
-				c.pParams[0] = a_technique == 6 && !Field<bool>(property, kFadeSecond) ? 1.0f - blendValue : blendValue;
-				std::memcpy(c.texCoordOff, a_frame.cloudOffsets + 2u * Field<std::uint16_t>(property, kCloudLayer), sizeof(c.texCoordOff));
+				if (a_object.cloudLayer >= kCloudLayers) {
+					a_why = std::format("a cloud layer {} past the engine's {}", a_object.cloudLayer, kCloudLayers);
+					return PassResult::Failed;
+				}
+				c.pParams[0] = a_technique == 6 && !a_object.fadeSecond ? 1.0f - a_object.blendValue : a_object.blendValue;
+				std::memcpy(c.texCoordOff, a_frame.sky.cloudOffsets.data() + 2u * a_object.cloudLayer, sizeof(c.texCoordOff));
 			}
 			// The MoonAndStarsMask and SunOcclude pixel shaders declare no PParams (the capture reads it as zero, and Sky.hlsl does not read it).
 			c.pParams[1] = type == 6 || type == 1 || a_technique == 2 || a_technique == 0 ? 0.0f : a_frame.skyScale;
@@ -687,30 +704,32 @@ namespace DCLF::Features::Sky::Native
 			a_draw.indexCount = latched.indexCount;
 
 			// SetupGeometry's and SetupTechnique's textures.
-			const void* base = Field<const void*>(property, kBaseTexture);
-			const void* blendTexture = Field<const void*>(property, kBlendTexture);
-			std::array<const void*, 3> textures{};
+			// A texture the property has, or the technique's fallback when it has none.
+			const auto& sky = a_frame.sky;
+			const auto baseOr = [&](ID3D11ShaderResourceView* a_fallback) { return a_object.hasBase ? a_object.baseView : a_fallback; };
+			std::array<ID3D11ShaderResourceView*, 3> textures{};
 			switch (a_technique) {
 			case 0:
 			case 3:
-				textures[0] = base ? base : Global<const void*>(Address::kDefaultTexture);
+				textures[0] = baseOr(sky.defaultView);
 				break;
 			case 6:
-				textures[0] = Field<bool>(property, kFadeSecond) ? blendTexture : base;
-				if (!textures[0])
-					textures[0] = Global<const void*>(Address::kWhiteTexture);
+				if (a_object.fadeSecond)
+					textures[0] = a_object.hasBlend ? a_object.blendView : sky.whiteView;
+				else
+					textures[0] = baseOr(sky.whiteView);
 				break;
 			default:
-				textures[0] = base ? base : Global<const void*>(Address::kWhiteTexture);
+				textures[0] = baseOr(sky.whiteView);
 				if (a_technique == 5)
-					textures[1] = blendTexture ? blendTexture : base;
+					textures[1] = a_object.hasBlend ? a_object.blendView : baseOr(nullptr);
 				break;
 			}
-			textures[2] = Global<const void*>(Address::kNoiseTexture);
+			textures[2] = sky.noiseView;
 			const auto used = TexturesOf(a_technique);
 			std::array<ID3D11ShaderResourceView*, 3> views{};
 			for (std::uint32_t t = 0; t < 3; ++t)
-				views[t] = used[t] ? ViewOf(textures[t]) : nullptr;
+				views[t] = used[t] ? textures[t] : nullptr;
 			auto* slots = SlotsOf(views, used, a_why);
 			if (!slots)
 				return PassResult::Failed;
@@ -761,6 +780,44 @@ namespace DCLF::Features::Sky::Native
 		}
 	}
 
+	PassObject TakePass(const RE::BSGeometry* a_geometry, const RE::BSShaderProperty* a_property, const RE::BSShader* a_shader)
+	{
+		PassObject out;
+		if (!a_geometry || !a_property || !a_shader || a_shader->shaderType.get() != RE::BSShader::Type::Sky)
+			return out;
+		out.drawable = true;
+		out.shader = a_shader;
+		out.geometry = a_geometry;
+		out.type = Field<std::uint32_t>(a_property, kSkyObjectType);
+		std::memcpy(out.blendColor.data(), static_cast<const std::byte*>(static_cast<const void*>(a_property)) + kBlendColor, sizeof(out.blendColor));
+		out.blendValue = Field<float>(a_property, kBlendValue);
+		out.cloudLayer = Field<std::uint16_t>(a_property, kCloudLayer);
+		out.fadeSecond = Field<bool>(a_property, kFadeSecond);
+		out.twoSided = (Field<std::uint64_t>(a_property, 0x38) & 0x1000000000ull) != 0;
+		const auto* alpha = Field<const std::byte*>(a_geometry, 0x120);
+		out.alphaTest = alpha && ((Field<std::uint16_t>(alpha, 0x30) >> 9) & 1u);
+		const void* base = Field<const void*>(a_property, kBaseTexture);
+		const void* blend = Field<const void*>(a_property, kBlendTexture);
+		out.hasBase = base != nullptr;
+		out.hasBlend = blend != nullptr;
+		out.baseView = ViewOf(base);
+		out.blendView = ViewOf(blend);
+		std::memcpy(out.world.data(), static_cast<const std::byte*>(static_cast<const void*>(a_geometry)) + kWorld, sizeof(out.world));
+		std::memcpy(out.previousWorld.data(), static_cast<const std::byte*>(static_cast<const void*>(a_geometry)) + kPreviousWorld, sizeof(out.previousWorld));
+		out.triShape = a_geometry->GetType().get() == RE::BSGeometry::Type::kTriShape;
+		if (out.triShape) {
+			out.shape = reinterpret_cast<const Family::TriShape*>(a_geometry->GetGeometryRuntimeData().rendererData);
+			out.triangles = static_cast<const RE::BSTriShape*>(a_geometry)->GetTrishapeRuntimeData().triangleCount;
+		}
+		return out;
+	}
+
+	PassObject TakeSunPass(const RE::BSGeometry* a_geometry)
+	{
+		// The pass the engine's query draw makes: the geometry's shader property (+0x128) with the sky shader.
+		return TakePass(a_geometry, a_geometry ? Field<const RE::BSShaderProperty*>(a_geometry, 0x128) : nullptr, Global<const RE::BSShader*>(Address::kSkyShader));
+	}
+
 	bool BuildBatch(RE::BSShaderAccumulator* a_accumulator, const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners,
 		std::string& a_why)
 	{
@@ -775,7 +832,7 @@ namespace DCLF::Features::Sky::Native
 			return false;
 		}
 		Frame frame;
-		if (!frame.Read(a_accumulator, a_inputs, a_why))
+		if (!frame.Read(a_accumulator, a_inputs, nullptr, a_why))
 			return false;
 		Modes modes = Modes::Current();
 		std::uint32_t current = UINT32_MAX;
@@ -800,13 +857,12 @@ namespace DCLF::Features::Sky::Native
 						modes.Setup(technique);
 						current = technique;
 					}
+					CS_ENGINE_READ_MARK(Scene, RecordTime);
+					const auto object = TakePass(pass->geometry, pass->shaderProperty, pass->shader);
 					// SetupGeometry: the sun and the moons blend additively.
-					if (pass->shaderProperty) {
-						const auto type = Field<std::uint32_t>(pass->shaderProperty, kSkyObjectType);
-						if (type == 0 || type == 6)
-							modes.blend = 2;
-					}
-					if (!Take(BuildPass(frame, pass, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why), a_draws, a_inputs.view, technique))
+					if (object.drawable && (object.type == 0 || object.type == 6))
+						modes.blend = 2;
+					if (!Take(BuildPass(frame, object, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why), a_draws, a_inputs.view, technique))
 						return false;
 				}
 			}
@@ -822,7 +878,7 @@ namespace DCLF::Features::Sky::Native
 		a_draws.reserve(8);
 		a_owners.reserve(a_owners.size() + 64);
 		Frame frame;
-		if (!frame.Read(a_accumulator, a_inputs, a_why))
+		if (!frame.Read(a_accumulator, a_inputs, nullptr, a_why))
 			return false;
 		// RenderPersistentPassList (AE 0x1414f19d0): each sky pass in list order, its cull from the property's two-sided flag and its
 		// alpha test from the geometry's alpha property. The sky-object effects at the head stay the engine's (CloudGroupOf).
@@ -832,8 +888,11 @@ namespace DCLF::Features::Sky::Native
 		for (auto* pass = a_group->passList.head; pass; pass = pass->passGroupNext) {
 			if (!pass->geometry || !pass->shader || pass->shader->shaderType.get() != RE::BSShader::Type::Sky)
 				continue;
+			CS_ENGINE_READ_MARK(Scene, RecordTime);
+			const auto object = TakePass(pass->geometry, pass->shaderProperty, pass->shader);
 			if (!(a_inputs.renderFlags & 0x108))
-				modes.cull = pass->shaderProperty && (Field<std::uint64_t>(pass->shaderProperty, 0x38) & 0x1000000000ull) ? 0u : 1u;
+				modes.cull = object.twoSided ? 0u : 1u;
+			// A pass with no property fails in BuildPass; its alpha test is the geometry's all the same.
 			const auto* alpha = Field<const std::byte*>(pass->geometry, 0x120);
 			modes.alphaTest = alpha && ((Field<std::uint16_t>(alpha, 0x30) >> 9) & 1u);
 			const std::uint32_t technique = TechniqueOf(pass->passEnum);
@@ -843,19 +902,25 @@ namespace DCLF::Features::Sky::Native
 				modes.Setup(technique);
 				current = technique;
 			}
-			if (!Take(BuildPass(frame, pass, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why), a_draws, a_inputs.view, technique))
+			if (!Take(BuildPass(frame, object, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why), a_draws, a_inputs.view, technique))
 				return false;
 		}
 		a_lastLayer = lastLayer;
 		return true;
 	}
 
-	PassResult BuildSun(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, const BatchInputs& a_inputs, Draw& a_draw, Family::Owners& a_owners,
+	PassResult BuildSun(RE::BSShaderAccumulator* a_accumulator, const PassObject& a_object, const BatchInputs& a_inputs, Draw& a_draw, Family::Owners& a_owners,
 		std::string& a_why)
 	{
 		DCLF_ZONE("CS.DCLF.Sky.Native.BuildSun");
+		// Native reads the globals the frame's ticket took.
+		const SkyGlobals* sky = nullptr;
+		if (::RenderGraph::Engine::Native::Active() && !(sky = TicketGlobals())) {
+			a_why = "the frame's ticket holds no sky";
+			return PassResult::Failed;
+		}
 		Frame frame;
-		if (!frame.Read(a_accumulator, a_inputs, a_why))
+		if (!frame.Read(a_accumulator, a_inputs, sky, a_why))
 			return PassResult::Failed;
 		// SetupGeometry reads the eye from the shader manager's current accumulator, which after the world's render is the last one
 		// submitted (the screen splatter's), not the query's. Native's RenderWorld submits none: the main accumulator is current, and its
@@ -867,20 +932,14 @@ namespace DCLF::Features::Sky::Native
 			const auto* current = reinterpret_cast<RE::BSShaderAccumulator*>(*CS_ENGINE_READ(Accumulator, RecordTime, globals::game::currentAccumulator).get());
 			frame.eye = current ? current->GetRuntimeData()->eyePosition : RE::NiPoint3{};
 		}
-		// The pass the engine's call makes (BSShader::MakeRenderPass with pass id 2), without its pool entry. The property is the
-		// geometry's shader property (+0x128).
-		RE::BSRenderPass pass{};
-		pass.shader = Global<RE::BSShader*>(Address::kSkyShader);
-		pass.shaderProperty = Field<RE::BSShaderProperty*>(a_geometry, 0x128);
-		pass.geometry = a_geometry;
-		pass.passEnum = kSunOcclusionPass;
+		// The pass the engine's call makes (BSShader::MakeRenderPass with pass id 2) is a_object (TakeSunPass).
 		// RenderPassImmediately(pass, 2, no alpha test): SetupTechnique has no case for pass id 2, so it is raw technique 0 (SunOcclude).
 		Modes modes = Modes::Current();
 		modes.alphaTest = false;
 		modes.Setup(0);
 		// SetupGeometry: the sun blends additively.
 		modes.blend = 2;
-		return BuildPass(frame, &pass, 0, modes, nullptr, a_draw, a_owners, a_why);
+		return BuildPass(frame, a_object, 0, modes, nullptr, a_draw, a_owners, a_why);
 	}
 
 	namespace
@@ -888,8 +947,9 @@ namespace DCLF::Features::Sky::Native
 		/** @brief A face's sky pass: what the engine's face cull would register for a sky object. */
 		struct FacePass
 		{
-			RE::BSGeometry* geometry = nullptr;
+			RE::BSGeometry* geometry = nullptr;  // guest reads the pass from these at the draw
 			RE::BSShaderProperty* property = nullptr;
+			const PassObject* object = nullptr;  // native: what the game half took
 			std::uint32_t passId = 0;
 			std::uint32_t sub = 0;  // the batch sub-group (FindTechniqueGroup), or the cloud list
 		};
@@ -965,19 +1025,33 @@ namespace DCLF::Features::Sky::Native
 			bool always = false;  // kAlwaysDraw: skips its own bound test
 			std::uint32_t end = 0;  // the index past its subtree
 			RE::NiBound bound;
-			RE::BSGeometry* geometry = nullptr;  // Pass: the draw's geometry and property, read when its draw is built
+			RE::BSGeometry* geometry = nullptr;  // Pass: the draw's geometry and property, which guest reads when its draw is built
 			RE::BSShaderProperty* property = nullptr;
+			PassObject pass;  // Pass: what native's draw reads
 			std::uint32_t passId = 0;
 			std::uint32_t sub = 0;
 			std::string name;  // Effect: the geometry's name, for the refusal
 		};
 
-		/** @brief The sky root's objects, taken once per game update (TicketPart::SkyRoot). Empty without a sky root. */
+		/** @brief The sky root's objects, the sun's query pass and the sky globals, taken once per game update (TicketPart::SkyRoot). */
 		struct RootObjects
 		{
 			bool root = false;
 			std::vector<RootObject> objects;
+			SkyGlobals globals;
+			PassObject sun;  // the sun's query geometry, not drawable without one
 		};
+
+		const RootObjects* TicketRoot()
+		{
+			return static_cast<const RootObjects*>(TicketPartOf(TicketPart::SkyRoot));
+		}
+
+		const SkyGlobals* TicketGlobals()
+		{
+			const auto* root = TicketRoot();
+			return root ? &root->globals : nullptr;
+		}
 
 		void Flatten(RE::NiAVObject* a_object, std::vector<RootObject>& a_out)
 		{
@@ -1016,6 +1090,7 @@ namespace DCLF::Features::Sky::Native
 			entry.kind = RootObject::Kind::Pass;
 			entry.geometry = geometry;
 			entry.property = property;
+			entry.pass = TakePass(geometry, property, Global<const RE::BSShader*>(Address::kSkyShader));
 			entry.passId = passId;
 			entry.sub = IsCloudPass(passId) ? 0u : SubGroupOf(geometry, property);
 		}
@@ -1027,6 +1102,8 @@ namespace DCLF::Features::Sky::Native
 		std::shared_ptr<const void> CaptureRootObjects()
 		{
 			auto out = std::make_shared<RootObjects>();
+			out->globals = SkyGlobals::Take();
+			out->sun = TakeSunPass(SunQueryGeometryNow());
 			auto* sky = CS_ENGINE_READ(Sky, CapturePoint, globals::game::sky);
 			if (!sky || !sky->root)
 				return out;
@@ -1068,7 +1145,7 @@ namespace DCLF::Features::Sky::Native
 						why = std::format("a sky-object effect is in view ({})", object.name);
 					break;
 				case RootObject::Kind::Pass:
-					passes.push_back({ object.geometry, object.property, object.passId, object.sub });
+					passes.push_back({ object.geometry, object.property, &object.pass, object.passId, object.sub });
 					break;
 				case RootObject::Kind::None:
 					break;
@@ -1094,15 +1171,17 @@ namespace DCLF::Features::Sky::Native
 			}
 		}
 
-		/** @brief The pass the engine's GetRenderPasses holds for a sky object, without its pool entry. */
-		RE::BSRenderPass PassOf(const FacePass& a_pass)
+		/**
+		 * @brief What a root pass's draw reads: native the game half's values, guest the geometry and property now (as the engine's
+		 * GetRenderPasses pass holds them). a_live holds guest's.
+		 */
+		const PassObject& ObjectOf(const FacePass& a_pass, bool a_captured, PassObject& a_live)
 		{
-			RE::BSRenderPass pass{};
-			pass.shader = Global<RE::BSShader*>(Address::kSkyShader);
-			pass.shaderProperty = a_pass.property;
-			pass.geometry = a_pass.geometry;
-			pass.passEnum = a_pass.passId;
-			return pass;
+			if (a_captured)
+				return *a_pass.object;
+			CS_ENGINE_READ_MARK(Scene, RecordTime);
+			a_live = TakePass(a_pass.geometry, a_pass.property, Global<const RE::BSShader*>(Address::kSkyShader));
+			return a_live;
 		}
 
 		/**
@@ -1115,7 +1194,7 @@ namespace DCLF::Features::Sky::Native
 		{
 			DCLF_ZONE("CS.DCLF.Sky.Native.RootPasses");
 			// The game half took the sky root into the frame ticket.
-			const auto* root = static_cast<const RootObjects*>(TicketPartOf(TicketPart::SkyRoot));
+			const auto* root = TicketRoot();
 			if (!root || !root->root || root->objects.empty()) {
 				a_why = root ? "no sky root" : "the frame's ticket holds no sky root";
 				return false;
@@ -1153,8 +1232,9 @@ namespace DCLF::Features::Sky::Native
 		 * cloud layers as BuildClouds walks geometry group 13, the clouds starting from a_cloudModes.
 		 */
 		bool DrawRootPasses(const Frame& a_frame, const std::vector<FacePass>& a_batch, const std::vector<FacePass>& a_clouds, View a_view,
-			std::uint32_t a_renderFlags, Modes a_modes, Modes a_cloudModes, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why)
+			std::uint32_t a_renderFlags, Modes a_modes, Modes a_cloudModes, bool a_captured, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why)
 		{
+			PassObject live;
 			a_draws.reserve(a_batch.size() + a_clouds.size());
 			a_owners.reserve(a_owners.size() + 8 * (a_batch.size() + a_clouds.size()));
 			Modes modes = a_modes;
@@ -1171,22 +1251,21 @@ namespace DCLF::Features::Sky::Native
 					modes.Setup(technique);
 					current = technique;
 				}
+				const auto& object = ObjectOf(facePass, a_captured, live);
 				// SetupGeometry: the sun and the moons blend additively.
-				const auto type = Field<std::uint32_t>(facePass.property, kSkyObjectType);
-				if (type == 0 || type == 6)
+				if (object.type == 0 || object.type == 6)
 					modes.blend = 2;
-				auto pass = PassOf(facePass);
-				if (!Take(BuildPass(a_frame, &pass, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why), a_draws, a_view, technique))
+				if (!Take(BuildPass(a_frame, object, technique, modes, nullptr, a_draws.emplace_back(), a_owners, a_why), a_draws, a_view, technique))
 					return false;
 			}
 			modes = a_cloudModes;
 			current = UINT32_MAX;
 			std::int32_t lastLayer = -1;
 			for (const auto& facePass : a_clouds) {
+				const auto& object = ObjectOf(facePass, a_captured, live);
 				if (!(a_renderFlags & 0x108))
-					modes.cull = (Field<std::uint64_t>(facePass.property, 0x38) & 0x1000000000ull) ? 0u : 1u;
-				const auto* alpha = Field<const std::byte*>(facePass.geometry, 0x120);
-				modes.alphaTest = alpha && ((Field<std::uint16_t>(alpha, 0x30) >> 9) & 1u);
+					modes.cull = object.twoSided ? 0u : 1u;
+				modes.alphaTest = object.alphaTest;
 				const std::uint32_t technique = TechniqueOf(facePass.passId);
 				if (technique != current) {
 					if (current != UINT32_MAX)
@@ -1194,8 +1273,7 @@ namespace DCLF::Features::Sky::Native
 					modes.Setup(technique);
 					current = technique;
 				}
-				auto pass = PassOf(facePass);
-				if (!Take(BuildPass(a_frame, &pass, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why), a_draws, a_view, technique))
+				if (!Take(BuildPass(a_frame, object, technique, modes, &lastLayer, a_draws.emplace_back(), a_owners, a_why), a_draws, a_view, technique))
 					return false;
 			}
 			return true;
@@ -1233,6 +1311,12 @@ namespace DCLF::Features::Sky::Native
 		}
 	}
 
+	const PassObject* TicketSunPass(const Snapshot::EngineRef& a_geometry)
+	{
+		const auto* root = TicketRoot();
+		return root && root->sun.drawable && a_geometry.Names(root->sun.geometry) ? &root->sun : nullptr;
+	}
+
 	void RegisterRootCapture()
 	{
 		RegisterTicketPart(TicketPart::SkyRoot, &CaptureRootObjects);
@@ -1253,12 +1337,13 @@ namespace DCLF::Features::Sky::Native
 		static std::vector<FacePass> batch, clouds;
 		if (!RootPasses(frustum, world, false, batch, clouds, a_why))
 			return false;
+		// Native only: the ticket's globals and passes.
 		Frame frame;
-		if (!frame.Read(a_accumulator, a_inputs, a_why))
+		if (!frame.Read(a_accumulator, a_inputs, TicketGlobals(), a_why))
 			return false;
 		frame.eye = eye;
 		const Modes atBatch = Modes::Current();
-		return DrawRootPasses(frame, batch, clouds, View::Main, a_inputs.renderFlags, atBatch, MainCloudModes(atBatch, !batch.empty()), a_draws, a_owners, a_why);
+		return DrawRootPasses(frame, batch, clouds, View::Main, a_inputs.renderFlags, atBatch, MainCloudModes(atBatch, !batch.empty()), true, a_draws, a_owners, a_why);
 	}
 
 	bool BuildFace(const FaceView& a_view, const BatchInputs& a_inputs, std::vector<Draw>& a_draws, Family::Owners& a_owners, std::string& a_why)
@@ -1269,10 +1354,12 @@ namespace DCLF::Features::Sky::Native
 		static std::vector<FacePass> batch, clouds;
 		if (!FacePasses(a_view, batch, clouds, a_why))
 			return false;
+		// Native reads the ticket's globals and passes; guest reads them now, at its face render.
+		const bool captured = ::RenderGraph::Engine::Native::Active();
 		Frame frame;
-		if (!frame.ReadFace(a_view, a_inputs, a_why))
+		if (!frame.ReadFace(a_view, a_inputs, captured ? TicketGlobals() : nullptr, a_why))
 			return false;
-		return DrawRootPasses(frame, batch, clouds, View::Face, kFaceRenderFlags, Modes::FaceBatch(), Modes::FaceClouds(), a_draws, a_owners, a_why);
+		return DrawRootPasses(frame, batch, clouds, View::Face, kFaceRenderFlags, Modes::FaceBatch(), Modes::FaceClouds(), captured, a_draws, a_owners, a_why);
 	}
 
 	void DetachClouds(RE::BSBatchRenderer::GeometryGroup* a_group)

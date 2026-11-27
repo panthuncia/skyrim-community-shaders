@@ -627,8 +627,8 @@ namespace DCLF::Features::Fades
 	void RegisterCpuStage(Api::InstallContext& a_context)
 	{
 		// Must register after the seeds' pool, because its sample reads this producer's seeds.
-		cpuStatesPool = a_context.RegisterFrameValuePool({ .name = "fade-states-cpu", .stride = sizeof(FadeNodeState), .kick = &CpuStatesKick,
-			.sample = &CpuStatesSample, .send = &CpuStatesSend });
+		// Per render: it steps the render's view batches against its placement rows.
+		cpuStatesPool = a_context.RegisterFrameValuePool({ .name = "fade-states-cpu", .stride = sizeof(FadeNodeState), .perRender = true, .kick = &CpuStatesKick, .sample = &CpuStatesSample, .send = &CpuStatesSend });
 	}
 
 	std::uint32_t CpuStatesIndex()

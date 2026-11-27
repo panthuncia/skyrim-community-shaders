@@ -61,6 +61,19 @@ namespace DCLF
 
 		/** @brief Set on threads running DCLF's scene work. */
 		static inline thread_local bool sceneWork = false;
+		/** @brief Marks the thread as running a job the render side kicked. A lease asked for on it is counted: the render side takes none. */
+		class RenderSideJob
+		{
+		public:
+			RenderSideJob() :
+				outer(std::exchange(renderSideJob, true)) {}
+			~RenderSideJob() { renderSideJob = outer; }
+			RenderSideJob(const RenderSideJob&) = delete;
+			RenderSideJob& operator=(const RenderSideJob&) = delete;
+
+		private:
+			bool outer;
+		};
 		/** @brief An access to engine memory, counted as a defect when a scene work thread holds no lease. */
 		static void Touch(const char* a_site)
 		{
@@ -71,7 +84,7 @@ namespace DCLF
 		/** @brief The report's counters since the last Take. */
 		struct Counters
 		{
-			std::uint64_t closes = 0, closesWaited = 0, suspends = 0, suspendsWaited = 0, refused = 0, unleased = 0, mainThreadLeases = 0;
+			std::uint64_t closes = 0, closesWaited = 0, suspends = 0, suspendsWaited = 0, refused = 0, unleased = 0, mainThreadLeases = 0, renderSideJobLeases = 0;
 			double waitedUs = 0.0, waitedMaxUs = 0.0, suspendWaitedUs = 0.0, suspendWaitedMaxUs = 0.0;
 			const char* unleasedFirst = nullptr;
 			bool any = false;  // a close or an unleased access since the last Take
@@ -99,6 +112,9 @@ namespace DCLF
 		static inline std::atomic<std::uint64_t> refused{ 0 };
 		// Leases taken on the main thread, which is the render side inside the window. Any is a defect: the render side reads publications.
 		static inline std::atomic<std::uint64_t> mainThreadLeases{ 0 };
+		// Leases asked for on a thread inside a RenderSideJob. Any is a defect.
+		static inline thread_local bool renderSideJob = false;
+		static inline std::atomic<std::uint64_t> renderSideJobLeases{ 0 };
 		// Main thread.
 		static inline std::uint64_t closes = 0, closesWaited = 0;
 		static inline double waitedUs = 0.0, waitedMaxUs = 0.0;

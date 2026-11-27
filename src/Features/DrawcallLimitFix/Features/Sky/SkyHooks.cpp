@@ -515,7 +515,7 @@ namespace DCLF::Features::Sky
 		 * draw computed for the graph's query. Returns null when the run was submitted, else why it was skipped (the bracket is skipped).
 		 */
 		template <class EndQuery>
-		const char* DrawSun(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, RE::NiCamera* a_camera, Queries::Bracket& a_bracket,
+		const char* DrawSun(RE::BSShaderAccumulator* a_accumulator, const Native::PassObject& a_object, RE::NiCamera* a_camera, Queries::Bracket& a_bracket,
 			EndQuery&& a_endQuery)
 		{
 			Family::BeginBatch();
@@ -530,7 +530,7 @@ namespace DCLF::Features::Sky
 			const char* skip = SunRefusal(inputs, *run);
 			if (!skip) {
 				inputs.physSky = run->physSky;
-				const auto built = Native::BuildSun(a_accumulator, a_geometry, inputs, run->draws.emplace_back(), run->owners, why);
+				const auto built = Native::BuildSun(a_accumulator, a_object, inputs, run->draws.emplace_back(), run->owners, why);
 				if (built != Native::PassResult::Drawn) {
 					skip = built == Native::PassResult::LeftOut ? "its program is still building" : "its draw cannot be computed";
 					SunSkips().Report(skip, why);
@@ -596,7 +596,8 @@ namespace DCLF::Features::Sky
 				}
 				Queries::Bracket bracket;
 				beginQuery(renderer, query);
-				(void)DrawSun(static_cast<RE::BSShaderAccumulator*>(a_accumulator), a_geometry, a_camera, bracket, [&] { endQuery(renderer, query); });
+				CS_ENGINE_READ_MARK(Scene, RecordTime);
+				(void)DrawSun(static_cast<RE::BSShaderAccumulator*>(a_accumulator), Native::TakeSunPass(a_geometry), a_camera, bracket, [&] { endQuery(renderer, query); });
 				pending = true;
 				*reinterpret_cast<std::uint32_t*>(entry + 0x10) = 0;
 			}
@@ -604,19 +605,21 @@ namespace DCLF::Features::Sky
 		};
 	}
 
-	void SubmitSunQuery(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, std::uint64_t a_tag)
+	void SubmitSunQuery(RE::BSShaderAccumulator* a_accumulator, const SunQueryBlock& a_block, std::uint64_t a_tag)
 	{
 		if (!Queries::Active() || !SkyDraws::HasSunClient()) {
 			SunSkips().Report("the graph does not answer the sun's occlusion query");
 			return;
 		}
 		// The engine skips an entry whose last answer the game has not read yet; CS's slot is that entry.
-		if (!a_geometry || Queries::Pending(Queries::kSunSlot))
+		// The ticket's sun while it is still the block's query geometry.
+		const auto* sun = a_block.submit ? Native::TicketSunPass(a_block.geometry) : nullptr;
+		if (!sun || Queries::Pending(Queries::kSunSlot))
 			return;
 		const ::RenderGraph::Engine::Native::WorldPass::Scope world(::RenderGraph::Engine::Native::WorldPass::Point::SunQuery);
 		Queries::Bracket bracket;
 		bracket.Begin(Queries::kSunSlot, a_tag);
-		(void)DrawSun(a_accumulator, a_geometry, nullptr, bracket, [] {});
+		(void)DrawSun(a_accumulator, *sun, nullptr, bracket, [] {});
 	}
 
 	namespace

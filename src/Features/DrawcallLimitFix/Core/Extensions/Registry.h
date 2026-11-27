@@ -39,6 +39,7 @@ namespace DCLF::Extensions
 		std::uint32_t stride = 0;
 		bool deviceAddress = false;
 		bool unorderedAccess = false;
+		bool perRender = false;
 		decltype(Api::FrameValuePool::frameStart) frameStart = nullptr;
 		decltype(Api::FrameValuePool::kick) kick = nullptr;
 		decltype(Api::FrameValuePool::sample) sample = nullptr;
