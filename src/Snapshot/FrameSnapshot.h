@@ -120,6 +120,18 @@ namespace Snapshot
 		}
 	};
 
+	/**
+	* @brief The engine values the frame driver observes as frame variables (Interior, VolumetricLightingSize; plan A7), taken on the
+	* game thread: by a game update's capture and a main-thread frame-only one. A loading screen's or a movie's keeps the last.
+	*/
+	struct EngineValues
+	{
+		bool taken = false;
+		bool interior = false;                        // TES::interiorCell is set
+		bool volumetricLighting = false;              // the VL descriptor (SE 100297, AE 107014) exists
+		std::array<std::uint32_t, 3> volumetricLightingSize{};  // its width, height and depth (+0x30, +0x34, +0x38)
+	};
+
 	/** @brief The menu states the frame reads. Captured from RE::UI once per game update. */
 	struct MenuStates
 	{
@@ -241,6 +253,7 @@ namespace Snapshot
 		bool interior = false;                                // the player's cell is an interior
 		bool worldLoaded = false;                             // the player has 3D and a parent cell: a frozen menu can draw the world behind it
 		bool firstPersonShown = false;                        // the player's first-person root is not hidden at the capture's start (Main::RenderPlayerView's test)
+		EngineValues engine{};                                // what the frame driver sets its engine variables from at the adoption
 		std::shared_ptr<const DCLF::ScenePublication> scene;  // the scene publication it pairs with (empty in phase 0)
 		std::shared_ptr<const UiCommandStream> ui;            // the UI command stream (native; set at the update's DrawInterface end)
 		Events events{};

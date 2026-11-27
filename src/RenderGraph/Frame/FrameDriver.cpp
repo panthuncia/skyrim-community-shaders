@@ -86,11 +86,7 @@ namespace RenderGraph::Frame::Driver
 			bool began = false;
 			std::array<bool, kSegments> tapped{};
 			bool captured = false;  // gIsInMenuMode2, so no more capture until no menu freezes the background
-			// The adopted snapshot's freeze test, for Main's second test. Main thread only.
-			bool freezes = false;
-			std::uint64_t freezesFrame = ~0ull;
-			std::uint64_t freezeChanges = 0;     // frames where the engine's own test differed from Begin's
-			std::atomic<bool> loading{ false };  // held until the end of SetLoadingScreenActive(false)
+			std::atomic<std::uint64_t> freezeChanges{ 0 };  // frames where the engine's own test differed from Begin's
 			std::mutex mutex;
 			std::array<std::uint64_t, kKinds> frames{};
 			std::array<SegmentCounts, kSegments> segments{};
@@ -138,6 +134,14 @@ namespace RenderGraph::Frame::Driver
 		}
 
 		thread_local bool t_inMovieTick = false;
+		// Set inside the serving thread's loading screen loop (RunLoadingScreen).
+		thread_local bool t_inLoadingLoop = false;
+		// Set on a thread that renders published game snapshots (GameSnapshotRenderScope).
+		thread_local bool t_rendersGameSnapshots = false;
+		// The adopted snapshot's freeze test and the frame it was decided for, for Main's second test in the same Main::DrawFrame call.
+		// Per thread: the Begin that decided it and the test run on the thread that called Main::DrawFrame.
+		thread_local bool t_freezes = false;
+		thread_local std::uint64_t t_freezesFrame = ~0ull;
 		// Set at a movie tick's start, cleared once its Begin made the Bink frame current.
 		thread_local bool t_movieFrameNext = false;
 
@@ -152,25 +156,33 @@ namespace RenderGraph::Frame::Driver
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/** @brief ServingThread::RunLoadingScreen (SE 38085, AE 39039), the serving thread's loop: a Begin inside it is a loading screen's. */
+		struct LoadingLoop
+		{
+			static void thunk()
+			{
+				const bool outer = std::exchange(t_inLoadingLoop, true);
+				func();
+				t_inLoadingLoop = outer;
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/**
 		 * @brief The producer of the frame Begin starts on this thread, when no game update stands for it. Begin is called by Main's
 		 * frame (SE 35556, from Main::Update and a few cell-change paths), the loading loop (38085) and BSMoviePlayer::Tick. A Begin
-		 * inside Main::Update's call of Main::DrawFrame adopts that update's snapshot (or repeats it in the cadence test mode).
+		 * inside Main::Update's call of Main::DrawFrame adopts that update's snapshot (or repeats it in the cadence test mode), as does
+		 * one on a thread that renders published game snapshots. The callers mark themselves; no thread identity is asked.
 		 */
-		std::optional<Snapshot::FrameSource> FrameOnlySource(const State& a_state)
+		std::optional<Snapshot::FrameSource> FrameOnlySource()
 		{
 			if (t_inMovieTick)
 				return Snapshot::FrameSource::Movie;
-			if (!FrameAnchors::IsMainThread()) {
-				static std::atomic_flag logged;
-				if (!a_state.loading.load(std::memory_order_acquire) && !logged.test_and_set())
-					logger::warn("[ORG] frame: a frame began on a thread that is neither the main thread nor a movie tick, outside a loading screen; "
-								 "it counts as a loading screen's (logged once)");
+			if (t_inLoadingLoop)
 				return Snapshot::FrameSource::LoadingScreen;
-			}
-			if (!Snapshot::InGameUpdate())
-				return Snapshot::FrameSource::MainThread;
-			return std::nullopt;
+			if (Snapshot::InGameUpdate() || t_rendersGameSnapshots)
+				return std::nullopt;
+			return Snapshot::FrameSource::MainThread;
 		}
 
 		/**
@@ -191,8 +203,8 @@ namespace RenderGraph::Frame::Driver
 			default:
 				break;
 			}
-			a_state.freezes = snapshot->menus.freezesBackground;
-			a_state.freezesFrame = FrameClock::BeginFrame();
+			t_freezes = snapshot->menus.freezesBackground;
+			t_freezesFrame = FrameClock::BeginFrame();
 			if (snapshot->kind != Snapshot::FrameKind::MenuOverWorld) {
 				a_state.captured = false;
 				return snapshot->kind == Snapshot::FrameKind::World ? Kind::World : Kind::MainMenu;
@@ -207,20 +219,20 @@ namespace RenderGraph::Frame::Driver
 
 	/**
 	 * @brief Makes Main's second freeze test return the adopted snapshot's, so the engine draws the frame the description has.
-	 * Another thread can push a menu between the capture and the test through the UI message queue.
+	 * Another thread can push a menu between the capture and the test through the UI message queue. The answer is the one this
+	 * Main::DrawFrame call's own Begin decided, on this thread (no other thread's DecideKind is read).
 	 */
 	struct FreezeTestAtBegin
 	{
 		static bool thunk(RE::UI* a_ui)
 		{
 			const bool live = func(a_ui);
-			auto& state = Get();
-			if (!Engine::GraphMode() || state.freezesFrame != state.current.frame || !FrameAnchors::IsMainThread())
+			if (!Engine::GraphMode() || t_freezesFrame != FrameClock::BeginFrame())
 				return live;
-			if (live != state.freezes && state.freezeChanges++ < 8)
+			if (live != t_freezes && Get().freezeChanges.fetch_add(1, std::memory_order_relaxed) < 8)
 				logger::info("[ORG] frame: the menu stack's freeze flag changed after frame {}'s snapshot ({} -> {}); the frame keeps the snapshot's answer",
-					state.current.frame, state.freezes, live);
-			return state.freezes;
+					t_freezesFrame, t_freezes, live);
+			return t_freezes;
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -244,7 +256,7 @@ namespace RenderGraph::Frame::Driver
 					RenderGraphRuntime::OnRendererBegin();
 					// The render frame's snapshot, adopted once the frame clock moved, on every thread. A frame no game update stands for
 					// publishes its own first. Both modes; guest adopts the one just published, on the same thread.
-					if (const auto source = FrameOnlySource(Get()))
+					if (const auto source = FrameOnlySource())
 						Snapshot::CaptureFrame(*source);
 					Snapshot::Adopt();
 					// Native: a window resize reaches the renderer as the adopted snapshot's event, at the frame's start. The engine's
@@ -276,6 +288,11 @@ namespace RenderGraph::Frame::Driver
 		stl::detour_thunk<RendererBegin>(REL::RelocationID(75460, 77245));
 		if (!REL::Module::IsVR())
 			stl::write_thunk_call<FreezeTestAtBegin>(REL::RelocationID(35556, 36555).address() + REL::Relocate(0x211, 0x217));
+		if (!REL::Module::IsVR()) {
+			stl::detour_thunk<LoadingLoop>(REL::RelocationID(38085, 39039));
+			if (!LoadingLoop::func.address())
+				Fatal("frame driver", "the serving thread's loading screen loop could not be hooked, so its frames could not be told apart");
+		}
 		// The Bink hooks mark their own ticks. Without them this detour only reads the kind.
 		if (!REL::Module::IsVR() && !Engine::Bink::TickHooked())
 			stl::detour_thunk<PlayerTick>(REL::RelocationID(87890, 90259));
@@ -298,6 +315,15 @@ namespace RenderGraph::Frame::Driver
 		t_movieFrameNext = outerNext;
 	}
 
+	GameSnapshotRenderScope::GameSnapshotRenderScope() :
+		outer(std::exchange(t_rendersGameSnapshots, true))
+	{}
+
+	GameSnapshotRenderScope::~GameSnapshotRenderScope()
+	{
+		t_rendersGameSnapshots = outer;
+	}
+
 	bool MovieFrameNext()
 	{
 		return t_inMovieTick && t_movieFrameNext;
@@ -306,7 +332,6 @@ namespace RenderGraph::Frame::Driver
 	void OnLoadingScreen(bool a_active)
 	{
 		auto& state = Get();
-		state.loading.store(a_active, std::memory_order_release);
 		Snapshot::OnLoadingScreen(a_active);
 		// A load that starts inside a world frame ends that frame's world work where it is.
 		if (a_active)
@@ -347,22 +372,17 @@ namespace RenderGraph::Frame::Driver
 	{
 		/**
 		* @brief The one writer of the engine values the frame observes (plan A7): whether the player is in an interior cell, and
-		* the volumetric lighting volume size. Main thread, at each Begin. Writing the same value is no event.
+		* the volumetric lighting volume size, from the adopted snapshot (the game thread took them). At each Begin. Writing the
+		* same value is no event.
 		*/
-		void SampleEngine()
+		void SampleEngine(const Snapshot::EngineValues& a_values)
 		{
-			if (const auto* tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton()))
-				(void)Vars::Set(Vars::Interior(), tes->interiorCell != nullptr, "engine sampler");
-			// The VL descriptor (SE 100297, AE 107014) is made on its first read, with the Low preset's static default. The engine's
-			// ImageSpace setup (SE 1412dbd00) then sets the INI's quality, after CS's setup. A quality change (SE 100299: the
-			// console's command, or CS's feature) sets it again. Inside a frame, so it is read here, at the next Begin.
-			static REL::Relocation<const std::byte* (*)()> descriptor{ REL::RelocationID(100297, 107014) };
-			if (const auto* vl = descriptor()) {
-				Vars::Extent3D size{};
-				std::memcpy(&size.width, vl + 0x30, sizeof(std::uint32_t));
-				std::memcpy(&size.height, vl + 0x34, sizeof(std::uint32_t));
-				std::memcpy(&size.depth, vl + 0x38, sizeof(std::uint32_t));
-				(void)Vars::Set(Vars::VolumetricLightingSize(), size, "engine sampler");
+			if (!a_values.taken)
+				return;
+			(void)Vars::Set(Vars::Interior(), a_values.interior, "engine sampler");
+			if (a_values.volumetricLighting) {
+				const auto& size = a_values.volumetricLightingSize;
+				(void)Vars::Set(Vars::VolumetricLightingSize(), Vars::Extent3D{ size[0], size[1], size[2] }, "engine sampler");
 			}
 		}
 	}
@@ -382,10 +402,11 @@ namespace RenderGraph::Frame::Driver
 			RenderGraphRuntime::Get().PollEpochFailures();
 		}
 		// The engine values the frame observes, before the adoption, so a change is adopted in this Begin when nothing else waits.
-		// Only the main thread reads them: a load changes them on the main thread while another thread renders.
-		if (FrameAnchors::IsMainThread()) {
+		// The game thread took them into the snapshot; a loading screen's or a movie's frame keeps the last.
+		{
 			ZoneScopedN("CS.Frame.Begin.SampleEngine");
-			SampleEngine();
+			if (const auto& snapshot = Snapshot::Current())
+				SampleEngine(snapshot->engine);
 		}
 		// Every build asked for since the last adoption point is made here (Builds::Ask).
 		{

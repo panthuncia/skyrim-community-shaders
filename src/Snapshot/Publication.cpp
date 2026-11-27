@@ -266,6 +266,24 @@ namespace Snapshot
 			PublishClaim& operator=(const PublishClaim&) = delete;
 		};
 
+		/**
+		* @brief The frame driver's engine values. The VL descriptor is made on its first read with the Low preset's default; the engine's
+		* ImageSpace setup then sets the INI's quality, and a quality change (SE 100299) sets it again, so it is read every capture.
+		*/
+		EngineValues CaptureEngineValues()
+		{
+			EngineValues values{};
+			values.taken = true;
+			if (const auto* tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton()))
+				values.interior = tes->interiorCell != nullptr;
+			static REL::Relocation<const std::byte* (*)()> descriptor{ REL::RelocationID(100297, 107014) };
+			if (const auto* vl = descriptor()) {
+				values.volumetricLighting = true;
+				std::memcpy(values.volumetricLightingSize.data(), vl + 0x30, sizeof(values.volumetricLightingSize));
+			}
+			return values;
+		}
+
 		CameraView CaptureMainCamera()
 		{
 			CameraView view{};
@@ -304,6 +322,7 @@ namespace Snapshot
 			a_snapshot.loadEpoch = g_loadEpoch.load(std::memory_order_acquire);
 			// Game side: the settings' raise count when the snapshot is built, not the variables the last render Begin took.
 			a_snapshot.settingsRevision = CS::SettingRegistry::Serial();
+			a_snapshot.engine = CaptureEngineValues();
 
 			// Native: Main::SetupSunAndSky's game half sets the camera's FOV and moves the sky with it, so it runs before the camera is taken.
 			if (a_snapshot.kind == FrameKind::World)
@@ -536,6 +555,7 @@ namespace Snapshot
 				const bool has3D = player && player->Get3D2();
 				fresh->worldLoaded = has3D && player->GetParentCell();
 				fresh->kind = MainThreadKind(fresh->menus, has3D);
+				fresh->engine = CaptureEngineValues();
 				break;
 			}
 		case FrameSource::LoadingScreen:

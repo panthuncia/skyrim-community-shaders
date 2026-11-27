@@ -58,6 +58,22 @@ namespace RenderGraph::Frame::Driver
 	};
 
 	/**
+	* @brief Marks the calling thread as one that renders published game snapshots (phase 7's render thread): its Begin adopts the
+	* newest published snapshot and publishes no frame-only one, as a Begin inside Main::Update's call of Main::DrawFrame does.
+	*/
+	class GameSnapshotRenderScope
+	{
+	public:
+		GameSnapshotRenderScope();
+		~GameSnapshotRenderScope();
+		GameSnapshotRenderScope(const GameSnapshotRenderScope&) = delete;
+		GameSnapshotRenderScope& operator=(const GameSnapshotRenderScope&) = delete;
+
+	private:
+		bool outer = false;
+	};
+
+	/**
 	* @brief Whether this thread is in a movie tick that has not reached its Begin yet. The tick decodes and clears the framebuffer
 	* and the main depth before its Begin, between frames. That work belongs to the Bink frame the tick's Begin starts, not to
 	* Current(), which for a movie's first tick is the frame before it (a world frame for a movie played in game).
