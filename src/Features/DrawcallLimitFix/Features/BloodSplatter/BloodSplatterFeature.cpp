@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
 
+#include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Switches.h"
 
 #include <string>
