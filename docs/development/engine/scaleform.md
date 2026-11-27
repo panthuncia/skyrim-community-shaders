@@ -49,9 +49,10 @@ shaders `package/Shaders/Scaleform/`, behind `CS_ORG_SCALEFORM=1` (default off).
 Native mode records every GRenderer call into a UI command stream (`UiStream.h`) and draws the stream's replay. The translation
 into graph draws below is shared: guest fills its `RendererState` from the D3D11 renderer's fields at each call, native's replay
 from the stream. CS takes the pure setters in native and reproduces them (and `ApplyMatrix` in 3D) bit for bit; a parity build
-found no difference in 4,000 displays. The D3D11 renderer is still called for GFx's render target stack and `EndDisplay`'s queued
-releases, counted in `[ORG] Scaleform: the game's renderer was called for ...`. Details, the full vtable with SE/AE ids and the
-open items: `docs/development/plans/snap0-ui.md`.
+found no difference in 4,000 displays. Since then CS keeps GFx's textures, render targets, target stack and video mode itself
+(`UiResources`); the D3D11 renderer is not called in native. `[ORG] Scaleform: DrawInterface ...` counts how each DrawInterface
+ran, and `[ORG] Scaleform: ...` after it gives the UI resource stats. Details, the full vtable with SE/AE ids and the open items:
+`docs/development/plans/snap0-ui.md`.
 
 ## The primary path (2026-11-11, `org-port/primary-ui`)
 
