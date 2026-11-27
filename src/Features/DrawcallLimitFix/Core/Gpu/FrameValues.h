@@ -27,7 +27,6 @@ namespace org::services
 	struct Backing;
 }
 
-
 namespace RenderGraph
 {
 	struct DeclaredRefs;

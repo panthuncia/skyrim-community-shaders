@@ -319,35 +319,35 @@ namespace DCLF::FadeState
 		/** @brief The engine's fade values, read now: the step for one update, no camera and no tree height. */
 		FadeFrame EngineFrame()
 		{
-		FadeFrame frame;
-		frame.counter = Global<std::int32_t>(Features::Fades::Address::kFadeFrameCounter);
-		frame.deltaTime = Global<float>(Features::Fades::Address::kFadeStepTime);
-		frame.fadesOn = Global<std::uint8_t>(Engine::Address::kFadesOn) ? 1u : 0u;
-		frame.lodUpdates = Global<std::uint8_t>(Engine::Address::kFadeLodUpdates) ? 1u : 0u;
-		frame.fadeInTime = Global<float>(Features::Fades::Address::kFadeStepDivisor);
-		frame.fadeOutTime = Global<float>(Features::Fades::Address::kFadeOutTime);
-		frame.fadeInAbove = Global<float>(Features::Fades::Address::kFadeInAbove);
-		frame.fadeOutBelow = Global<float>(Engine::Address::kFadeOutThreshold);
-		frame.blendTime = Global<float>(Features::Fades::Address::kFadeBlendTime);
-		frame.distanceMult = Global<float>(Engine::Address::kFadeDistanceMult);
-		frame.stepMax = Global<float>(Features::Fades::Address::kFadeStepMax);
-		frame.amountTime = Global<float>(Features::Fades::Address::kFadeAmountTime);
-		frame.metricScale = Global<float>(Engine::Address::kMetricScale);
-		frame.defaultScale = Global<float>(Engine::Address::kFadeDefaultScale);
-		frame.metricOverride = Global<float>(Engine::Address::kFadeSpecialA);
-		frame.overridden = UnorderedEqual(Global<float>(Engine::Address::kFadeSpecialA), Global<float>(Engine::Address::kFadeSpecialB)) ? 0u : 1u;
-		frame.lodFar = Global<float>(Features::Fades::Address::kLodFadeFar);
-		frame.lodNear = Global<float>(Features::Fades::Address::kLodFadeNear);
-		frame.treeLodFar = Global<float>(Features::Fades::Address::kTreeLodFadeFar);
-		frame.treeLodNear = Global<float>(Features::Fades::Address::kTreeLodFadeNear);
-		frame.lodMinimum = Global<float>(Features::Fades::Address::kLodFadeMinimum);
-		frame.one = Global<float>(Features::Fades::Address::kFloatOne);
-		frame.amountSnapAbove = Global<float>(Features::Fades::Address::kFadeAmountSnapAbove);
-		frame.amountSnapOffset = Global<float>(Features::Fades::Address::kFadeAmountSnapOffset);
-		frame.snapRadiusLimit = Global<float>(Features::Fades::Address::kFadeSnapRadiusLimit);
-		for (std::uint32_t type = 0; type < 16; ++type)
-			frame.divisors[type] = Global<float>(Engine::Address::kFadeTypeDivisors + type * 4);
-		return frame;
+			FadeFrame frame;
+			frame.counter = Global<std::int32_t>(Features::Fades::Address::kFadeFrameCounter);
+			frame.deltaTime = Global<float>(Features::Fades::Address::kFadeStepTime);
+			frame.fadesOn = Global<std::uint8_t>(Engine::Address::kFadesOn) ? 1u : 0u;
+			frame.lodUpdates = Global<std::uint8_t>(Engine::Address::kFadeLodUpdates) ? 1u : 0u;
+			frame.fadeInTime = Global<float>(Features::Fades::Address::kFadeStepDivisor);
+			frame.fadeOutTime = Global<float>(Features::Fades::Address::kFadeOutTime);
+			frame.fadeInAbove = Global<float>(Features::Fades::Address::kFadeInAbove);
+			frame.fadeOutBelow = Global<float>(Engine::Address::kFadeOutThreshold);
+			frame.blendTime = Global<float>(Features::Fades::Address::kFadeBlendTime);
+			frame.distanceMult = Global<float>(Engine::Address::kFadeDistanceMult);
+			frame.stepMax = Global<float>(Features::Fades::Address::kFadeStepMax);
+			frame.amountTime = Global<float>(Features::Fades::Address::kFadeAmountTime);
+			frame.metricScale = Global<float>(Engine::Address::kMetricScale);
+			frame.defaultScale = Global<float>(Engine::Address::kFadeDefaultScale);
+			frame.metricOverride = Global<float>(Engine::Address::kFadeSpecialA);
+			frame.overridden = UnorderedEqual(Global<float>(Engine::Address::kFadeSpecialA), Global<float>(Engine::Address::kFadeSpecialB)) ? 0u : 1u;
+			frame.lodFar = Global<float>(Features::Fades::Address::kLodFadeFar);
+			frame.lodNear = Global<float>(Features::Fades::Address::kLodFadeNear);
+			frame.treeLodFar = Global<float>(Features::Fades::Address::kTreeLodFadeFar);
+			frame.treeLodNear = Global<float>(Features::Fades::Address::kTreeLodFadeNear);
+			frame.lodMinimum = Global<float>(Features::Fades::Address::kLodFadeMinimum);
+			frame.one = Global<float>(Features::Fades::Address::kFloatOne);
+			frame.amountSnapAbove = Global<float>(Features::Fades::Address::kFadeAmountSnapAbove);
+			frame.amountSnapOffset = Global<float>(Features::Fades::Address::kFadeAmountSnapOffset);
+			frame.snapRadiusLimit = Global<float>(Features::Fades::Address::kFadeSnapRadiusLimit);
+			for (std::uint32_t type = 0; type < 16; ++type)
+				frame.divisors[type] = Global<float>(Engine::Address::kFadeTypeDivisors + type * 4);
+			return frame;
 		}
 	}
 

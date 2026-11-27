@@ -410,8 +410,9 @@ namespace DCLF
 			return *latest;
 		unscopedRead.Count();
 		if (unscopedRead.Live() == 1)
-			logger::error("[DCLF] the frame's engine globals were read off the render owner with no frame's capture bound (step 6e F2); it got the "
-						  "latest adopted. Reader: {}",
+			logger::error(
+				"[DCLF] the frame's engine globals were read off the render owner with no frame's capture bound (step 6e F2); it got the "
+				"latest adopted. Reader: {}",
 				UnscopedReader());
 		return *latest;
 	}

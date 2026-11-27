@@ -127,8 +127,8 @@ namespace Snapshot
 	struct EngineValues
 	{
 		bool taken = false;
-		bool interior = false;                        // TES::interiorCell is set
-		bool volumetricLighting = false;              // the VL descriptor (SE 100297, AE 107014) exists
+		bool interior = false;                                  // TES::interiorCell is set
+		bool volumetricLighting = false;                        // the VL descriptor (SE 100297, AE 107014) exists
 		std::array<std::uint32_t, 3> volumetricLightingSize{};  // its width, height and depth (+0x30, +0x34, +0x38)
 	};
 
