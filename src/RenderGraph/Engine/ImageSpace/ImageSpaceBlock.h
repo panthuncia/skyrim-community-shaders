@@ -75,6 +75,13 @@ namespace RenderGraph::Engine::ImageSpace
 		float ssrCompositeA = 0, ssrCompositeB = 0;
 		// The SAO composite's sun: the sun shadow light's direction (zero without one) and the sun light's diffuse.
 		std::array<float, 3> sunDirection{}, sunColour{};
+		// The scope helpers' active flags, which only the console's toggles write: the reflections' (manager +0x1c0 +0x10), SAO's
+		// (+0x1c8 +0x50) and the snow pass's (+0x1e8 +0x08).
+		bool ssrOn = false, saoOn = false, snowOn = false;
+		// The composite's fog: the current portal graph's fog property (SE 98984 / AE 105637), and its values at +0x38 to +0x54
+		// (the two colours, the near and far range) and +0x84, +0x88.
+		bool portalFog = false;
+		std::array<float, 10> portalFogValues{};
 
 		bool operator==(const WorldSettings&) const = default;
 	};

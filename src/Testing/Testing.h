@@ -27,10 +27,17 @@ namespace Testing
 	void OnSkseMessage(std::uint32_t a_type);
 
 	/**
-	 * @brief Render thread, after every Present (beside State::Reset): milestones, the live-image shots, the exit and the status file.
-	 * A Present outside a game update (the main menu, a loading screen's thread) is a game frame of its own and runs the steps.
+	 * @brief Render side, after every Present (the render frame end, beside State::Reset): the render frame count, the live-image
+	 * shots and the exit. Reads no game state.
 	 */
-	void OnPresent();
+	void OnFrameEnd();
+
+	/**
+	 * @brief Game side, after every Present's render frame end, on the thread that presented: milestones, the steps and their
+	 * commands, the status file. A Present outside a game update (the main menu, a loading screen's thread) is a game frame of its
+	 * own and runs the steps. Phase 7 calls it at the game thread's publish instead.
+	 */
+	void OnGamePresent();
 
 	/**
 	 * @brief Game thread, once per game update, when its snapshot is published (Main::Update's call of Main::DrawFrame): the step

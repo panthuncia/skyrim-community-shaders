@@ -32,12 +32,6 @@ namespace RenderGraph::Engine::Native
 			return *reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address());
 		}
 
-		template <class T>
-		T& Field(const void* a_base, std::size_t a_offset)
-		{
-			return *reinterpret_cast<T*>(reinterpret_cast<std::uintptr_t>(a_base) + a_offset);
-		}
-
 		/** @brief A clear or copy the skeleton did not take: nothing else makes it in native. Logged once per what. */
 		void Untaken(bool a_taken, const char* a_what)
 		{
@@ -91,13 +85,8 @@ namespace RenderGraph::Engine::Native
 			// Deferred's hook on the SetCameraData after the water (PostWater_SetCamera): View Atmosphere's composite.
 			if (globals::deferred->postWaterHookInstalled)
 				globals::features::viewAtmosphere.CompositeAfterWater();
-			// With ImageSpaceManager +0x168's effect active and flag 0x40, the state flush clears kMAIN_ONLY_ALPHA and the TAA mask.
-			const auto effect = Field<std::uintptr_t>(RE::ImageSpaceManager::GetSingleton(), 0x168);
-			if ((a_flags & 0x40) && effect && Field<bool>(reinterpret_cast<const void*>(effect), 0x8)) {
-				constexpr float kZero[4]{};
-				Untaken(Skeleton::ClearColour(RE::RENDER_TARGET::kTEMPORAL_AA_MASK, kZero), "the TAA mask's clear");
-				Untaken(Skeleton::ClearColour(RE::RENDER_TARGET::kMAIN_ONLY_ALPHA, kZero), "kMAIN_ONLY_ALPHA's clear");
-			}
+			// The engine's state flush clears kMAIN_ONLY_ALPHA and the TAA mask here when ImageSpaceManager +0x168's effect
+			// (ApplyReflections) is active. CS keeps that effect off on the game side (Snapshot/SideEffects), so native never clears.
 			if (!underwater)
 				DCLF::Features::Forward::NativeBlendedDraw(true);
 		}

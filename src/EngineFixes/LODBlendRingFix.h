@@ -11,8 +11,11 @@ struct LODBlendRingFix : EngineFix
 
 	static LODBlendRingFix& GetInstance();
 
-	/** @brief Owns the engine's ring center for this frame. Main thread, once per frame. */
-	void Update();
+	/**
+	 * @brief Owns the engine's ring center. Main thread, a_seconds the game time to slide by. Native calls it once per game update after
+	 * the capture (Snapshot/SideEffects), guest at each frame's end.
+	 */
+	void Update(float a_seconds);
 
 private:
 	/** @brief Ends any slide and lets the engine run its deferred per-cell LOD blend reflag. */

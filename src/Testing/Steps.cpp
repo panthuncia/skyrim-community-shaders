@@ -419,19 +419,35 @@ namespace Testing
 		stepsDue.store(true, std::memory_order_relaxed);
 	}
 
-	void OnPresent()
+	void OnFrameEnd()
 	{
 		const auto present = presentFrame.fetch_add(1, std::memory_order_relaxed) + 1;
+		// The memory probe's CSV, once: the log directory is a known-folder query, which every Present would pay.
+		static const bool memProbeStarted = (MemProbe::Start(logger::log_directory().value_or(std::filesystem::path{})), true);
+		(void)memProbeStarted;
+		Vram::SpillLab::OnPresent();
+
+		// The exit waits for the shots still being read back or encoded: a process ended mid-write leaves a broken PNG.
+		if (exitRequested && LiveProbeDone(present)) {
+			const bool pending = globals::features::screenshotFeature.ScriptedCapturesPending();
+			const bool late = std::chrono::steady_clock::now() - *exitRequested > std::chrono::seconds(10);
+			if (!pending || late) {
+				if (pending)
+					logger::warn("[TEST] exit: a shot was still being saved after 10 s");
+				ExitRun();
+			}
+		}
+	}
+
+	void OnGamePresent()
+	{
+		const auto present = presentFrame.load(std::memory_order_relaxed);
 		// A Present outside a game update is a game frame of its own when no update ran since the last one: a loading screen or a movie
 		// publishes only frame-only snapshots. Inside an update, its first Present runs the steps.
 		const bool inUpdate = Snapshot::InGameUpdate();
 		const bool ownFrame = !inUpdate && !updatedSincePresent.exchange(false, std::memory_order_relaxed);
 		const bool runSteps = ownFrame || (inUpdate && stepsDue.exchange(false, std::memory_order_relaxed));
 		const auto frame = ownFrame ? stepClock.fetch_add(1, std::memory_order_relaxed) + 1 : stepClock.load(std::memory_order_relaxed);
-		// The memory probe's CSV, once: the log directory is a known-folder query, which every Present would pay.
-		static const bool memProbeStarted = (MemProbe::Start(logger::log_directory().value_or(std::filesystem::path{})), true);
-		(void)memProbeStarted;
-		Vram::SpillLab::OnPresent();
 
 		UpdateLifecycle(frame, present);
 		CheckPhaseTimeouts();
@@ -452,16 +468,6 @@ namespace Testing
 		if (std::unique_lock lock(stepsMutex, std::try_to_lock); runSteps && lock) {
 			RunSteps(frame);
 			TickCommands();
-		}
-		// The exit waits for the shots still being read back or encoded: a process ended mid-write leaves a broken PNG.
-		if (exitRequested && LiveProbeDone(present)) {
-			const bool pending = globals::features::screenshotFeature.ScriptedCapturesPending();
-			const bool late = std::chrono::steady_clock::now() - *exitRequested > std::chrono::seconds(10);
-			if (!pending || late) {
-				if (pending)
-					logger::warn("[TEST] exit: a shot was still being saved after 10 s");
-				ExitRun();
-			}
 		}
 	}
 }

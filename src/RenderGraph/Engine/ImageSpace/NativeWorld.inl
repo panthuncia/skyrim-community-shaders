@@ -169,6 +169,20 @@ namespace NativePost
 			const auto light = Field<std::uintptr_t>(sunLight, 0x48);
 			s.sunColour = { Field<float>(light, 0x11c), Field<float>(light, 0x120), Field<float>(light, 0x124) };
 		}
+		if (const auto base = ManagerBase()) {
+			const auto reflections = Field<std::uintptr_t>(base, 0x1c0);
+			s.ssrOn = reflections && Field<bool>(reflections, 0x10);
+			const auto sao = Field<std::uintptr_t>(base, 0x1c8);
+			s.saoOn = sao && Field<bool>(sao, 0x50);
+			const auto snow = Field<std::uintptr_t>(base, 0x1e8);
+			s.snowOn = snow && Field<bool>(snow, 0x08);
+		}
+		if (const auto fog = w.portalFog(*w.portalIndex)) {
+			s.portalFog = true;
+			constexpr std::array<std::uintptr_t, 10> kFogOffsets{ 0x38, 0x3c, 0x40, 0x44, 0x48, 0x4c, 0x50, 0x54, 0x84, 0x88 };
+			for (std::size_t i = 0; i < kFogOffsets.size(); ++i)
+				s.portalFogValues[i] = Field<float>(fog, kFogOffsets[i]);
+		}
 		return s;
 	}
 
@@ -504,9 +518,10 @@ namespace NativePost
 		const auto& w = WG();
 		const auto s = WorldSettingsNow();
 		CompositeInputs in;
-		const bool sao = Field<bool>(a_sao, 0x50);
-		const auto fog = w.portalFog(*w.portalIndex);
-		const bool fogged = fog && s.saoFog;
+		// The SAO flag and the portal fog: the snapshot's in native, read now in guest (WorldSettingsNow).
+		const bool sao = s.saoOn;
+		const bool fogged = s.portalFog && s.saoFog;
+		const auto& fog = s.portalFogValues;
 		in.form = static_cast<std::uint8_t>(sao ? (fogged ? 1 : 0) : (fogged ? 2 : 3));
 		in.normals = EngineNormalsParity();
 		in.blur = s.ssrBlur;
@@ -516,17 +531,17 @@ namespace NativePost
 		rows = ExplicitRows(11);
 		const auto camera = CurrentCamera();
 		if (fogged) {
-			const float nearFog = Field<float>(fog, 0x50), farFog = Field<float>(fog, 0x54);
+			const float nearFog = fog[6], farFog = fog[7];
 			if (farFog == nearFog)
 				SetId(rows, 0, kNoFogRange[0], kNoFogRange[1], kNoFogRange[2], kNoFogRange[3]);
 			else {
 				const float scale = 1.0f / (farFog - nearFog);
-				SetId(rows, 0, scale * nearFog, scale, Field<float>(fog, 0x84), Field<float>(fog, 0x88));
+				SetId(rows, 0, scale * nearFog, scale, fog[8], fog[9]);
 			}
 			const auto* block = NativeBlock();
 			const float range = block ? block->inputs.range : *G().range;
-			SetId(rows, 1, Field<float>(fog, 0x38), Field<float>(fog, 0x3c), Field<float>(fog, 0x40), range);
-			SetId(rows, 2, Field<float>(fog, 0x44), Field<float>(fog, 0x48), Field<float>(fog, 0x4c), range);
+			SetId(rows, 1, fog[0], fog[1], fog[2], range);
+			SetId(rows, 2, fog[3], fog[4], fog[5], range);
 		}
 		SetId(rows, 3, camera.frustum.fNear, camera.frustum.fFar);
 		SetId(rows, 4, s.sunDirection[0], s.sunDirection[1], s.sunDirection[2]);
