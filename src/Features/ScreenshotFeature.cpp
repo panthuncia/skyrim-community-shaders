@@ -9,20 +9,20 @@
 #include <PCH.h>
 
 #include "Features/HDRDisplay.h"
+#include "Features/PhysicalSky.h"
 #include "Features/Screenshot/Avif.h"
 #include "Features/Screenshot/ORGScreenshot.h"
 #include "Features/Upscaling.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
-#include "Utils/GameThread.h"
-#include "Features/PhysicalSky.h"
 #include "RenderGraph/Switches.h"
 #include "Snapshot/Publication.h"
 #include "State.h"
 #include "Utils/Clipboard.h"
 #include "Utils/D3D.h"
 #include "Utils/FileSystem.h"
+#include "Utils/GameThread.h"
 
 #define I18N_KEY_PREFIX "feature.screenshot."
 

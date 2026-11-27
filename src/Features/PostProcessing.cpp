@@ -24,10 +24,10 @@
 #include "Features/HDRDisplay.h"
 #include "Features/LinearLighting.h"
 #include "Features/Upscaling.h"
-#include "Utils/ColorSpace.h"
-#include "Utils/GameThread.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "Utils/ColorSpace.h"
+#include "Utils/GameThread.h"
 #include "Vram/DxvkMemory.h"
 
 #include <algorithm>

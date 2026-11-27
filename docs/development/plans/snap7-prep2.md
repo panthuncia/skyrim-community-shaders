@@ -98,7 +98,19 @@ Bound `CS::Setting` with `.Adopted()` reads on the game side (the menu writes th
 
 ## Open for phase 7 (reads from the ImGui frame not converted)
 
-The `UiFrameScope` detector lists them per run (`[Snapshot] UI-frame read site`). Known groups:
+The `UiFrameScope` detector lists them per run (`[Snapshot] UI-frame read site`). In `s7-prep2-nvk-menuui2` (menu open
+about 300 frames, CS Editor closed) it counted 2875 reads at 17 sites at exit:
+- every frame: `Features/CSEditor.cpp:1112` (the weather overlay's in-world check, the player, 1345) and
+  `EditorWindow::CanBeOpen` (`EditorWindow.cpp:171` the UI, `:2574` the player, 488 each). These are left live because
+  of loading screens: the main tick does not run while the main thread loads, so a published flag would still say "in
+  the world". In the split, they belong with the frame kind the render thread already knows.
+- while the menu draws: the Scene Manager's location and period code (`SceneSettingsLocation.cpp:85`,
+  `SceneSettingsLocationTargets.cpp:138-140`, `SceneSettingsInternal.cpp:883-884`, `SceneSettingsManager.cpp:346, 1150`,
+  `SceneSettingsUI.cpp:1124`; the sky and the player, about 10 a frame), and one-off reads in `Upscaling.cpp:357`,
+  `PresetCompatibility.cpp:118`, `Climate.cpp:21`, `ImGuiRenderer.cpp:184`.
+- `native-vulkan+quick` with the menu closed: 1084 at exit, all from the two every-frame sites.
+
+Other known groups the menu-ui run does not reach:
 - the light editor's scene traversal (`GatherLights`) and its writes to CS's own per-light data (`RuntimeLightDataExt`
   fade, the hover flash), which Light Limit Fix reads;
 - the weather picker, transition bar and weather details window read the sky;
@@ -108,6 +120,61 @@ The `UiFrameScope` detector lists them per run (`[Snapshot] UI-frame read site`)
 - `PostProcessing::Capture` reads `State::GetTonemapOwner` (render-side state) through `IsPipelineRunning`.
 - `Util::GameSetting`'s ImGui tree edits INI values in place; it has no callers.
 
+## Tests
+
+cs-test gets two commands (Testing/Commands.cpp) and a config:
+- `cs-ui <action>`: posts the action as a UI task, so it runs inside the ImGui frame as a widget's handler does. Actions:
+  `setting <ShortName>.<key>=<JSON>`, `hour=<h>`, `timescale=<x>`, `pause`, `resume`, `lock=<weather>`, `unlock`.
+- `cs-ui-expect <state>`: fails the step unless the game state matches. States: `hour=`, `timescale=`, `paused`,
+  `running`, `lock=`, `unlocked`, `setting ...` (the feature's saved value), and `ui-writes=0`.
+- `configs/menu-ui.toml` (compose it: `guest+menu-ui`, `native-vulkan+menu-ui`): opens the menu, then sets a Sky Sync
+  setting (one read adopted on the game thread), pauses, sets the hour to 20, locks the weather to 81A (SkyrimClear),
+  unlocks, resumes, sets the timescale to 20, puts the setting back and checks `ui-writes=0`. Shots before, during and
+  after.
+- Until this merges, the main checkout's cs-test needs the config by path:
+  `native-vulkan+C:/.../snap7-prep2/tools/cs-test/configs/menu-ui.toml`.
+
 ## Runs
 
-(filled below)
+All on stage `s7-prep2` (Dev-Fast; built from 3d53a6b12, plus clang-format and notes only):
+
+| Config | Label | Result |
+|---|---|---|
+| guest+quick | s7-prep2-guest-quick | passed (shot reference) |
+| native-vulkan+quick, `CS_SNAPSHOT_DETECT=1` | s7-prep2-nvk-quick | passed (shot reference); live reads 639 a world frame, engine render calls 1 a world frame |
+| native-d3d12-quick | s7-prep2-nd12-quick | passed (shot reference) |
+| native-vulkan+menu-scenes | s7-prep2-nvk-menuscenes | hang at the loading screen: data-loaded took 119 s, and the main thread was stuck in engine code with no CS frame on any stack (the machine was busy) |
+| native-vulkan+menu-scenes | s7-prep2-nvk-menuscenes2 | see the report |
+| native-vulkan+window-resize-stress-taa | s7-prep2-nvk-wrstaa | passed (13 shots) |
+| guest+menu-ui | s7-prep2-guest-menuui | passed; every cs-ui-expect holds |
+| native-vulkan+menu-ui, `CS_SNAPSHOT_DETECT=1` | s7-prep2-nvk-menuui, s7-prep2-nvk-menuui2 | passed both; every cs-ui-expect holds, `ui-writes=0` |
+| native-vulkan+cadence-drop-cells | s7-prep2-nvk-dropcells | passed |
+
+The first native menu-ui run went to about 1 fps after the resume step. Bisected with throwaway configs:
+- the same time and weather changes through the console were fast on this stage, with and without the menu open;
+- removing the Sky Sync setting steps made menu-ui fast;
+- the console sequence plus `MinShadowElevation=20` was fast on this stage and slow on the base stage `nfg`.
+
+Other leads' games were running on the same GPU at the time, and the rerun (`s7-prep2-nvk-menuui2`) was fast throughout.
+So this was contention, not this change.
+
+Detector: the live-read totals are within the run-to-run range of the base (`native-vulkan+quick` 639 a world frame;
+the snap0 baseline was 1848, and later phases brought it down to this range). The new `ui_frame` number in
+`report.engine_reads` is the item 4 metric: 1084 with the menu closed. The two every-frame sites above make up all of it.
+
+## Proposed decision-log entries
+
+- **The game-thread command queue:** `GameThread::Post` runs a task on the main thread at the next main tick. The ImGui
+  frame writes engine and game state only through it. `GameThread::Run` keeps game-side callers synchronous.
+  `UiFrameScope` counts UI-frame engine reads, and `NoteEngineWrite` makes a direct write from the ImGui frame fatal in
+  test runs.
+- **UI state from other threads goes through UI tasks:** `Menu::PostUiTask` and `Menu::RequestOpen`. `Menu::Open`/`Close`
+  are for the ImGui frame only. The menu draws its own cursor (`NoMouseCursorChange`).
+- **The menu reads the game's clock and sky from `EditorWindow::GameView`,** which the game thread publishes at each main
+  tick.
+- **Settings read on the game thread are bound and read adopted:** Sky Sync (15 scalars, plus its worldspace list handed
+  over through the queue), Physical Sky's `forceEnableAllInteriorCells`, the Cinematic Camera (5 settings, the groups as
+  struct settings), DoF's `consoleSelection` and `targetFocus`. `RaiseAt` raises a struct setting from a member's
+  address.
+- **CS Editor form edits apply on the game thread** (`Widget::RequestApply`). The weather lock's upkeep moved from
+  `CSEditor::Prepass` to the editor's game tick.
