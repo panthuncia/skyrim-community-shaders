@@ -36,6 +36,7 @@
 #include <cstring>
 #include <format>
 #include <map>
+#include <set>
 #include <string>
 
 namespace DCLF::Features::MenuViews::Scenes::Observe
@@ -78,7 +79,11 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			auto& c = s.fields[a_field];
 			++c.draws;
 			if (a_differ) {
-				if (c.differ++ < 4 && s.logged++ < 400)
+				// A draw CS cannot compute would be fatal in an owned scheme: each distinct one is logged, past the cap.
+				static std::set<std::string> uncomputed;
+				if (a_field.ends_with("computed") && uncomputed.insert(a_field + a_detail).second)
+					logger::info("[DCLF] menu scenes observe: {} differs: {}", a_field, a_detail);
+				else if (c.differ++ < 4 && s.logged++ < 400)
 					logger::info("[DCLF] menu scenes observe: {} differs: {}", a_field, a_detail);
 			}
 		}
@@ -454,7 +459,9 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 			alpha ? std::format("flags {:#x} threshold {}", alpha->alphaFlags, alpha->alphaThreshold) : std::string("none"));
 		if (s.others[key]++ == 0)
 			logger::info("[DCLF] menu scenes observe: state {}", key);
-		const bool membrane = netimmerse_cast<const RE::BSLightingShaderProperty*>(property) && a_pass->passEnum >= Effects::kEffectPassEnumBase &&
+		// A membrane is a Lighting property's Effect pass: Lighting pass numbers are above the Effect base too, so the shader decides.
+		const bool membrane = netimmerse_cast<const RE::BSLightingShaderProperty*>(property) && a_pass->shader &&
+		                      a_pass->shader->shaderType.get() == RE::BSShader::Type::Effect && a_pass->passEnum >= Effects::kEffectPassEnumBase &&
 		                      ((a_pass->passEnum - Effects::kEffectPassEnumBase) & Effects::EffectFlag::Membrane) != 0;
 		if (membrane) {
 			const auto* manager = RE::UI3DSceneManager::GetSingleton();

@@ -519,6 +519,10 @@ namespace DCLF::Features::MenuViews::Scenes
 				const bool read = t < kEffectSlotsRead;
 				auto* view = read ? Unwrap(rss.PSTexture[t]) : nullptr;
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
+				// A Soft pass's t3 is the bound depth target's view (kMAIN's in a menu render), which D3D11 unbinds while that depth target is
+				// bound for writing: the draw reads the null view, as CS's own Soft draws do.
+				if (read && t == 3 && view && PublishedResources::ExportedId(view) == "Engine::Depth::kMAIN")
+					view = nullptr;
 				const auto slot = Family::SlotTexture(view, Kind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
 				if (slot == Family::SlotResult::Published) {
 					const auto id = PublishedResources::ExportedId(view);

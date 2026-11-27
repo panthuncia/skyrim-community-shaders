@@ -42,10 +42,10 @@
 #include "Utils/Logging.h"
 
 #include <algorithm>
-#include <atomic>
 #include <bit>
-
 #include <cstring>
+#include <iterator>
+#include <vector>
 
 namespace DCLF::Features::MenuViews::Scenes::Native
 {
@@ -417,8 +417,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 
 		/** @brief BSEffectShader::SetupTechnique's rows (AE 0x1414ea2c0): the scene graph's fog, as Lighting's, and FilteringParam. */
-		void EffectTechnique(const Inputs& a_in, const StageLayout& a_vsLayout, const StageLayout& a_psLayout, std::span<const std::uint8_t> a_vsTable,
-			std::span<const std::uint8_t> a_psTable, EffectSceneConstants& a_c, EffectSceneConstants& a_w)
+		void EffectTechnique(const Inputs& a_in, std::uint32_t a_pass, const StageLayout& a_vsLayout, const StageLayout& a_psLayout,
+			std::span<const std::uint8_t> a_vsTable, std::span<const std::uint8_t> a_psTable, EffectSceneConstants& a_c, EffectSceneConstants& a_w)
 		{
 			ConstantBlock vs0, ps0;
 			vs0.Reset();
@@ -451,6 +451,19 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				filter[0] = *filterX.get();
 				filter[1] = *filterY.get();
 			}
+			// A Soft pass: CameraDataEffect.yz, the current camera's near and far - near (the menu camera during the render), and VPOSOffset,
+			// the inverse render size.
+			if (a_pass & Effects::EffectFlag::Soft) {
+				float* camera = Variable(ps0, a_psLayout, Effects::kEffectPSCameraData);
+				camera[1] = a_in.camera.frustum.fNear;
+				camera[2] = a_in.camera.frustum.fFar - a_in.camera.frustum.fNear;
+				static const REL::Relocation<const std::uint32_t*> width{ RELOCATION_ID(524972, 411453) }, height{ RELOCATION_ID(524973, 411454) };
+				float* offset = Variable(ps0, a_psLayout, Effects::kEffectPSVPOSOffset);
+				offset[0] = 1.0f / static_cast<float>(*width.get());
+				offset[1] = 1.0f / static_cast<float>(*height.get());
+				offset[2] = 0.0f;
+				offset[3] = 0.0f;
+			}
 			Pack(vs0, a_vsLayout, a_vsTable, Effects::kEffectVSGroups[0], Effects::kEffectVSFirstVariable[0], a_c.vsTechnique, a_w.vsTechnique, kEffectVSTechniqueRows);
 			Pack(ps0, a_psLayout, a_psTable, Effects::kEffectPSGroups[0], Effects::kEffectPSFirstVariable[0], a_c.psTechnique, a_w.psTechnique, kEffectPSTechniqueRows);
 		}
@@ -469,6 +482,93 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			a_vsTable = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(vs->constantTable.data()), vs->constantTable.size());
 			a_psTable = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(ps->constantTable.data()), ps->constantTable.size());
 			return true;
+		}
+	}
+
+	namespace
+	{
+		/**
+		 * @brief A lit Effect pass's light rows (SetupGeometry, AE 0x1414eab10): DLightColor from light 0 (the HDR multiplier times its fade
+		 * times its colour at +0x14c), then up to four point lights' PLightPosition (in model space, or less the eye for a skinned pass),
+		 * PLightingRadiusInverseSquared (of the radius over the world scale, unskinned) and PLightColor (LOD dimmer times fade times
+		 * diffuse); the rest zero. Linear Lighting's EffectGeometryUpload converts the colours.
+		 */
+		void EffectLightRows(const Inputs& a_in, const RE::BSGeometry& a_geometry, std::uint32_t a_pass, bool a_linear, ConstantBlock& a_block, const StageLayout& a_layout)
+		{
+			Lights lights;
+			SelectLights(a_in, a_geometry, lights);
+			if (!lights.count || !lights.lights[0] || !lights.lights[0]->light)
+				return;
+			auto& linear = globals::features::linearLighting;
+			{
+				const auto* light = lights.lights[0]->light.get();
+				const auto* bytes = reinterpret_cast<const std::byte*>(light);
+				const auto read = [](const std::byte* a_from, std::size_t a_offset) {
+					float value = 0.0f;
+					std::memcpy(&value, a_from + a_offset, sizeof(value));
+					return value;
+				};
+				float* colour = Variable(a_block, a_layout, Effects::kEffectPSDLightColor);
+				const auto* directional = netimmerse_cast<const RE::NiDirectionalLight*>(light);
+				if (directional && (a_linear || linear.IsSunlightOverridden(directional))) {
+					const auto rgb = linear.LightColorToWorking(directional, true) * (directional->GetLightRuntimeData().fade * linear.GetSunlightScale(directional));
+					colour[0] = rgb.red;
+					colour[1] = rgb.green;
+					colour[2] = rgb.blue;
+				} else {
+					const auto* imageSpace = reinterpret_cast<const std::byte*>(RE::ImageSpaceManager::GetSingleton());
+					const float scale = (imageSpace ? read(imageSpace, 0xe0) : 1.0f) * read(bytes, 0x134);
+					colour[0] = scale * read(bytes, 0x14c);
+					colour[1] = scale * read(bytes, 0x150);
+					colour[2] = scale * read(bytes, 0x154);
+				}
+			}
+			// The inverse world (AE 0x140e19a20), then D3DXVec3TransformCoord with it.
+			const auto& t = a_geometry.world;
+			const auto& m = t.rotate.entry;
+			const float inverse = 1.0f / t.scale;
+			const float rows[3][3]{ { inverse * m[0][0], m[0][1] * inverse, inverse * m[0][2] }, { inverse * m[1][0], m[1][1] * inverse, inverse * m[1][2] },
+				{ inverse * m[2][0], inverse * m[2][1], inverse * m[2][2] } };
+			const float translation[3]{ -((t.translate.y * m[1][0] + m[0][0] * t.translate.x + t.translate.z * m[2][0]) * inverse),
+				-((m[0][1] * t.translate.x + m[1][1] * t.translate.y + t.translate.z * m[2][1]) * inverse),
+				-((m[0][2] * t.translate.x + m[1][2] * t.translate.y + t.translate.z * m[2][2]) * inverse) };
+			const bool skinned = a_pass & Effects::EffectFlag::Skinned;
+			const std::uint32_t count = (std::min)(lights.count, 5u);
+			for (std::uint32_t i = 1; i < 5; ++i) {
+				float position[3]{}, radius = 0.0f, rgb[3]{};
+				const auto* bsLight = i < count ? lights.lights[i] : nullptr;
+				const auto* light = bsLight ? bsLight->light.get() : nullptr;
+				if (light) {
+					const auto& data = light->GetLightRuntimeData();
+					const float dimmer = DimmerOf(a_in, *bsLight);
+					if (a_linear) {
+						const auto colour = linear.LightColorToWorking(light) * (data.fade * dimmer);
+						rgb[0] = colour.red;
+						rgb[1] = colour.green;
+						rgb[2] = colour.blue;
+					} else {
+						const float scale = dimmer * data.fade;
+						rgb[0] = scale * data.diffuse.red;
+						rgb[1] = scale * data.diffuse.green;
+						rgb[2] = scale * data.diffuse.blue;
+					}
+					const auto& p = light->world.translate;
+					if (!skinned) {
+						for (int c = 0; c < 3; ++c)
+							position[c] = p.x * rows[0][c] + p.y * rows[1][c] + p.z * rows[2][c] + translation[c];
+						radius = data.radius.x / t.scale;
+					} else {
+						position[0] = p.x - a_in.eye.x;
+						position[1] = p.y - a_in.eye.y;
+						position[2] = p.z - a_in.eye.z;
+						radius = data.radius.x;
+					}
+					radius = 1.0f / (radius * radius);
+				}
+				const float values[7]{ position[0], position[1], position[2], radius, rgb[0], rgb[1], rgb[2] };
+				for (std::uint32_t v = 0; v < 7; ++v)
+					Variable(a_block, a_layout, Effects::kEffectPSPLightPositionX + v)[i - 1] = values[v];
+			}
 		}
 	}
 
@@ -497,7 +597,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		// A particle system's quads are expanded by CS (ParticleSnapshots::ExpandNow); their subtexture rects are resolved there. A skinned
 		// draw's bones are its palettes (BoneRows).
 		const bool particles = IsParticles(a_geometry, a_out.pass);
-		constexpr std::uint32_t kUnported = EF::Particles | EF::StripParticles | EF::Membrane | EF::Lighting | EF::ProjectedUv | EF::Soft | EF::Blood | EF::TexCoordIndex;
+		constexpr std::uint32_t kUnported = EF::Particles | EF::StripParticles | EF::Membrane | EF::ProjectedUv | EF::TexCoordIndex;
 		if (a_out.pass & kUnported & ~(particles ? EF::Particles | EF::TexCoordIndex : 0u)) {
 			a_why = std::format("an Effect variant the native menu scene does not draw (pass {:#x})", a_out.pass);
 			return false;
@@ -510,7 +610,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		const auto& psLayout = space.ps.layout;
 		auto& c = a_out.constants;
 		auto& w = a_out.written;
-		EffectTechnique(a_in, vsLayout, psLayout, vsTable, psTable, c, w);
+		EffectTechnique(a_in, a_out.pass, vsLayout, psLayout, vsTable, psTable, c, w);
 
 		// PerMaterial (the Effect material port, which converts BaseColor into Linear Lighting's working space).
 		MaterialPort::MaterialSnapshot snapshot;
@@ -521,6 +621,13 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 		auto& linear = globals::features::linearLighting;
 		const bool linearOn = linear.loaded && linear.IsLinearLightingActive();
+		// A Soft pass's LightingInfluence.y is far * near / softFalloffDepth (SetupMaterial, with the camera SetupTechnique took); the port
+		// keeps the depth itself for DCLF's shader, which divides.
+		if (a_out.pass & EF::Soft) {
+			const auto& camera = a_in.camera.frustum;
+			const float depth = static_cast<const RE::BSEffectShaderMaterial*>(property->material)->softFalloffDepth;
+			a_out.record.ps.floats[psLayout.offset[Effects::kEffectPSLightingInfluence] + 1] = camera.fFar * camera.fNear / depth;
+		}
 		Pack(a_out.record.vs, vsLayout, vsTable, Effects::kEffectVSGroups[1], Effects::kEffectVSFirstVariable[1], c.vsMaterial, w.vsMaterial, kEffectVSMaterialRows);
 		Pack(a_out.record.ps, psLayout, psTable, Effects::kEffectPSGroups[1], Effects::kEffectPSFirstVariable[1], c.psMaterial, w.psMaterial, kEffectPSMaterialRows);
 
@@ -533,7 +640,11 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		if (!(a_out.pass & EF::Skinned)) {
 			const auto centre = particles ? a_geometry.GetModelData().modelBound.center : RE::NiPoint3{};
 			WorldRows(a_geometry.world, a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSWorld), centre);
-			WorldRows(a_geometry.previousWorld, a_in.havePrevious ? a_in.previousEye : a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld), centre);
+			// A particle system's PreviousWorld is its World (SetupGeometry copies the rows).
+			if (particles)
+				WorldRows(a_geometry.world, a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld), centre);
+			else
+				WorldRows(a_geometry.previousWorld, a_in.havePrevious ? a_in.previousEye : a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld), centre);
 		}
 		{
 			float* colour = Variable(ps2, psLayout, Effects::kEffectPSPropertyColor);
@@ -546,6 +657,18 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			colour[1] = rgb.green;
 			colour[2] = rgb.blue;
 			colour[3] = property->alpha;
+		}
+		if (a_out.pass & EF::Lighting)
+			EffectLightRows(a_in, a_geometry, a_out.pass, linearOn, ps2, psLayout);
+		// Weapon blood's AlphaTestRef (SetupGeometry's Blood branch): the alpha property's threshold times the exe's 1/255, then the two
+		// globals BSTempEffectWeaponBlood writes. w is left as the last draw wrote it; the shader does not read it.
+		if (a_out.pass & EF::Blood) {
+			static const REL::Relocation<const float*> blood{ REL::Offset(Effects::Address::kEffectBlood) };
+			const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+			float* ref = Variable(ps2, psLayout, Effects::kEffectPSAlphaTestRef);
+			ref[0] = alpha ? AlphaRefOf(*alpha) : 0.0f;
+			ref[1] = blood.get()[0];
+			ref[2] = blood.get()[1];
 		}
 		Pack(vs2, vsLayout, vsTable, Effects::kEffectVSGroups[2], Effects::kEffectVSFirstVariable[2], c.vsGeometry, w.vsGeometry, kEffectVSGeometryRows);
 		Pack(ps2, psLayout, psTable, Effects::kEffectPSGroups[2], Effects::kEffectPSFirstVariable[2], c.psGeometry, w.psGeometry, kEffectPSGeometryRows);
@@ -616,7 +739,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		const auto& psLayout = space.ps.layout;
 		auto& c = a_out.constants;
 		auto& w = a_out.written;
-		EffectTechnique(a_in, vsLayout, psLayout, vsTable, psTable, c, w);
+		EffectTechnique(a_in, a_out.pass, vsLayout, psLayout, vsTable, psTable, c, w);
 
 		// SetupMaterial (AE 0x1414ea6c0) writes no constants for a membrane; it binds the Lighting material's textures. SetupTechnique set
 		// the base texture's filter.
@@ -926,37 +1049,42 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return a_draw.key.depthFormat ? nullptr : "no depth import";
 		}
 
-		/** @brief The draw's geometry by device address, and its index count. */
+		/**
+		 * @brief The skin partitions a skinned shape without renderer data of its own draws, a bit each (0 for a shape with its own). Such a
+		 * shape, the book's pages for one, draws each partition's buffers as the engine's skinned draw does: the partitions row 3 draws
+		 * (DCLF's world rule), every one with the whole skin's palette (the bone setter, AE 0x14150be30).
+		 */
+		std::uint32_t DrawnPartitions(const RE::BSGeometry& a_geometry)
+		{
+			if (a_geometry.GetGeometryRuntimeData().rendererData)
+				return 0;
+			const auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get();
+			return skin && skin->skinPartition ? SkinPartitions::Mask(*skin, 3) : 0u;
+		}
+
+		/**
+		 * @brief The draw's geometry by device address, and its index count. A skinned shape without renderer data draws partition
+		 * a_partition (DrawnPartitions); ~0u takes its first drawn one. A skin whose palette update makes no matrices (a first-person hand
+		 * on a loading model) is left out.
+		 */
 		const char* AddGeometry(const RE::BSGeometry& a_geometry, std::uint64_t a_vertexDesc, Run& a_run, Draw& a_draw, RenderGraph::BufferRef& a_vertexRef,
-			RenderGraph::BufferRef& a_indexRef, std::uint32_t* a_layout, std::uint32_t& a_stride, std::uint32_t& a_firstIndex, std::string& a_detail)
+			RenderGraph::BufferRef& a_indexRef, std::uint32_t* a_layout, std::uint32_t& a_stride, std::uint32_t& a_firstIndex, std::string& a_detail,
+			std::uint32_t a_partition = ~0u)
 		{
 			if (a_geometry.GetType().get() != RE::BSGeometry::Type::kTriShape)
 				return "not a BSTriShape";
 			const auto* shape = reinterpret_cast<const Family::TriShape*>(a_geometry.GetGeometryRuntimeData().rendererData);
 			auto triangles = static_cast<std::uint32_t>(static_cast<const RE::BSTriShape&>(a_geometry).GetTrishapeRuntimeData().triangleCount);
-			// A skinned shape without renderer data of its own, such as the book's pages, draws its skin partitions' buffers, as the engine's
-			// skinned draw does: the partition row 3 draws (DCLF's world rule). One drawn partition is supported; a shape that draws several
-			// stays left out as before (counted, logged once), as does a skin whose palette update makes no matrices (a first-person hand on
-			// a loading model).
-			if (!shape)
-				if (auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get(); skin && skin->skinPartition) {
-					SkinPalettes::Update(skin, a_geometry.world);
-					if (!skin->numMatrices || !skin->boneMatrices)
-						return kNoBuffers;
-					const auto mask = SkinPartitions::Mask(*skin, 3);
-					if (std::popcount(mask) > 1) {
-						static std::atomic<std::uint64_t> s_several{ 0 };
-						if (s_several.fetch_add(1, std::memory_order_relaxed) == 0)
-							logger::info("[DCLF] menu scenes: {} draws {} skin partitions and has no renderer data of its own; it is left out (counted, logged once)",
-								a_geometry.name.c_str() ? a_geometry.name.c_str() : "?", std::popcount(mask));
-						return kNoBuffers;
-					}
-					if (mask) {
-						const auto& partition = skin->skinPartition->partitions[std::countr_zero(mask)];
-						shape = reinterpret_cast<const Family::TriShape*>(partition.buffData);
-						triangles = partition.triangles;
-					}
-				}
+			if (const auto mask = DrawnPartitions(a_geometry)) {
+				auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get();
+				SkinPalettes::Update(skin, a_geometry.world);
+				if (!skin->numMatrices || !skin->boneMatrices)
+					return kNoBuffers;
+				const auto index = a_partition == ~0u ? static_cast<std::uint32_t>(std::countr_zero(mask)) : a_partition;
+				const auto& partition = skin->skinPartition->partitions[index];
+				shape = reinterpret_cast<const Family::TriShape*>(partition.buffData);
+				triangles = partition.triangles;
+			}
 			Family::Geometry geometry;
 			const auto result = Family::LatchGeometry(shape, 0, triangles, a_vertexDesc, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, geometry, a_run.owners, &a_detail);
 			if (result == Family::GeometryResult::Missing)
@@ -970,6 +1098,34 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			a_stride = geometry.stride;
 			a_firstIndex = geometry.firstIndex;
 			a_draw.indexCount = geometry.indexCount;
+			return nullptr;
+		}
+
+		/**
+		 * @brief Pushes a_draw, whose latch holds a_constants, then one draw for each further partition a skinned shape without renderer
+		 * data draws (DrawnPartitions): a copy with that partition's buffers in its own constants, the same program, palettes and frame rows.
+		 * Every partition's buffers are taken before any draw is pushed, so a shape is drawn whole or left out.
+		 */
+		template <class Constants>
+		const char* PushDraw(const RE::BSGeometry& a_geometry, std::uint64_t a_vertexDesc, Run& a_run, Draw&& a_draw, const Constants& a_constants, std::string& a_detail)
+		{
+			auto further = DrawnPartitions(a_geometry);
+			further &= further - 1;  // the first drawn partition is a_draw's
+			std::vector<Draw> draws;
+			while (further) {
+				const auto index = static_cast<std::uint32_t>(std::countr_zero(further));
+				further &= further - 1;
+				Draw draw = a_draw;
+				Constants c = a_constants;
+				if (const char* why = AddGeometry(a_geometry, a_vertexDesc, a_run, draw, c.vertexRef, c.indexRef, c.vertexLayout, c.vertexStride, c.firstIndex, a_detail, index))
+					return why;
+				draw.latchOffset = a_run.Append(std::as_bytes(std::span<const Constants, 1>(&c, 1)));
+				if (draw.latchOffset == ~0u)
+					return "more constants than the batch's latch holds";
+				draws.push_back(std::move(draw));
+			}
+			a_run.draws.push_back(std::move(a_draw));
+			a_run.draws.insert(a_run.draws.end(), std::make_move_iterator(draws.begin()), std::make_move_iterator(draws.end()));
 			return nullptr;
 		}
 
@@ -1096,8 +1252,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (draw.latchOffset == ~0u || draw.frameOffset == ~0u)
 				return "more constants than the batch's latch holds";
 			draw.viewport = MenuViewport(a_targets[0], state);
-			a_run.draws.push_back(std::move(draw));
-			return nullptr;
+			return PushDraw(a_geometry, vs->vertexDesc, a_run, std::move(draw), c, a_detail);
 		}
 
 		/**
@@ -1215,8 +1370,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (draw.latchOffset == ~0u || draw.frameOffset == ~0u)
 				return "more constants than the batch's latch holds";
 			draw.viewport = MenuViewport(a_targets[0], a_state);
-			a_run.draws.push_back(std::move(draw));
-			return nullptr;
+			return PushDraw(a_geometry, vs->vertexDesc, a_run, std::move(draw), c, a_detail);
 		}
 
 		/**
@@ -1361,8 +1515,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return "more constants than the batch's latch holds";
 		draw.viewport = a_view.viewport;
 		draw.viewport.depthRange[1] -= Family::DepthBiasViewportOffset(r.state.depthBias);
-		a_run.draws.push_back(std::move(draw));
-		return nullptr;
+		return PushDraw(a_geometry, vs->vertexDesc, a_run, std::move(draw), c, a_detail);
 	}
 
 	bool LeftOut(const char* a_why)

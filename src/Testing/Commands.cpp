@@ -29,6 +29,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Capture/Capture.h"
 #include "Features/DrawcallLimitFix/Diagnostics/TelemetryProfile.h"
 
+#include <bit>
 #include <charconv>
 #include <set>
 
@@ -314,6 +315,111 @@ namespace Testing
 			return screen ? LoadScreenModel(screen->loadNIFData) : std::string{};
 		}
 
+		/** @brief Each load screen's own object, kept from the first call, as "loadscreen" points every screen at one. */
+		std::map<RE::TESLoadScreen*, RE::TESLoadScreen::LoadNIFData*>& OwnLoadScreens(RE::TESDataHandler& a_data)
+		{
+			static std::map<RE::TESLoadScreen*, RE::TESLoadScreen::LoadNIFData*> own;
+			if (own.empty())
+				for (auto* screen : a_data.GetFormArray<RE::TESLoadScreen>())
+					if (screen)
+						own[screen] = screen->loadNIFData;
+			return own;
+		}
+
+		/**
+		 * @brief "loadscreens <frames>[,<model substring>]": the Mist Menu shows every distinct load screen model (or each whose path holds
+		 * the substring, any case) in turn, <frames> frames each, as LoadingMenu
+		 * shows the one it picks (AE 0x140935870 calls the setup below with the screen's object data). Run it at the main menu, where the
+		 * Mist Menu is open and no load replaces the model. Raises signal 900 (a step's wait = "signal:900") once the last model had
+		 * its frames.
+		 */
+		class LoadScreenCycle
+		{
+		public:
+			static bool Start(const std::string& a_arg, std::string& a_error)
+			{
+				const auto comma = a_arg.find(',');
+				const std::string count = a_arg.substr(0, comma);
+				const auto lower = [](std::string a_text) {
+					std::ranges::transform(a_text, a_text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+					return a_text;
+				};
+				const std::string filter = comma == std::string::npos ? std::string{} : lower(a_arg.substr(comma + 1));
+				std::uint32_t frames = 0;
+				const auto [end, error] = std::from_chars(count.data(), count.data() + count.size(), frames);
+				auto* data = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton());
+				if (error != std::errc{} || end != count.data() + count.size() || !frames || !data) {
+					a_error = fmt::format("loadscreens '{}' needs the frames each model shows (and a model substring) and loaded data", a_arg);
+					return false;
+				}
+				// One entry per model path, in path order, so two runs show the same sequence.
+				std::map<std::string, const RE::TESLoadScreen::LoadNIFData*> byModel;
+				for (const auto& [screen, nif] : OwnLoadScreens(*data))
+					if (const auto model = LoadScreenModel(nif); !model.empty() && lower(model).find(filter) != std::string::npos)
+						byModel.try_emplace(model, nif);
+				std::scoped_lock lock(mutex);
+				models.clear();
+				for (const auto& [model, nif] : byModel)
+					models.emplace_back(model, nif);
+				framesEach = frames;
+				left = 0;
+				next = 0;
+				done = models.empty();
+				logger::info("[TEST] loadscreens: {} distinct models, {} frames each", models.size(), frames);
+				return true;
+			}
+
+			/** @brief Once a frame: the next model when the current one had its frames. */
+			static void OnFrame()
+			{
+				std::scoped_lock lock(mutex);
+				if (done || models.empty() || (left && --left))
+					return;
+				if (next == models.size()) {
+					done = true;
+					logger::info("[TEST] loadscreens: all {} models shown", models.size());
+					auto& registry = Commands();
+					std::scoped_lock signalLock(registry.mutex);
+					registry.signals.insert("900");
+					return;
+				}
+				const auto index = next++;
+				left = framesEach;
+				AddTask([index, model = models[index].first, nif = models[index].second, count = models.size()] {
+					logger::info("[TEST] loadscreens: model {} of {}: {}", index + 1, count, model);
+					Show(*nif);
+				});
+			}
+
+		private:
+			/** @brief Main thread. The Mist Menu's load screen model setup (SE 51454, AE 52313) with a screen's object data. */
+			static void Show(const RE::TESLoadScreen::LoadNIFData& a_nif)
+			{
+				auto* mist = RE::MistMenu::GetSingleton();
+				const auto* model = a_nif.loadNIF ? a_nif.loadNIF->As<RE::TESModel>() : nullptr;
+				if (!mist || !model) {
+					logger::warn("[TEST] loadscreens: no Mist Menu or no model");
+					return;
+				}
+				// The setup does nothing while a model shows; it detaches the shown one itself.
+				mist->GetRuntimeData().showLoadScreen = false;
+				// TESLoadScreen's rotation in degrees, as LoadingMenu's pick turns it into radians (AE 0x14033af60, the exe's 0x3C8EFA35).
+				constexpr float kRadians = std::bit_cast<float>(0x3C8EFA35u);
+				const float rotation[3]{ a_nif.rotationConstraints[0] * kRadians, a_nif.rotationConstraints[1] * kRadians, a_nif.rotationConstraints[2] * kRadians };
+				const char* cameraPath = a_nif.cameraPath.GetModel();
+				using Setup = void (*)(const RE::TESModel*, float, const float*, const float*, const char*, float, float);
+				static const REL::Relocation<Setup> setup{ RELOCATION_ID(51454, 52313) };
+				setup(model, a_nif.initialScale, rotation, a_nif.initialTranslationOffset, cameraPath ? cameraPath : "", static_cast<float>(a_nif.rotationOffsetConstraints[0]),
+					static_cast<float>(a_nif.rotationOffsetConstraints[1]));
+			}
+
+			static inline std::mutex mutex;
+			static inline std::vector<std::pair<std::string, const RE::TESLoadScreen::LoadNIFData*>> models;
+			static inline std::uint32_t framesEach = 0, left = 0;
+			static inline std::size_t next = 0;
+			static inline bool done = false;
+		};
+
 		/**
 		 * @brief The "loadscreen" command with a model path substring. Every load screen shows the object of the first one whose model holds
 		 * it, so the next loads show that model whichever screen the game picks.
@@ -330,12 +436,7 @@ namespace Testing
 				return a_text;
 			};
 			auto& screens = data->GetFormArray<RE::TESLoadScreen>();
-			// Each screen's own object is kept from the first call so a later call can find any model again.
-			static std::map<RE::TESLoadScreen*, RE::TESLoadScreen::LoadNIFData*> own;
-			if (own.empty())
-				for (auto* screen : screens)
-					if (screen)
-						own[screen] = screen->loadNIFData;
+			auto& own = OwnLoadScreens(*data);
 			RE::TESLoadScreen::LoadNIFData* chosen = nullptr;
 			std::string model;
 			for (auto* screen : screens) {
@@ -687,6 +788,7 @@ namespace Testing
 			});
 			RegisterCommand("shot", Shot);
 			RegisterCommand("loadscreen", ForceLoadScreen);
+			RegisterCommand("loadscreens", LoadScreenCycle::Start);
 			RegisterCommand("window", Window);
 			RegisterCommand("weather", Weather);
 			RegisterCommand("feature", SetFeature);
@@ -1396,6 +1498,7 @@ namespace Testing
 	void TickCommands()
 	{
 		Cast::OnFrame();
+		LoadScreenCycle::OnFrame();
 		TickDrag();
 		if (moving.frames) {
 			--moving.frames;
