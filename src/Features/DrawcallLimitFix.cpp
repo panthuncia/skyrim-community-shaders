@@ -14,12 +14,14 @@
 #include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/RenderDepth.h"
+#include "RenderGraph/Engine/Native/RenderScene.h"
 #include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Engine/WindowWriters.h"
 #include "Features/DrawcallLimitFix/Core/Engine/RenderThreadBudget.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameTicket.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
@@ -330,10 +332,17 @@ std::int64_t DrawcallLimitFix::Hooks::Main_Draw_Early::thunk(void* a_main)
 {
 	// Native runs Main::SetupSunAndSky's game half in the capture (Native/WaterEffects.h), and draws the water work the capture queued
 	// here, where Main::Draw would have called RenderWaterEffects: nothing in between draws in native.
+	// A routed update's game half (Native::Scene::PrepareFrame) makes DCLF's ticket only: its render half and the water work run at the
+	// render's start (Native::Scene::RecordFrame).
 	namespace Water = RenderGraph::Engine::Native::WaterEffects;
 	if (Water::Owns()) {
-		globals::features::drawcallLimitFix.BeginSceneFrame();
-		Water::Render();
+		if (RenderGraph::Engine::Native::Scene::InGameHalf()) {
+			if (globals::features::drawcallLimitFix.installed)
+				DCLF::FrameDriver::Get().SceneGameStart();
+		} else {
+			globals::features::drawcallLimitFix.BeginSceneFrame();
+			Water::Render();
+		}
 		return static_cast<std::int64_t>(Water::SunAndSkyResult());
 	}
 	const auto result = func(a_main);
@@ -692,6 +701,26 @@ void DrawcallLimitFix::OnNativeGameHalfStart()
 {
 	if (installed)
 		DCLF::FrameDriver::Get().GameHalfStart();
+}
+
+void DrawcallLimitFix::ExpectNativeTicket(std::shared_ptr<const void> a_ticket)
+{
+	if (installed)
+		DCLF::FrameDriver::Get().ExpectTicket(std::static_pointer_cast<const DCLF::FrameTicket>(std::move(a_ticket)));
+}
+
+void DrawcallLimitFix::BeginNativeRenderHalf()
+{
+	if (!installed)
+		return;
+	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::SceneFrame);
+	WatchScenePump();
+	DCLF::FrameDriver::Get().SceneRenderStart();
+}
+
+std::shared_ptr<const void> DrawcallLimitFix::NativeGameTicket() const
+{
+	return installed ? DCLF::FrameDriver::Get().GameTicket() : nullptr;
 }
 
 void DrawcallLimitFix::OnNativeGameHalfEnd()

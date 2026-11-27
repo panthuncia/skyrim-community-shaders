@@ -256,6 +256,7 @@ namespace Snapshot
 		EngineValues engine{};                                // what the frame driver sets its engine variables from at the adoption
 		std::shared_ptr<const DCLF::ScenePublication> scene;  // the scene publication it pairs with (empty in phase 0)
 		std::shared_ptr<const UiCommandStream> ui;            // the UI command stream (native; set at the update's DrawInterface end)
+		std::shared_ptr<const void> nativeFrame;              // native: a routed update's render payload (Native/RenderThread.h), else null
 		Events events{};
 		Retire::LiveCount live;  // counts snapshots alive for the leak check (Snapshot/Retire.h)
 

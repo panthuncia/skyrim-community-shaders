@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/LightLimitFix.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Fatal.h"
@@ -241,6 +242,8 @@ namespace RenderGraph::Engine::Native::Scene
 
 		// The game half's values the render half is recording from (RecordFrame), null outside it. Only the render half reads it.
 		const Prepared* g_rendering = nullptr;
+		// Set while this thread runs a routed update's game half.
+		thread_local bool t_routedGameHalf = false;
 
 		/**
 		* @brief The driver's game half (decision 8), on the game thread, in the engine's order: the reflections' camera, the branches, the
@@ -256,6 +259,7 @@ namespace RenderGraph::Engine::Native::Scene
 			globals::features::drawcallLimitFix.OnNativeGameHalfStart();
 			Prepared p;
 			p.valid = true;
+			p.camera = a_camera;
 			// The reflections' camera (SE 528353, AE 415299): the radial blur modifier's projection reads it on the game side (AE 107753).
 			Global<RE::NiCamera*>(528353, 415299) = a_camera;
 			const auto b = ReadBranches(a_player, a_snapshot);
@@ -266,6 +270,8 @@ namespace RenderGraph::Engine::Native::Scene
 			// +0xD3, Main::SetupSunAndSky: DCLF's frame start and the water render point. Its result (the capture's) holds the node the
 			// shadow casters skip in first person.
 			const auto sky = Point<std::uintptr_t (*)(RE::Main*)>(0xD3, 0xD3, "SetupSunAndSky")(a_main);
+			if (t_routedGameHalf)
+				p.sceneTicket = globals::features::drawcallLimitFix.NativeGameTicket();
 			if (b.firstPersonRoot)
 				Flags(b.firstPersonRoot) |= kHidden;
 			ProcessQueuedLights(b.firstPersonRoot);
@@ -330,6 +336,12 @@ namespace RenderGraph::Engine::Native::Scene
 		*/
 		void RecordFrame(const Prepared& a_frame, RE::NiCamera* a_camera, std::uint32_t a_target)
 		{
+			// A routed render: DCLF's frame start renders the game half's ticket, and the water work the capture queued draws, where
+			// Main::Draw's SetupSunAndSky point ran them.
+			if (a_frame.sceneTicket) {
+				globals::features::drawcallLimitFix.BeginNativeRenderHalf();
+				WaterEffects::Render();
+			}
 			ZoneScopedN("CS.Native.RenderScene.Render");
 			const Snapshot::EngineReads::RenderHalfScope half(Snapshot::EngineReads::Half::Record);
 			// The points below read a_frame through Current().
@@ -417,6 +429,31 @@ namespace RenderGraph::Engine::Native::Scene
 	bool Owns()
 	{
 		return installed;
+	}
+
+	Prepared PrepareRouted(RE::Main* a_main, const Snapshot::FrameSnapshot& a_snapshot)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* camera = RE::Main::WorldRootCamera();
+		if (!player || !camera)
+			RenderGraph::Fatal("native frame skeleton", "a routed update's game half ran without the player or the world camera");
+		const bool outer = std::exchange(t_routedGameHalf, true);
+		auto prepared = PrepareFrame(a_main, *player, camera, a_snapshot);
+		t_routedGameHalf = outer;
+		return prepared;
+	}
+
+	void RecordRouted(const Prepared& a_frame)
+	{
+		ZoneScopedN("CS.Native.RenderScene");
+		globals::state->BeginPerfEvent("Player View");
+		RecordFrame(a_frame, a_frame.camera, 0);
+		globals::state->EndPerfEvent();
+	}
+
+	bool InGameHalf()
+	{
+		return t_routedGameHalf;
 	}
 
 	const Prepared& Current()

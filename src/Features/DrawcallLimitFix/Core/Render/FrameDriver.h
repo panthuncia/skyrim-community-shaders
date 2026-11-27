@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -98,20 +99,43 @@ namespace DCLF
 		 * the snapshot's on a repeated render, then runs the render half (BeginFrame) from it.
 		 */
 		void SceneFrameStart();
+		/**
+		 * @brief Native, game thread: a routed update's game half (Native::Scene::PrepareFrame, at the SetupSunAndSky point). Takes DCLF's
+		 * newest posted scene fragment into a new ticket and installs its claims (none new: the publication the render side adopted
+		 * last). The render half renders the ticket later (SceneRenderStart).
+		 */
+		void SceneGameStart();
+		/** @brief Game thread: the ticket the last game half made, null before the first. */
+		const std::shared_ptr<const FrameTicket>& GameTicket() const { return gameTicket; }
+		/**
+		 * @brief Render owner, before the render's Renderer::Begin: the ticket this render renders. At its first render the Begin's frame
+		 * revision adopts the ticket's scene fragment, and nothing else of DCLF's scene; a repeat takes nothing.
+		 */
+		void ExpectTicket(std::shared_ptr<const FrameTicket> a_ticket);
+		/** @brief Render owner: a routed render's frame start, the render half (BeginFrame) of the ticket ExpectTicket named. */
+		void SceneRenderStart();
 		/** @brief Native, main thread: a game update the cadence renders no frame for. Its ticket retires unused when the next is made. */
 		void UnrenderedUpdate(std::uint64_t a_snapshot);
-		/** @brief Render owner, at Begin. Whether this render repeats the snapshot whose ticket is made, so it keeps the ticket's scene. */
-		bool HoldsScene() const;
+		/** @brief The scene source's take at a Begin (Revision::FragmentSource::take). Render owner. */
+		RenderGraph::Frame::Revision::FragmentTake TakeAtBegin(std::optional<RenderGraph::Frame::Revision::Fragment>& a_given);
+		/** @brief Inside the adoption point: the publication the frame revision has adopted after it. */
+		void NoteAdopted(std::shared_ptr<const void> a_publication);
 		/** @brief Inside the adoption point: a revision left DCLF's scene, so no coverage counts until a render decides it again. */
 		void NoteStoppedDrawing();
 		/** @brief Render thread. The ticket the frame renders, null before the first. */
 		const FrameTicket* Ticket() const { return ticket.get(); }
-		/** @brief The tickets made, those no render took, and those a repeated render made again, since the last take. */
+		/**
+		 * @brief The tickets made, those no render took, those a repeated render made again, and renders whose ticket's scene was not the
+		 * one the frame revision had adopted (they draw no DCLF work), since the last take.
+		 */
 		struct TicketCounts
 		{
-			std::uint64_t made = 0, unrendered = 0, remade = 0;
+			std::uint64_t made = 0, unrendered = 0, remade = 0, unpaired = 0;
 		};
-		TicketCounts TakeTicketCounts() { return { std::exchange(ticketsMade, 0), std::exchange(ticketsUnrendered, 0), std::exchange(ticketsRemade, 0) }; }
+		TicketCounts TakeTicketCounts()
+		{
+			return { ticketsMade.exchange(0), ticketsUnrendered.exchange(0), ticketsRemade.exchange(0), ticketsUnpaired.exchange(0) };
+		}
 		/** @brief Before Present, in menus too. Queues the CPU pipeline's frame signal and the frame values' signal before DXVK presents. */
 		void BeforePresent();
 		/** @brief After Present, in menus too. Ends the frame and writes its report. */
@@ -160,9 +184,15 @@ namespace DCLF
 
 	private:
 		/** @brief Makes the next ticket. The last one retires, unused when no render took it. */
-		void MakeTicket(std::uint64_t a_snapshot);
-		/** @brief The game half: everything the frame start reads or writes of the engine, once per game update. */
-		std::shared_ptr<const FrameTicket> GameFrameStart(std::uint64_t a_snapshot);
+		void MakeTicket(std::uint64_t a_snapshot, bool a_takeScene);
+		/**
+		 * @brief The game half: everything the frame start reads or writes of the engine, once per game update. a_takeScene: the game half
+		 * picks the scene (routed updates, before the render's Begin); else it installs the one the frame revision adopted at this
+		 * frame's Begin.
+		 */
+		std::shared_ptr<const FrameTicket> GameFrameStart(std::uint64_t a_snapshot, bool a_takeScene);
+		/** @brief Makes a_ticket the one the render side renders. */
+		void RenderTicket(std::shared_ptr<const FrameTicket> a_ticket);
 		/** @brief The render half, once per render: reads only the ticket, the snapshot and CS's frame. */
 		void BeginFrame();
 		/** @brief Runs every view's work at a_point, in slot order. */
@@ -184,11 +214,14 @@ namespace DCLF
 		std::array<std::uint32_t, 32> occlusionNeedStreak{};
 		static constexpr std::uint32_t kOcclusionReentryFrames = 300;
 		std::uint32_t captureFrame = ~0u;
-		std::shared_ptr<const FrameTicket> ticket;
-		bool ticketRendered = false;  // a render took the ticket
+		std::shared_ptr<const FrameTicket> gameTicket;  // game side: the newest ticket made
+		std::shared_ptr<const FrameTicket> ticket;      // render side: the ticket the frame renders
+		std::shared_ptr<const FrameTicket> expected;    // render side: the routed render's ticket, from ExpectTicket to its frame start
+		// Render side: the publication the frame revision adopted last. The game half installs it when no newer fragment was posted.
+		std::atomic<std::shared_ptr<const void>> renderAdopted;
 		// The last render's coverage of DCLF's claims epochs: the render half publishes it, the game half reads the latest (never waits).
 		std::atomic<bool> coveredLast{ false };
-		std::uint64_t ticketsMade = 0, ticketsUnrendered = 0, ticketsRemade = 0;
+		std::atomic<std::uint64_t> ticketsMade{ 0 }, ticketsUnrendered{ 0 }, ticketsRemade{ 0 }, ticketsUnpaired{ 0 };
 		bool latePosesHold = false;  // native: the game half's confirmation of this render's late-pose plan
 		bool inGameHalf = false;     // native: between GameHalfStart and GameHalfEnd (game thread)
 	};

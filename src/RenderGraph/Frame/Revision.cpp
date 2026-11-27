@@ -454,12 +454,10 @@ namespace RenderGraph::Frame::Revision
 		* @brief Takes a source's newest posted fragment. One recorded against the revision in preparation is held for its adoption,
 		* and the one held before is dropped. Any other is returned, to be adopted alone or dropped. Render thread.
 		*/
-		std::optional<Fragment> TakePosted(Coordinator& a_coordinator, FragmentSourceId a_source)
+		std::optional<Fragment> TakePosted(Coordinator& a_coordinator, FragmentSourceId a_source, std::optional<Fragment> a_fragment)
 		{
 			auto& state = *a_coordinator.sources[a_source];
-			std::optional<Fragment> fragment;
-			if (auto posted = state.posted.Take())
-				fragment = std::move(*posted);
+			auto fragment = std::move(a_fragment);
 			if (!fragment)
 				return std::nullopt;
 			if (state.source.taken)
@@ -1624,16 +1622,22 @@ namespace RenderGraph::Frame::Revision
 			// A new event: drops asked again before it are not starvation.
 			NoteNewInput(coordinator);
 		}
-		// Each source's newest fragment. One recorded against the revision in preparation is held for its adoption below. A source
-		// that adopts on the main thread only leaves its fragments to the main thread's Begin while a loading screen's thread renders.
-		const bool mainThread = FrameAnchors::IsMainThread();
+		// Each source's newest fragment, or the one it hands. One recorded against the revision in preparation is held for its adoption
+		// below. A source that skips this Begin leaves its fragments and its steps to a later one.
 		std::array<std::optional<Fragment>, kMaxFragmentSources> taken;
+		std::array<bool, kMaxFragmentSources> skipped{};
 		for (std::uint32_t s = 0; s < coordinator.sourceCount; ++s) {
 			auto& state = *coordinator.sources[s];
-			if (state.source.mainThreadOnly && !mainThread)
+			std::optional<Fragment> given;
+			const auto take = state.source.take ? state.source.take(given) : FragmentTake::Newest;
+			skipped[s] = take == FragmentTake::Skip;
+			if (skipped[s])
 				continue;
-			if (!state.source.takes || state.source.takes())
-				taken[s] = TakePosted(coordinator, s);
+			if (take == FragmentTake::Newest) {
+				if (auto posted = state.posted.Take())
+					given = std::move(*posted);
+			}
+			taken[s] = TakePosted(coordinator, s, std::move(given));
 			// Whether its epochs ran in the last frame, so a revision with its epochs knows whether to wait for its fragment.
 			state.drawing = !state.source.drawing || state.source.drawing();
 		}
@@ -1648,7 +1652,7 @@ namespace RenderGraph::Frame::Revision
 		// after the adoption point.
 		for (std::uint32_t s = 0; s < coordinator.sourceCount; ++s) {
 			auto& state = *coordinator.sources[s];
-			if (state.source.mainThreadOnly && !mainThread)
+			if (skipped[s])
 				continue;
 			AdoptAlone(coordinator, s, taken[s]);
 			if (state.source.afterAdoption)
@@ -1791,6 +1795,15 @@ namespace RenderGraph::Frame::Revision
 			RenderGraph::Fatal("frame revision", fmt::format("a fragment was published for source {}, which is not registered", a_source));
 		// A replaced fragment is released here, on the poster's thread.
 		coordinator.sources[a_source]->posted.Post(std::make_unique<Fragment>(std::move(a_fragment)));
+	}
+
+	std::optional<Fragment> TakePostedFragment(FragmentSourceId a_source)
+	{
+		auto& coordinator = GetCoordinator();
+		if (a_source >= coordinator.sourceCount)
+			RenderGraph::Fatal("frame revision", fmt::format("a fragment was taken for source {}, which is not registered", a_source));
+		auto posted = coordinator.sources[a_source]->posted.Take();
+		return posted ? std::optional<Fragment>(std::move(*posted)) : std::nullopt;
 	}
 
 	AdoptionMark Mark()

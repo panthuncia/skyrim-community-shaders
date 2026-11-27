@@ -9,6 +9,7 @@
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderThread.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/BoundaryCheck.h"
@@ -259,6 +260,7 @@ namespace RenderGraph::Frame::Driver
 					if (const auto source = FrameOnlySource())
 						Snapshot::CaptureFrame(*source);
 					Snapshot::Adopt();
+					Engine::Native::RenderThread::OnAdopted();
 					// Native: a window resize reaches the renderer as the adopted snapshot's event, at the frame's start. The engine's
 					// Begin below resizes as it did when its window proc set the request directly.
 					if (std::uint32_t width = 0, height = 0; Snapshot::WindowResizeToApply(width, height))

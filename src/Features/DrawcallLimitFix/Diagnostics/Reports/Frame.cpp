@@ -80,8 +80,10 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 	// The frame start's tickets: one per game update, renders of a repeated snapshot reuse it, an update no frame rendered retires it unused.
 	if (due) {
 		const auto tickets = FrameDriver::Get().TakeTicketCounts();
-		logger::info("[DCLF] frame-start tickets: {} made, {} retired unused, {} made again for a repeat that adopted a newer scene", tickets.made, tickets.unrendered,
-			tickets.remade);
+		logger::info(
+			"[DCLF] frame-start tickets: {} made, {} retired unused, {} made again for a repeat that adopted a newer scene, {} renders whose ticket's "
+			"scene was not adopted (no DCLF draws)",
+			tickets.made, tickets.unrendered, tickets.remade, tickets.unpaired);
 	}
 	// The CPU pipeline's line whenever CPU frames ran. It says whether its sites draw.
 	if (due)

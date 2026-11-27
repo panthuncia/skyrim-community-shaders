@@ -183,6 +183,14 @@ namespace RenderGraph::Frame::Revision
 		Superseded,     // a newer fragment for the same revision, or its revision was superseded
 	};
 
+	/** @brief What a Begin takes of a fragment source (FragmentSource::take). */
+	enum class FragmentTake : std::uint8_t
+	{
+		Newest,  // the newest posted fragment
+		Given,   // the fragment the source hands
+		Skip,    // nothing; the source's steps wait for a later Begin
+	};
+
 	/**
 	* @brief A client whose epochs are recorded off the render thread and adopted as fragments of the frame revision (cleanup plan
 	* A5, step 4). Every callback runs on the render owner unless it says otherwise. Only adopt and drop are required.
@@ -195,17 +203,16 @@ namespace RenderGraph::Frame::Revision
 		// Each segment's label and inputs label, in segments' order ("CS DCLF: Z-prepass", "CS DCLF: Z-prepass inputs"). The GPU
 		// traces and the census name the epochs by them. Missing ones fall back to the runtime's.
 		std::vector<std::pair<std::string, std::string>> labels;
-		// Its fragments are taken and adopted on the main thread only. A loading screen's thread that owns rendering leaves them.
-		bool mainThreadOnly = false;
 		// The frame took a fragment from the post, adopted or not.
 		std::function<void(const std::shared_ptr<const void>& a_value)> taken;
 		// Inside the adoption point, after its staged builds attached.
 		std::function<void(const std::shared_ptr<const void>& a_value)> adopt;
 		// Not adopted. The source keeps it to release it off the render thread, and makes a new one.
 		std::function<void(const std::shared_ptr<const void>& a_value, FragmentDrop a_why, std::string_view a_text, std::span<const std::uint32_t> a_epochs)> drop;
-		// Once per Begin, before taking: whether the source takes its newest posted fragment at this Begin. A fragment left stays posted
-		// for a later Begin. Empty: always.
-		std::function<bool()> takes;
+		// Once per Begin, before taking: what this Begin takes of the source. Newest: its newest posted fragment. Given: the fragment the
+		// source hands in a_given (empty for none), taken out of the post earlier by a game-side taker (TakePostedFragment). Skip: nothing,
+		// and the source's adoption steps are left to a later Begin (a loading screen's thread leaves them). Empty: always Newest.
+		std::function<FragmentTake(std::optional<Fragment>& a_given)> take;
 		// Once per Begin, before adoption: whether the source draws (it started at an adoption and has not stopped) and its epochs ran
 		// in the last frame. Only then does a revision with its epochs in the closure wait for its fragment. Empty: always.
 		std::function<bool()> drawing;
@@ -258,6 +265,12 @@ namespace RenderGraph::Frame::Revision
 
 	/** @brief Any thread (the source's builder). a_fragment replaces any fragment of a_source posted and not taken yet. Latest wins. */
 	void PublishFragment(FragmentSourceId a_source, Fragment a_fragment);
+
+	/**
+	* @brief Takes a source's newest posted fragment out of the post, for a source whose take callback hands it to a later Begin (Given).
+	* The source's one game-side taker. Empty when nothing new was posted.
+	*/
+	std::optional<Fragment> TakePostedFragment(FragmentSourceId a_source);
 
 	/** @brief Where adoption stands, for the test runner's "adopted" await. */
 	struct AdoptionMark

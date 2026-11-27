@@ -2889,9 +2889,6 @@ namespace RenderGraph::Engine::Scaleform
 			bool temporal = false;
 		};
 
-		/** @brief A ProducerScope is open on this thread: its DrawInterface records only, into Snapshot::Building()'s holder. */
-		thread_local bool t_externalProducer = false;
-
 		/**
 		 * @brief Whether the render owner's DrawInterface for a_snapshot records only and the UI point replays after it: a game update's
 		 * unpaused world frame without the map, by the snapshot and by the UI at DrawInterface's start, and no offscreen PreDisplay due.
@@ -2917,13 +2914,6 @@ namespace RenderGraph::Engine::Scaleform
 					}
 					return func(a_manager);
 				}
-				if (t_externalProducer) {
-					const auto snapshot = Snapshot::Building();
-					if (!snapshot)
-						RenderGraph::Fatal("Scaleform", "a UI producer scope before the first game update's snapshot");
-					RecordOnly(a_manager, *snapshot);
-					return;
-				}
 				if (!FrameAnchors::IsRenderOwner())
 					return func(a_manager);
 				const auto snapshot = Snapshot::InGameUpdate() ? Snapshot::Building() : Snapshot::Current();
@@ -2939,8 +2929,9 @@ namespace RenderGraph::Engine::Scaleform
 			 * @brief Records GFx's calls into a_snapshot's holder and replays nothing. A snapshot whose stream is set already is a
 			 * repeated render (cadence repeat): GFx draws again and nothing is recorded. UI producer.
 			 */
-			static void RecordOnly(void* a_manager, const Snapshot::FrameSnapshot& a_snapshot)
+			static void RecordOnly(void* a_manager, const Snapshot::FrameSnapshot& a_snapshot, void (*a_body)(void*) = nullptr)
 			{
+				const auto body = a_body ? a_body : func.get();
 				const auto& holder = a_snapshot.ui;
 				if (!holder)
 					RenderGraph::Fatal("Scaleform", "a record-only DrawInterface for a snapshot without a UI stream holder");
@@ -2951,11 +2942,11 @@ namespace RenderGraph::Engine::Scaleform
 				const UiModeScope mode(UiMode::RecordOnly);
 				if (auto repeat = holder->Get()) {
 					recorder.repeat = std::move(repeat);
-					func(a_manager);
+					body(a_manager);
 					recorder.repeat.reset();
 					return;
 				}
-				func(a_manager);
+				body(a_manager);
 				if (auto finished = FinishStream())
 					holder->Set(std::move(finished));
 			}
@@ -3130,17 +3121,61 @@ namespace RenderGraph::Engine::Scaleform
 		return g_ownsRenderer.load(std::memory_order_acquire);
 	}
 
-	ProducerScope::ProducerScope()
+	namespace
 	{
-		if (!Native::Active())
-			RenderGraph::Fatal("Scaleform", "a UI producer scope outside native mode");
-		if (std::exchange(t_externalProducer, true))
-			RenderGraph::Fatal("Scaleform", "a UI producer scope inside another");
+		/**
+		* @brief MenuManager::DrawInterface's display loop (AE 0x140fa4f00) without its render state. The engine's loop: the TLS memory
+		* context 0x46, the movie lock, the menu stack lock (SE 525557 / AE 412033), then from the topmost menu that hides the ones below
+		* it (flag 0x200) or the bottom up to the top, each menu's PostDisplay (vfunc +0x30), then the render pass free list's returns
+		* (SE 100722 / AE 107502). Left out: the per-frame buffers, the target and depth binds, ApplyState, each menu's viewport, VParams
+		* at 1, and the ISCopy into the framebuffer when the bound target is not it (ReplaySnapshotUi ports the binds' rule).
+		*/
+		void DisplayMenus(void* a_ui)
+		{
+			auto* ui = static_cast<RE::UI*>(a_ui);
+			if (!*reinterpret_cast<const bool*>(reinterpret_cast<const std::byte*>(ui) + 0x1C0))
+				return;
+			static const REL::Relocation<std::uint32_t*> tlsIndex{ RELOCATION_ID(528600, 415542) };
+			auto* tls = reinterpret_cast<std::byte**>(__readgsqword(0x58));
+			auto* context = reinterpret_cast<std::uint32_t*>(tls[*tlsIndex.get()] + 0x768);
+			const auto savedContext = std::exchange(*context, 0x46u);
+			static const REL::Relocation<void (*)(void*)> lock{ RELOCATION_ID(80605, 82732) };
+			static const REL::Relocation<void (*)(void*)> unlock{ RELOCATION_ID(80606, 82733) };
+			static const REL::Relocation<RE::BSSpinLock*> stackLock{ RELOCATION_ID(525557, 412033) };
+			auto* movies = *reinterpret_cast<void**>(reinterpret_cast<std::byte*>(RE::BSScaleformManager::GetSingleton()) + 0x10);
+			lock(movies);
+			{
+				const RE::BSSpinLockGuard guard(*stackLock.get());
+				auto& stack = ui->menuStack;
+				if (!stack.empty()) {
+					std::uint32_t first = stack.size() - 1;
+					while (first > 0 && !(static_cast<std::uint32_t>(stack[first]->menuFlags.underlying()) & 0x200u))
+						--first;
+					for (std::uint32_t i = first; i < stack.size(); ++i)
+						if (const auto& menu = stack[i])
+							menu->PostDisplay();
+				}
+			}
+			unlock(movies);
+			static const REL::Relocation<void (*)()> returnPasses{ RELOCATION_ID(100722, 107502) };
+			returnPasses();
+			*context = savedContext;
+		}
 	}
 
-	ProducerScope::~ProducerScope()
+	void ProduceUi(RE::UI* a_ui)
 	{
-		t_externalProducer = false;
+		if (!Native::Active())
+			RenderGraph::Fatal("Scaleform", "a game-side UI producer outside native mode");
+		const auto& snapshot = Snapshot::Building();
+		if (!snapshot)
+			RenderGraph::Fatal("Scaleform", "a game-side UI producer before the first game update's snapshot");
+		DrawInterface::RecordOnly(a_ui, *snapshot, &DisplayMenus);
+	}
+
+	bool RecordsUiOnly(const Snapshot::FrameSnapshot& a_snapshot)
+	{
+		return RecordOnlyFrame(a_snapshot);
 	}
 
 	void ReplaySnapshotUi(const Snapshot::FrameSnapshot& a_snapshot)
@@ -3148,6 +3183,15 @@ namespace RenderGraph::Engine::Scaleform
 		if (!FrameAnchors::IsRenderOwner())
 			RenderGraph::Fatal("Scaleform", "the UI point's replay off the render owner");
 		const UiPoint point;
+		// DrawInterface's binds before its displays: no bound target means kMAIN. The record-only stream reads the targets here.
+		if (auto* shadow = globals::game::shadowState) {
+			auto& rss = shadow->GetRuntimeData();
+			if (static_cast<std::int32_t>(rss.renderTargets[0]) == -1) {
+				rss.renderTargets[0] = static_cast<std::remove_cvref_t<decltype(rss.renderTargets[0])>>(RE::RENDER_TARGET::kMAIN);
+				rss.setRenderTargetMode[0] = RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
+				rss.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+			}
+		}
 		const auto stream = a_snapshot.ui ? a_snapshot.ui->Get() : nullptr;
 		if (!stream)
 			return;

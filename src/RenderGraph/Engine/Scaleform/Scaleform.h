@@ -28,21 +28,20 @@ namespace RenderGraph::Engine::Scaleform
 	bool OwnsRenderer();
 
 	/**
-	 * @brief Native mode: this thread produces the UI without render ownership (phase 7's game thread). Open it around a call of
-	 * MenuManager::DrawInterface (SE 79947 / AE 82084) in a game update, before the snapshot is published. GFx's calls are only
-	 * recorded, into Snapshot::Building()'s UI stream holder. Nothing is replayed and no render-owned state is touched: the render
-	 * side draws the stream with ReplaySnapshotUi. Only for frames where GFx alone records inside DrawInterface (an unpaused world
-	 * frame without the map, see snap7-thread.md "Package U"). Without the scope, the render owner's DrawInterface decides the mode
-	 * itself.
+	 * @brief Native mode, game thread, in a routed update before its snapshot is published (phase 7): MenuManager::DrawInterface's
+	 * display loop (SE 79947 / AE 82084) without its render state (the target binds, ApplyState, the viewports, the closing ISCopy).
+	 * Each shown menu's PostDisplay runs under the movie and menu stack locks; GFx's calls are only recorded, into
+	 * Snapshot::Building()'s UI stream holder. The render side draws the stream with ReplaySnapshotUi, which applies the target rule
+	 * the engine's binds made. Only for frames where GFx alone records inside DrawInterface (RecordsUiOnly).
 	 */
-	class ProducerScope
-	{
-	public:
-		ProducerScope();
-		~ProducerScope();
-		ProducerScope(const ProducerScope&) = delete;
-		ProducerScope& operator=(const ProducerScope&) = delete;
-	};
+	void ProduceUi(RE::UI* a_ui);
+
+	/**
+	 * @brief Game thread: whether this update's DrawInterface can be recorded alone (ProduceUi): an unpaused world frame without the
+	 * map, by the snapshot and by the UI asked now (a menu the update's UI jobs opened draws in this DrawInterface already), and no
+	 * offscreen PreDisplay due. A capture point.
+	 */
+	bool RecordsUiOnly(const Snapshot::FrameSnapshot& a_snapshot);
 
 	/**
 	 * @brief The UI point, native mode, render owner: DrawInterface's render-side work (Upscaling's PostDisplay, the clean-scene copy,

@@ -1,0 +1,203 @@
+// Native's routed game updates and their render half. See RenderThread.h.
+// Main::DrawFrame (AE 1.6.1170 0x140643c00 id 36555, SE 1.5.97 0x1405b1020 id 35556): the order the game frame and the render half
+// follow (snap7-thread.md section 2).
+
+#include "RenderGraph/Engine/Native/RenderThread.h"
+
+#include "Features/DrawcallLimitFix.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Scaleform/Scaleform.h"
+#include "RenderGraph/Fatal.h"
+#include "Snapshot/FrameSnapshot.h"
+#include "Snapshot/Publication.h"
+
+#include "Globals.h"
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
+namespace RenderGraph::Engine::Native::RenderThread
+{
+	namespace
+	{
+		template <class T>
+		T& Global(std::uint64_t a_se, std::uint64_t a_ae)
+		{
+			return *reinterpret_cast<T*>(REL::RelocationID(a_se, a_ae).address());
+		}
+
+		thread_local bool t_routedRender = false;
+
+		struct Stats
+		{
+			std::atomic<std::uint64_t> routed{ 0 }, unrouted{ 0 }, interfaceInline{ 0 }, renders{ 0 };
+		} g_stats;
+
+		/** @brief MenuControls' debug camera path test (SE 51363, AE 52210): Main::DrawFrame then draws the path's frame. */
+		bool CameraPathActive()
+		{
+			auto* controls = RE::MenuControls::GetSingleton();
+			using Fn = bool (*)(RE::MenuControls*);
+			static REL::Relocation<Fn> active{ REL::RelocationID(51363, 52210) };
+			return controls && active(controls);
+		}
+
+		/** @brief The thread's scrap heap (MemoryManager::GetThreadScrapHeap), marked before the world and released after it. */
+		struct ScrapHeapScope
+		{
+			ScrapHeapScope()
+			{
+				heap = RE::MemoryManager::GetSingleton()->GetThreadScrapHeap();
+				using Mark = void (*)(RE::ScrapHeap*);
+				static REL::Relocation<Mark> mark{ REL::RelocationID(66889, 68150) };
+				mark(heap);
+			}
+			~ScrapHeapScope()
+			{
+				using Release = void (*)(RE::ScrapHeap*);
+				static REL::Relocation<Release> release{ REL::RelocationID(66890, 68151) };
+				release(heap);
+			}
+			ScrapHeapScope(const ScrapHeapScope&) = delete;
+			ScrapHeapScope& operator=(const ScrapHeapScope&) = delete;
+			RE::ScrapHeap* heap = nullptr;
+		};
+	}
+
+	bool Routes(const Snapshot::FrameSnapshot& a_snapshot)
+	{
+		if (!Native::Active() || !Scene::Owns())
+			return false;
+		const bool routed = a_snapshot.kind == Snapshot::FrameKind::World && !a_snapshot.menus.paused && !a_snapshot.menus.map && !CameraPathActive();
+		(routed ? g_stats.routed : g_stats.unrouted).fetch_add(1, std::memory_order_relaxed);
+		return routed;
+	}
+
+	std::shared_ptr<const FramePayload> GameFrame(RE::Main* a_main, const Snapshot::FrameSnapshot& a_snapshot)
+	{
+		ZoneScopedN("CS.Native.GameFrame");
+		auto payload = std::make_shared<FramePayload>();
+		auto* ui = RE::UI::GetSingleton();
+		// The menus' PreDisplay (SE 79948, AE 82085): UI game logic.
+		using PreDisplay = void (*)(RE::UI*);
+		static REL::Relocation<PreDisplay> preDisplay{ REL::RelocationID(79948, 82085) };
+		preDisplay(ui);
+		// The world branch: no menu freezes the background (the snapshot's kind) and the player has 3D.
+		Global<bool>(516934, 403436) = false;  // gIsInMenuMode2
+		{
+			const ScrapHeapScope scrap;
+			// WorldPtToScreenPt3's camera (SE 50744, AE 51639) from the world scene graph's camera.
+			using SetScreenCamera = void (*)(RE::NiCamera*);
+			static REL::Relocation<SetScreenCamera> setScreenCamera{ REL::RelocationID(50744, 51639) };
+			setScreenCamera(RE::Main::WorldRootCamera());
+			payload->prepared = Scene::PrepareRouted(a_main, a_snapshot);
+		}
+		// Volumetric lighting's RenderEffect (the console's TVL flags) and its target, read here; the render half draws it.
+		if (Global<const bool>(528190, 415135) && Global<const bool>(528189, 415134)) {
+			payload->volumetricLighting = true;
+			payload->volumetricTarget = Global<const std::int32_t>(513720, 391674) == 0 ? 0x4D : 0x4F;
+		}
+		// The frame jobs, and the UI jobs' wait (SE 34551 / AE 35406, SE 68167 / AE 69516).
+		using FrameJobs = bool (*)(bool);
+		static REL::Relocation<FrameJobs> frameJobs{ REL::RelocationID(34551, 35406) };
+		using WaitForJobTask = void (*)(std::uint32_t, std::uint32_t);
+		static REL::Relocation<WaitForJobTask> waitForJobTask{ REL::RelocationID(68167, 69516) };
+		if (frameJobs(true))
+			waitForJobTask(0, 2);
+		// The interface: recorded alone, without render state. A menu the UI jobs opened that pauses or shows the map draws engine work
+		// in its displays, so the render half calls DrawInterface itself, on the render owner.
+		if (Scaleform::RecordsUiOnly(a_snapshot))
+			Scaleform::ProduceUi(ui);
+		else {
+			payload->interfaceInline = true;
+			g_stats.interfaceInline.fetch_add(1, std::memory_order_relaxed);
+		}
+		// The save screenshot request (SE 35888, AE 36859), with the player's 3D. No menu freezes the background, so the frozen frame's
+		// requests (36858, 36857) are not asked.
+		if (auto* player = RE::PlayerCharacter::GetSingleton(); player && player->GetParentCell() && player->Get3D2()) {
+			using Request = void (*)();
+			static REL::Relocation<Request> request{ REL::RelocationID(35888, 36859) };
+			request();
+		}
+		// The world scene graph's upkeep (SE 74986, AE 76748) and the render passes' returns (SE 100722, AE 107502).
+		using SceneGraphUpkeep = void (*)(RE::NiNode*);
+		static REL::Relocation<SceneGraphUpkeep> sceneGraphUpkeep{ REL::RelocationID(74986, 76748) };
+		sceneGraphUpkeep(RE::Main::WorldRootNode());
+		using ReturnPasses = void (*)();
+		static REL::Relocation<ReturnPasses> returnPasses{ REL::RelocationID(100722, 107502) };
+		returnPasses();
+		return payload;
+	}
+
+	void RenderHalf()
+	{
+		ZoneScopedN("CS.Native.RenderHalf");
+		const bool outer = std::exchange(t_routedRender, true);
+		auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
+		using Lock = void (*)(RE::BSGraphics::Renderer*);
+		static REL::Relocation<Lock> lock{ REL::RelocationID(75458, 77243) };
+		static REL::Relocation<Lock> unlock{ REL::RelocationID(75459, 77244) };
+		using Begin = void (*)(RE::BSGraphics::Renderer*, std::uint32_t);
+		static REL::Relocation<Begin> begin{ REL::RelocationID(75460, 77245) };
+		using End = void (*)(RE::BSGraphics::Renderer*);
+		static REL::Relocation<End> end{ REL::RelocationID(75461, 77246) };
+		lock(renderer);
+		// CS's frame start (claim, adoption, OnAdopted, OnBegin) and the engine's Begin body; FaceTint's render frame after it.
+		begin(renderer, 0);
+		const auto& snapshot = Snapshot::Current();
+		const auto* payload = snapshot ? static_cast<const FramePayload*>(snapshot->nativeFrame.get()) : nullptr;
+		if (!payload)
+			RenderGraph::Fatal("native render half", fmt::format("the adopted snapshot {} has no routed frame payload", snapshot ? snapshot->id : 0));
+		g_stats.renders.fetch_add(1, std::memory_order_relaxed);
+		Scene::RecordRouted(payload->prepared);
+		if (payload->volumetricLighting) {
+			using RenderEffect = void (*)(void*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
+			static REL::Relocation<RenderEffect> renderEffect{ REL::RelocationID(99025, 105676) };
+			renderEffect(RE::ImageSpaceManager::GetSingleton(), 0x22, payload->volumetricTarget, 0, 0);
+		}
+		if (payload->interfaceInline) {
+			using DrawInterface = void (*)(RE::UI*);
+			static REL::Relocation<DrawInterface> drawInterface{ REL::RelocationID(79947, 82084) };
+			drawInterface(RE::UI::GetSingleton());
+		} else
+			Scaleform::ReplaySnapshotUi(*snapshot);
+		end(renderer);
+		unlock(renderer);
+		// Dynamic resolution's scale for the next frame (SE 508794 / AE 380760, SE 75579 / AE 77385, SE 75708 / AE 77517).
+		if (Global<const bool>(508794, 380760)) {
+			using Scale = float (*)(RE::BSGraphics::Renderer*);
+			static REL::Relocation<Scale> scale{ REL::RelocationID(75579, 77385) };
+			using SetScale = void (*)(void*, float);
+			static REL::Relocation<SetScale> setScale{ REL::RelocationID(75708, 77517) };
+			if (const float value = scale(renderer); value != 0.0f)
+				setScale(RE::BSGraphics::State::GetSingleton(), value);
+		}
+		t_routedRender = outer;
+	}
+
+	void OnAdopted()
+	{
+		if (!t_routedRender)
+			return;
+		// The adopted snapshot's DCLF ticket: this Begin's revision adopts its scene (a repeat adopts nothing).
+		const auto& snapshot = Snapshot::Current();
+		if (const auto* payload = snapshot ? static_cast<const FramePayload*>(snapshot->nativeFrame.get()) : nullptr)
+			globals::features::drawcallLimitFix.ExpectNativeTicket(payload->prepared.sceneTicket);
+	}
+
+	bool InRoutedRender()
+	{
+		return t_routedRender;
+	}
+
+	std::string TakeStatsLine()
+	{
+		if (!Native::Active())
+			return {};
+		return fmt::format(
+			"[ORG native] routed updates: {} routed (CS's game frame, render half from the payload), {} on Main::DrawFrame, {} with the "
+			"interface drawn by the render half; {} routed renders",
+			g_stats.routed.exchange(0), g_stats.unrouted.exchange(0), g_stats.interfaceInline.exchange(0), g_stats.renders.exchange(0));
+	}
+}

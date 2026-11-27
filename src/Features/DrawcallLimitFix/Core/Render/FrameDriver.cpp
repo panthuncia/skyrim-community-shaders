@@ -117,8 +117,6 @@ namespace DCLF
 				source.segments.push_back(segment);
 				source.labels.push_back(label(static_cast<RenderGraphRuntime::Segment>(segment)));
 			}
-		// DCLF draws on the main thread only.
-		source.mainThreadOnly = true;
 		source.taken = [](const std::shared_ptr<const void>& a_scene) { IndirectDraws::Get().SceneTaken(a_scene); };
 		source.adopt = [](const std::shared_ptr<const void>& a_scene) { IndirectDraws::Get().InstallScene(a_scene); };
 		source.drop = [](const std::shared_ptr<const void>& a_scene, Revision::FragmentDrop a_why, std::string_view a_text, std::span<const std::uint32_t> a_epochs) {
@@ -136,11 +134,14 @@ namespace DCLF
 			Scene::FrameView::Get().StopDrawing();
 			FrameDriver::Get().NoteStoppedDrawing();
 		};
-		// A repeated render keeps the scene its ticket installed (FrameDriver::HoldsScene).
-		source.takes = [] { return !FrameDriver::Get().HoldsScene(); };
+		// What a Begin adopts of DCLF's scene. A routed render (native's render half) adopts exactly its ticket's fragment, at the ticket's
+		// first render; a repeat adopts nothing. A loading screen's or movie's frame leaves the scene to a later Begin. Any other frame
+		// (guest, native's frames that render on the producer) takes the newest posted one, and its game half installs what was adopted.
+		source.take = [](std::optional<Revision::Fragment>& a_given) { return FrameDriver::Get().TakeAtBegin(a_given); };
 		// The graph conditions for the adopted variables, after the adoption point's revision work.
 		source.afterAdoption = [] {
 			TracyCZoneN(afterScene, "CS.DCLF.AfterSceneStep", true);
+			FrameDriver::Get().NoteAdopted(IndirectDraws::Get().AdoptedPublication());
 			IndirectDraws::Get().AfterSceneStep();
 			// The game half's family decisions read the revision adopted here.
 			IndirectDraws::Get().PublishFamilyRenderState();
@@ -205,9 +206,27 @@ namespace DCLF
 		}
 	}
 
-	bool FrameDriver::HoldsScene() const
+	RenderGraph::Frame::Revision::FragmentTake FrameDriver::TakeAtBegin(std::optional<RenderGraph::Frame::Revision::Fragment>& a_given)
 	{
-		return ticket && Snapshot::Render().repeat && ticket->snapshot == Snapshot::CurrentId();
+		using Take = RenderGraph::Frame::Revision::FragmentTake;
+		if (expected) {
+			// The ticket's scene goes to the revision once; a repeat of the ticket takes nothing.
+			if (!expected->rendered.load(std::memory_order_acquire))
+				a_given = std::exchange(expected->scene, std::nullopt);
+			return Take::Given;
+		}
+		const auto& snapshot = Snapshot::Current();
+		if (snapshot && (snapshot->kind == Snapshot::FrameKind::Loading || snapshot->kind == Snapshot::FrameKind::Movie))
+			return Take::Skip;
+		// A repeated render keeps the scene its ticket installed.
+		if (ticket && Snapshot::Render().repeat && ticket->snapshot == Snapshot::CurrentId())
+			return Take::Given;
+		return Take::Newest;
+	}
+
+	void FrameDriver::NoteAdopted(std::shared_ptr<const void> a_publication)
+	{
+		renderAdopted.store(std::move(a_publication), std::memory_order_release);
 	}
 
 	void FrameDriver::NoteStoppedDrawing()
@@ -219,13 +238,15 @@ namespace DCLF
 	{
 		// The posts below wake the coordinator once, when this scope ends.
 		ScenePassWakeBatch wakes;
-		// A repeated render of a snapshot renders its ticket again. The scene source takes no new scene meanwhile (HoldsScene), so the
-		// publication stays the ticket's. A frame revision adopted with a held scene can still bring a newer one: the ticket is made again.
-		if (!HoldsScene())
-			MakeTicket(Snapshot::LastGameId());
-		else if (AdoptedSequence() > ticket->publication) {
-			++ticketsRemade;
-			MakeTicket(Snapshot::LastGameId());
+		// Both halves at the frame start point, after the frame's Begin (guest, and native's frames the engine's skeleton draws). A repeated
+		// render of a snapshot renders its ticket again: the scene source took no new scene at its Begin, so the publication stays the
+		// ticket's. A frame revision adopted with a held scene can still bring a newer one: the ticket is made again.
+		const bool repeat = ticket && Snapshot::Render().repeat && ticket->snapshot == Snapshot::CurrentId();
+		if (!repeat || AdoptedSequence() > ticket->publication) {
+			if (repeat)
+				ticketsRemade.fetch_add(1, std::memory_order_relaxed);
+			MakeTicket(Snapshot::LastGameId(), false);
+			RenderTicket(gameTicket);
 		}
 		// Native: the rest of the driver's game half reads the update's globals, not the render side's adopted ones.
 		if (inGameHalf)
@@ -233,30 +254,59 @@ namespace DCLF
 		BeginFrame();
 	}
 
+	void FrameDriver::SceneGameStart()
+	{
+		ScenePassWakeBatch wakes;
+		MakeTicket(Snapshot::LastGameId(), true);
+		// The rest of the driver's game half reads the update's globals, not the render side's adopted ones.
+		if (inGameHalf)
+			FrameGlobals::BeginGameHalf(gameTicket->globals);
+	}
+
+	void FrameDriver::ExpectTicket(std::shared_ptr<const FrameTicket> a_ticket)
+	{
+		expected = std::move(a_ticket);
+	}
+
+	void FrameDriver::SceneRenderStart()
+	{
+		if (!expected)
+			::RenderGraph::Fatal("Drawcall Limit Fix", "a routed render's frame start without its ticket");
+		RenderTicket(std::exchange(expected, nullptr));
+		BeginFrame();
+	}
+
+	void FrameDriver::RenderTicket(std::shared_ptr<const FrameTicket> a_ticket)
+	{
+		if (ticket == a_ticket)
+			return;
+		// The render side's reference retires through the engine lane: it may be the ticket's last (its late-pose plan holds engine objects).
+		if (ticket)
+			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::move(ticket));
+		ticket = std::move(a_ticket);
+	}
+
 	void FrameDriver::UnrenderedUpdate(std::uint64_t a_snapshot)
 	{
 		ScenePassWakeBatch wakes;
-		MakeTicket(a_snapshot);
+		MakeTicket(a_snapshot, false);
 	}
 
-	void FrameDriver::MakeTicket(std::uint64_t a_snapshot)
+	void FrameDriver::MakeTicket(std::uint64_t a_snapshot, bool a_takeScene)
 	{
-		auto previous = std::move(ticket);
-		ticket = GameFrameStart(a_snapshot);
-		++ticketsMade;
+		auto previous = std::move(gameTicket);
+		gameTicket = GameFrameStart(a_snapshot, a_takeScene);
+		ticketsMade.fetch_add(1, std::memory_order_relaxed);
 		if (!previous)
 			return;
 		// It may hold engine references (the late-pose plan), so it goes to the engine lane, after the newest frame that may have rendered
 		// it. A ticket no render took retires unused; its sampling job ran all the same.
-		if (std::exchange(ticketRendered, false))
-			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::move(previous));
-		else {
-			++ticketsUnrendered;
-			Snapshot::Retire::Push(Snapshot::Retire::Lane::Engine, std::move(previous), 0);
-		}
+		if (!previous->rendered.load(std::memory_order_acquire))
+			ticketsUnrendered.fetch_add(1, std::memory_order_relaxed);
+		Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::move(previous));
 	}
 
-	std::shared_ptr<const FrameTicket> FrameDriver::GameFrameStart(std::uint64_t a_snapshot)
+	std::shared_ptr<const FrameTicket> FrameDriver::GameFrameStart(std::uint64_t a_snapshot, bool a_takeScene)
 	{
 		// The game half reads and writes the engine once per game update: its reads are the update's capture.
 		const Snapshot::EngineReads::CaptureScope capture;
@@ -295,9 +345,17 @@ namespace DCLF
 		{
 			// The publication the frame revision adopted at this frame's Begin (plan step 10b), with the staged builds it was recorded on.
 			// Nothing waits here: a newer snapshot not ready yet leaves the adopted one, recorded on the graphs that run.
+			// A routed update runs before its render's Begin: it takes the newest posted fragment into the ticket, whose render adopts it,
+			// and installs its publication (none new: the publication the render side adopted last).
 			DCLF_ZONE("CS.DCLF.BF.Adopt");
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
-			view.HandOverAtFrameStart(draws.AdoptedPublication());
+			std::shared_ptr<const void> publication;
+			if (a_takeScene) {
+				t->scene = RenderGraph::Frame::Revision::TakePostedFragment(s_sceneSource);
+				publication = t->scene ? draws.PublicationOf(t->scene->value) : renderAdopted.load(std::memory_order_acquire);
+			} else
+				publication = draws.AdoptedPublication();
+			view.HandOverAtFrameStart(publication);
 		}
 		t->publication = view.InstalledSequence();
 		// Views start before the claims that withhold their members.
@@ -378,7 +436,12 @@ namespace DCLF
 		// The render half reads the ticket, the snapshot and CS's frame. The live-read detector counts any engine read here.
 		const Snapshot::EngineReads::FrameStartScope frameStartReads;
 		const auto& t = *ticket;
-		const bool first = !std::exchange(ticketRendered, true);
+		const bool first = !t.rendered.exchange(true, std::memory_order_acq_rel);
+		// The render draws DCLF's work only when the frame revision adopted the publication the ticket installed. A routed render whose
+		// ticket's fragment was held for a revision still in preparation, or dropped, draws none.
+		const bool paired = AdoptedSequence() == t.publication;
+		if (!paired)
+			ticketsUnpaired.fetch_add(1, std::memory_order_relaxed);
 		occlusionWanted = occlusionDrawn = occlusionTaken = 0;
 		// An extension added or removed last frame is built here, before anything decides what the frame's recordings cover.
 		// In native mode with segments this already ran at Renderer::Begin, and no build may attach after that.
@@ -410,7 +473,7 @@ namespace DCLF
 					logger::info("[DCLF] native: frame {} has no claims (covered {}, a publication installed {}, loading {}): {}", view.SceneStep(), covered,
 						view.HasInstalled(), t.loading, draws.CoverageState());
 			}
-			if (!(covered && view.HasInstalled()) && !view.NotDrawingYet() && !t.loading) {
+			if (!(covered && view.HasInstalled()) && !view.NotDrawingYet() && !t.loading && paired) {
 				// The graph itself stopped, so no snapshot can cover a frame again and that reason is the defect.
 				// "GPU completion timeline failed" means a timeline read UINT64_MAX, which Windows sets on a removed device's fences.
 				// A lost device ends the game here with its reason logged. A fatal message box would hide behind the full-screen window.

@@ -208,6 +208,8 @@ namespace DCLF
 		void AfterSceneStep();
 		/** @brief Render thread. The adopted snapshot's ScenePublication, or null before the first. */
 		std::shared_ptr<const void> AdoptedPublication() const;
+		/** @brief The publication a posted scene fragment's value carries. Any thread. */
+		static std::shared_ptr<const void> PublicationOf(const std::shared_ptr<const void>& a_scene);
 		/** @brief Render thread, at Present. Ties the frame's pooled versions to its retirement point so they are not reused early. */
 		void BindAdopted();
 		/**

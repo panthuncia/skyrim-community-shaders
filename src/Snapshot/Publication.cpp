@@ -17,6 +17,7 @@
 #include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/RenderScene.h"
+#include "RenderGraph/Engine/Native/RenderThread.h"
 #include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -411,18 +412,33 @@ namespace Snapshot
 			stats.published.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		/** @brief Main::Update's call of Main::DrawFrame (SE 35565 +0x5D2, AE 36564 +0xA97): publish, then the render half. */
+		std::shared_ptr<FrameSnapshot> Build();
+		void LogFirst(const FrameSnapshot& a_snapshot);
+
+		/**
+		* @brief Main::Update's call of Main::DrawFrame (SE 35565 +0x5D2, AE 36564 +0xA97): build the snapshot, then either CS's game frame
+		* and the render half from its payload (a routed update, native) or the publish and Main::DrawFrame.
+		*/
 		struct MainUpdate_DrawFrame
 		{
 			static void thunk(RE::Main* a_main)
 			{
-				Capture();
+				auto fresh = Build();
 				// The test steps count game frames: one per update.
 				Testing::OnGameUpdate();
 				// Native: the render half's game-visible side effects come from the game side (Snapshot/SideEffects.h).
-				SideEffects::AfterCapture(*Game().previous);
+				SideEffects::AfterCapture(*fresh);
 				const bool outer = std::exchange(t_inGameUpdate, true);
 				const auto renders = RendersThisUpdate();
+				namespace Routed = RenderGraph::Engine::Native::RenderThread;
+				if (Routed::Routes(*fresh)) {
+					RoutedUpdate(a_main, std::move(fresh), renders);
+					t_inGameUpdate = outer;
+					EndUpdate();
+					return;
+				}
+				Publish(fresh);
+				LogFirst(*fresh);
 				// A load that starts inside a render (a console coc) ends the update's repeats: the engine's kept scene lists still name
 				// the cells it unloaded, and only the next update builds them again.
 				const auto epoch = g_loadEpoch.load(std::memory_order_acquire);
@@ -445,6 +461,36 @@ namespace Snapshot
 				for (const auto fn : Game().updateEnds)
 					fn(*Game().previous);
 				t_inGameUpdate = outer;
+				EndUpdate();
+			}
+
+			/**
+			* @brief A routed update: CS's game frame in place of Main::DrawFrame, the update's game-side end, the game side of the Present
+			* point, then the publish with the frame's payload and its renders.
+			*/
+			static void RoutedUpdate(RE::Main* a_main, std::shared_ptr<FrameSnapshot> a_fresh, std::uint32_t a_renders)
+			{
+				namespace Routed = RenderGraph::Engine::Native::RenderThread;
+				a_fresh->nativeFrame = Routed::GameFrame(a_main, *a_fresh);
+				// The update's game side ends here: the job stages below start the engine's next update jobs, so no DCLF worker may be in
+				// engine memory past this point.
+				DCLF::EngineReadWindow::Close();
+				SideEffects::AfterRenderHalf(a_renders);
+				for (const auto fn : Game().updateEnds)
+					fn(*a_fresh);
+				// The steps and milestones run at the update's publish (they ran at its Present before).
+				Testing::OnGamePresent();
+				Publish(a_fresh);
+				LogFirst(*a_fresh);
+				// The render half from the payload alone. A load that starts in a render ends the update's repeats.
+				const auto epoch = g_loadEpoch.load(std::memory_order_acquire);
+				for (std::uint32_t rendered = 0; rendered < a_renders && g_loadEpoch.load(std::memory_order_acquire) == epoch; ++rendered)
+					Routed::RenderHalf();
+			}
+
+			/** @brief The update's end: the update-rate cap's wait and the periodic lines. */
+			static void EndUpdate()
+			{
 				// Phase 7's "publish, then wait for the next update slot". Off unless CS_UPDATE_RATE_CAP=1.
 				PaceGameUpdate();
 				const auto updates = ++Game().lineUpdates;
@@ -452,6 +498,8 @@ namespace Snapshot
 					if (const auto line = SideEffects::TakeStatsLine(); !line.empty())
 						logger::info("{}", line);
 					if (const auto line = RenderGraph::Engine::Native::WaterEffects::TakeStatsLine(); !line.empty())
+						logger::info("{}", line);
+					if (const auto line = RenderGraph::Engine::Native::RenderThread::TakeStatsLine(); !line.empty())
 						logger::info("{}", line);
 				}
 				if (updates % kLifetimeLineUpdates == 0)
@@ -496,42 +544,55 @@ namespace Snapshot
 		logger::info("[Snapshot] frame snapshots: published at Main::Update's call of Main::DrawFrame, adopted at Renderer::Begin");
 	}
 
+	namespace
+	{
+		/** @brief Builds the next game update's snapshot, unpublished: Building() returns it from here on. */
+		std::shared_ptr<FrameSnapshot> Build()
+		{
+			ZoneScopedN("CS.Snapshot.Capture");
+			const PublishClaim claim;
+			// Engine reads from here on are captures, not live reads.
+			const EngineReads::CaptureScope scope;
+			const auto start = std::chrono::steady_clock::now();
+			auto& game = Game();
+			const FrameSnapshot* previous = game.previous.get();
+			auto fresh = std::make_shared<FrameSnapshot>();
+			fresh->id = game.nextId++;
+			FillCore(*fresh, previous, game);
+			// Native: the update's UI stream, set once its DrawInterface finished it (Snapshot/UiCommandStream.h).
+			static const bool native = RenderGraph::Engine::Native::Requested();
+			if (native)
+				fresh->ui = std::make_shared<const UiCommandStream>();
+			Builder builder(*fresh, previous);
+			// The core block first: feature captures may read it through Builder::Built().
+			CaptureCore(builder);
+			// Native: RenderWaterEffects' game half, before the feature captures read what the water update sets (the underwater state and
+			// effects, the water shader's globals).
+			RenderGraph::Engine::Native::WaterEffects::Capture(*fresh);
+			for (const auto capture : game.captures)
+				capture(builder);
+			auto& stats = Counters();
+			stats.blocksShared.fetch_add(builder.shared, std::memory_order_relaxed);
+			stats.blocksMade.fetch_add(builder.made, std::memory_order_relaxed);
+			stats.captureNs.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()),
+				std::memory_order_relaxed);
+			g_lastGameId.store(fresh->id, std::memory_order_release);
+			Retire::LetGo(std::exchange(game.building, fresh));
+			return fresh;
+		}
+
+		void LogFirst(const FrameSnapshot& a_snapshot)
+		{
+			if (a_snapshot.id == 1 || a_snapshot.events.Has(Event::FirstAfterLoad))
+				LogStats(a_snapshot, a_snapshot.id == 1 ? "first snapshot" : "load ended");
+		}
+	}
+
 	void Capture()
 	{
-		ZoneScopedN("CS.Snapshot.Capture");
-		const PublishClaim claim;
-		// Engine reads from here on are captures, not live reads.
-		const EngineReads::CaptureScope scope;
-		const auto start = std::chrono::steady_clock::now();
-		auto& game = Game();
-		const FrameSnapshot* previous = game.previous.get();
-		auto fresh = std::make_shared<FrameSnapshot>();
-		fresh->id = game.nextId++;
-		FillCore(*fresh, previous, game);
-		// Native: the update's UI stream, set once its DrawInterface finished it (Snapshot/UiCommandStream.h).
-		static const bool native = RenderGraph::Engine::Native::Requested();
-		if (native)
-			fresh->ui = std::make_shared<const UiCommandStream>();
-		Builder builder(*fresh, previous);
-		// The core block first: feature captures may read it through Builder::Built().
-		CaptureCore(builder);
-		// Native: RenderWaterEffects' game half, before the feature captures read what the water update sets (the underwater state and
-		// effects, the water shader's globals).
-		RenderGraph::Engine::Native::WaterEffects::Capture(*fresh);
-		for (const auto capture : game.captures)
-			capture(builder);
-		auto& stats = Counters();
-		stats.blocksShared.fetch_add(builder.shared, std::memory_order_relaxed);
-		stats.blocksMade.fetch_add(builder.made, std::memory_order_relaxed);
-		stats.captureNs.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()),
-			std::memory_order_relaxed);
-		const bool firstAfterLoad = fresh->events.Has(Event::FirstAfterLoad);
-		const bool first = fresh->id == 1;
-		g_lastGameId.store(fresh->id, std::memory_order_release);
-		Retire::LetGo(std::exchange(game.building, fresh));
+		auto fresh = Build();
 		Publish(fresh);
-		if (first || firstAfterLoad)
-			LogStats(*game.previous, first ? "first snapshot" : "load ended");
+		LogFirst(*fresh);
 	}
 
 	void CaptureFrame(FrameSource a_source)
@@ -571,6 +632,7 @@ namespace Snapshot
 		// Native: the frame's UI stream, set once its DrawInterface finished it. Never the copied snapshot's holder.
 		static const bool native = RenderGraph::Engine::Native::Requested();
 		fresh->ui = native ? std::make_shared<const UiCommandStream>() : nullptr;
+		fresh->nativeFrame = nullptr;
 		if (g_loadStartedPending.exchange(false, std::memory_order_acq_rel)) {
 			fresh->events.Add(Event::LoadStarted);
 			++fresh->events.loadsStarted;
