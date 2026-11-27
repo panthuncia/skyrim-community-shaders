@@ -875,3 +875,32 @@ pushes until the user is back.
 196. **Open:** after a switch to first person, the third-person root is hidden in native but shown in guest (narrowed to
      the SWF-patched store at 0x140736237 in PlayerCharacter::SetFirstPerson, AE 40476); it decides whether the player's
      body casts a shadow in first person.
+
+## 2026-11-26: phase 7 prerequisites: game-thread queue, UI events, adopted settings (snap7-prep2; director accepted)
+
+197. **A game-thread queue** (`Utils/GameThread.{h,cpp}`): `Post` runs a task on the main thread at the next main tick
+     (decision 163's point); `Run` runs at once on the main thread outside the ImGui frame, otherwise posts.
+     `UiFrameScope` marks the ImGui frame; the live-read detector counts UI-frame reads separately, and
+     `NoteEngineWrite` catches a direct engine write from the ImGui frame (logged once, fatal in test runs). Every
+     ImGui-driven engine write found is queued: CS Editor time, timescale, pause, weather lock/picker/reinit, widget
+     applies (`Widget::RequestApply`), free-camera console commands, `UI::ShowMenus`, Scene Manager hour, test conditions,
+     light editor scripts and edits, `bAllowScreenShot`/`bLensFlare` INI writes.
+198. **ImGui is ready for the render thread:** `Menu::PostUiTask` and `Menu::RequestOpen` are queued UI events (cs-test's
+     `cs-menu` and the native menu's "Open CS menu" row use them); `ImGuiConfigFlags_NoMouseCursorChange` is set; the
+     menu reads the game clock and sky from `EditorWindow::GameView`, published each main tick (one game update behind).
+     `CSEditor::DrawOverlay`'s and `EditorWindow::CanBeOpen`'s every-frame reads stay live (the main tick does not run
+     during loads). For the split, `RequestApply` should capture a copy of the widget's settings.
+199. **Settings game-side code reads are bound `CS::Setting`s read with `.Adopted()`:** Sky Sync (15 scalars; its
+     worldspace list reaches the game side as a copy through the queue), Physical Sky's `forceEnableAllInteriorCells`,
+     Cinematic Camera, DoF `consoleSelection`/`targetFocus`. New cs-test commands `cs-ui`/`cs-ui-expect` and config
+     `menu-ui`. Open: remaining UI-frame reads (light editor scene walk, weather picker sky reads, Scene Manager location,
+     Skin editor actor pick, `PostProcessing::Capture`'s tonemap owner) are listed in `snap7-prep2.md`.
+
+## 2026-11-26: the first-person body difference was the test setup (snap3-fpbody; director accepted)
+
+200. **Closes 196:** native runs turn Improved Camera SE off (documented incompatible with native) and guest runs kept it
+     on; its SetFirstPerson detour (SE 39401 / AE 40476) skips the third-person hide and shows the body. Without it guest
+     hides the root as native does, and neither draws a player shadow in first person. The first-person configs turn the
+     plugin off in every mode; `first-person-switch` gains sun and interior shadow shots. Open: native draws no
+     first-person body while Improved Camera is installed, until a plugin's D3D11 draws are ported (the extension API's
+     "draw family a plugin adds geometry to").
