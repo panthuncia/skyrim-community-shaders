@@ -346,5 +346,47 @@
     "size": "1920x1080",
     "run": "1126-185658-dir-native-vulkan-quick-dir-s7dk-native-vulkan+quick",
     "accepted": "2026-11-26"
+  },
+  "native-vulkan+shadows-blend/blend-off": {
+    "sha256": "61d7c2617b8e161ba9343710445408c02f4042017d845bff7e50ccc97e0a2a89",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/blend-on": {
+    "sha256": "f7c85fe742fd571f7002b3d5531957ecb771b241bd9f6b198acbfb9f6e20ed20",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/end": {
+    "sha256": "eb91b20a5388ebe1338c380d3c67fab62f4da2a9bf306bd4b38d90711b728650",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/samples-4": {
+    "sha256": "d54ae2dccb1aa0fd251bbaf0264dcefac45b12e4f706fa8ae8396a147d3fcf55",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/shadows-off": {
+    "sha256": "d91f4cbc37d1a6f726cf496d16eb0f1b695629663a7322a86e04b62e91a3ac66",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/shadows-on-blend-off": {
+    "sha256": "29790ec2b4aba2df50bb5a98f1d9d84f923bef85ff81cc1e851a0465d87c23f5",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/start": {
+    "sha256": "204f804ebf3f305f3de6ca0f43cc17716e49d86f69ce753f49ffdbe2d1e91dbd",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
   }
 }
