@@ -108,6 +108,8 @@ in native they are game-half code now.
 | native-vulkan+update-cap30 | s7-hold-a-nvk-update-cap30 | passed |
 | native-vulkan+update-cap240 | s7-hold-a-nvk-update-cap240 | passed |
 | guest+quick | s7-hold-a-guest-quick | passed |
+| native-vulkan+quick | s7-hold-b-nvk-quick | passed after merging org_integration c4fa6daea (snap7-frameend): record game-mutated 26.0, frame end game-mutated none |
+| guest+quick | s7-hold-b-guest-quick | passed (merged) |
 
 Skipped: native-d3d12-quick (no ORG, BasicRHI or native device code changed); first-person (the late poses need Improved Camera, which
 the harness turns off, so no config exercises them).
