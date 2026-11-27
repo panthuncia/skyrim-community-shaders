@@ -10,6 +10,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
+#include "Snapshot/FrameSnapshot.h"
 
 #include <array>
 #include <cstddef>
@@ -202,13 +203,32 @@ namespace DCLF::Features::Water::Port
 		{
 			bool active = false;  // Unified Water's SetupGeometry hook rewrites (UnifiedWater::GetFlowRewrite)
 			std::int32_t width = 0, height = 0, offsetX = 0, offsetY = 0;
+			bool operator==(const Flowmap&) const = default;
 		} unifiedWater;
 		bool physicalSkySampler = false;  // Physical Sky's ModifyWater replaces sampler s13
 		bool cubemapFixInterior = false;  // the cubemap fix's interior test: TES's interior cell or the player's cell
 		bool mapMenuOpen = false;         // the cubemap fix leaves the map menu alone
+		bool operator==(const FrameInputs&) const = default;
 	};
 
-	/** @brief Render thread. Reads every FrameInputs field now. a_accumulator is the batch's (the main camera's). */
+	/**
+	* @brief Native: the FrameInputs fields that are the game's (ReadGame), taken once per update in the snapshot capture after the
+	* water update, so the render side reads none of them from the engine (render-thread roadmap phase 7).
+	*/
+	struct GameBlock
+	{
+		static constexpr Snapshot::BlockId kId = Snapshot::BlockId::WaterPort;
+		FrameInputs inputs;
+		bool operator==(const GameBlock&) const = default;
+	};
+
+	/** @brief Game thread, native: the snapshot capture of GameBlock. */
+	void CaptureGame(Snapshot::Builder& a_builder);
+
+	/**
+	* @brief Render thread. The frame's FrameInputs: in native the game's fields from the adopted snapshot's GameBlock and the view's
+	* from the render side; in guest every field read now. a_accumulator is the batch's (the main camera's).
+	*/
 	FrameInputs CaptureFrame(const RE::BSShaderAccumulator* a_accumulator);
 
 	/** @brief SetupTechnique's rows, a frame row once the descriptor's Depth bit is known: VS b0 and PS b0. */

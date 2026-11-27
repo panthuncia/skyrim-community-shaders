@@ -24,6 +24,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Features/FeatureList.h"
+#include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
 #include "Features/DrawcallLimitFix/Integrations/IntegrationList.h"
 #include "Features/DrawcallLimitFix/Schedule/Schedule.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
@@ -686,6 +687,8 @@ void DrawcallLimitFix::Hooks::Install()
 	DCLF::WindowWriters::Install();
 	// The game update is over at its capture, so a detach still waiting for a re-attach is a removal. Pushed on the game thread.
 	Snapshot::RegisterCapture([](Snapshot::Builder&) { DCLF::SceneTracker::Get().PushHeldDetaches(); });
+	// Native: the water port's game values, after the water update the capture ran.
+	Snapshot::RegisterCapture(&DCLF::Features::Water::Port::CaptureGame);
 	logger::info("[DCLF] Native pass hooks installed");
 }
 

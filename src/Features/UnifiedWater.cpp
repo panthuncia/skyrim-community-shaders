@@ -1,5 +1,6 @@
 #include "UnifiedWater.h"
 #include "Features/DrawcallLimitFix.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
 #include "Utils/Hash.h"
@@ -537,8 +538,9 @@ bool UnifiedWater::IsWaterDataReady() const
 
 UnifiedWater::FlowRewrite UnifiedWater::GetFlowRewrite() const
 {
-	// The same test as BSWaterShader_SetupGeometry's. A feature that never loaded has no flowmap.
-	if (!flowmap || !IsExteriorWorldspaceActive())
+	// The same test as BSWaterShader_SetupGeometry's. A feature that never loaded has no flowmap. Native's render side takes the
+	// test from the adopted snapshot.
+	if (!flowmap || !(RenderGraph::Engine::Native::Requested() ? FrameExteriorActive() : IsExteriorWorldspaceActive()))
 		return {};
 	return { true, flowmap->GetWidth(), flowmap->GetHeight(), flowmap->GetOffsetX(), flowmap->GetOffsetY() };
 }

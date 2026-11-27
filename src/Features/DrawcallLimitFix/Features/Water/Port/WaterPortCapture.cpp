@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Frame/Variables.h"
 
@@ -49,9 +50,73 @@ namespace DCLF::Features::Water::Port
 		constexpr std::size_t kSsrShaderEnabled = 0x10;
 	}
 
+	/** @brief The FrameInputs fields that are the game's: fog, sun, water and SSR settings, the underwater and interior tests. */
+	void ReadGame(FrameInputs& f)
+	{
+		if (const auto* sm = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)) {
+			f.invFrameBufferRange = sm->invFrameBufferRange;
+			// Its own global, not BSShaderManager::State's timerValues[0], which runs on a different clock.
+			f.timer = Read<float>(Address::kReflectionTimer);
+			f.interior = sm->interior;
+			const auto* sceneNode = sm->sceneGraph < 4 ? sm->shadowSceneNode[sm->sceneGraph] : nullptr;
+			if (const auto* fog = sceneNode ? sceneNode->GetRuntimeData().fogProperty.get() : nullptr) {
+				f.hasFog = true;
+				f.fogNearColor = { fog->nearColor.red, fog->nearColor.green, fog->nearColor.blue };
+				f.fogFarColor = { fog->farColor.red, fog->farColor.green, fog->farColor.blue };
+				f.fogNear = fog->nearDistance;
+				f.fogFar = fog->farDistance;
+				f.fogPower = fog->power;
+				f.fogClamp = fog->clamp;
+			}
+		}
+		if (!f.hasFog) {
+			const auto color = ReadArray<float, 3>(Address::kDefaultFogColor);
+			f.fogNearColor = color;
+			f.fogFarColor = color;
+		}
+		f.sunDir = ReadArray<float, 4>(Address::kSunDir);
+		f.sunColor = ReadArray<float, 4>(Address::kSunColor);
+		static const REL::Relocation<const std::byte* const*> imageSpace{ REL::Offset(Engine::Address::kImageSpaceManager) };
+		if (const std::byte* manager = *imageSpace.get())
+			if (const auto* ssr = Field<const std::byte*>(manager, kSsrShader))
+				f.ssrEnabled = Field<std::uint8_t>(ssr, kSsrShaderEnabled) != 0;
+		f.ssrIntensity = Read<float>(Address::kSsrIntensity);
+		f.ssrBlur = Read<float>(Address::kSsrBlur);
+		f.ssrPerturbation = Read<float>(Address::kSsrPerturbation);
+		f.waterLighting = ReadArray<float, 4>(Address::kWaterLighting);
+		f.defaultLightColor = ReadArray<float, 4>(Address::kDefaultLightColor);
+		f.flowmapSize = Read<std::int32_t>(Address::kFlowmapSize);
+		f.meshFlowCellOffset = ReadArray<float, 2>(Address::kMeshFlowCellOffset);
+		f.displacementOffset = ReadArray<float, 4>(Address::kDisplacementOffset);
+		f.waterLodRoot = Read<const RE::NiNode*>(Address::kWaterLOD);
+		f.cameraUnderwater = Read<bool>(Address::kCameraUnderwater);
+		f.waterEnabled = Read<bool>(Address::kWaterEnabled);
+		f.localMapPasses = Read<bool>(Address::kLocalMapPasses);
+		f.renderMode = Read<std::uint32_t>(Address::kRenderMode);
+		if (auto* tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton())) {
+			auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton());
+			auto* cell = player ? player->GetParentCell() : nullptr;
+			f.cubemapFixInterior = tes->interiorCell || (cell && cell->IsInteriorCell());
+		}
+	}
+
+	void CaptureGame(Snapshot::Builder& a_builder)
+	{
+		if (!Snapshot::FrameCamera::Owned())
+			return;
+		GameBlock block;
+		ReadGame(block.inputs);
+		a_builder.Set(block);
+	}
+
 	FrameInputs CaptureFrame(const RE::BSShaderAccumulator* a_accumulator)
 	{
-		FrameInputs f;
+		// Native: the game's values as the update's capture took them; the view's values come from the render side below.
+		const auto& snapshot = Snapshot::Current();
+		const auto* block = snapshot && Snapshot::FrameCamera::Owned() ? snapshot->Block<GameBlock>() : nullptr;
+		FrameInputs f = block ? block->inputs : FrameInputs{};
+		if (!block)
+			ReadGame(f);
 		f.frame = globals::state ? globals::state->frameCount : 0;
 		if (Snapshot::FrameCamera::Owned()) {
 			// Native: the frame camera, with the render side's last drawn camera as the previous one.
@@ -80,27 +145,6 @@ namespace DCLF::Features::Water::Port
 			f.proj00 = proj[0];
 			f.proj11 = proj[5];
 		}
-		if (const auto* sm = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)) {
-			f.invFrameBufferRange = sm->invFrameBufferRange;
-			// Its own global, not BSShaderManager::State's timerValues[0], which runs on a different clock.
-			f.timer = Read<float>(Address::kReflectionTimer);
-			f.interior = sm->interior;
-			const auto* sceneNode = sm->sceneGraph < 4 ? sm->shadowSceneNode[sm->sceneGraph] : nullptr;
-			if (const auto* fog = sceneNode ? sceneNode->GetRuntimeData().fogProperty.get() : nullptr) {
-				f.hasFog = true;
-				f.fogNearColor = { fog->nearColor.red, fog->nearColor.green, fog->nearColor.blue };
-				f.fogFarColor = { fog->farColor.red, fog->farColor.green, fog->farColor.blue };
-				f.fogNear = fog->nearDistance;
-				f.fogFar = fog->farDistance;
-				f.fogPower = fog->power;
-				f.fogClamp = fog->clamp;
-			}
-		}
-		if (!f.hasFog) {
-			const auto color = ReadArray<float, 3>(Address::kDefaultFogColor);
-			f.fogNearColor = color;
-			f.fogFarColor = color;
-		}
 		const bool native = Snapshot::FrameCamera::Owned();
 		static const REL::Relocation<const std::byte* const*> camera{ REL::Offset(Effects::Address::kEffectCamera) };
 		if (native) {
@@ -113,8 +157,6 @@ namespace DCLF::Features::Water::Port
 			f.cameraNear = Field<float>(current, 0x160);
 			f.cameraFar = Field<float>(current, 0x164);
 		}
-		f.sunDir = ReadArray<float, 4>(Address::kSunDir);
-		f.sunColor = ReadArray<float, 4>(Address::kSunColor);
 		if (native) {
 			// The render target manager's size, which is kMAIN's shape in the adopted revision.
 			const auto shapes = ::RenderGraph::Frame::Vars::Adopted(::RenderGraph::Frame::Vars::EngineTargetShapes());
@@ -124,19 +166,6 @@ namespace DCLF::Features::Water::Port
 			f.renderWidth = Read<std::uint32_t>(Address::kRenderWidth);
 			f.renderHeight = Read<std::uint32_t>(Address::kRenderHeight);
 		}
-		static const REL::Relocation<const std::byte* const*> imageSpace{ REL::Offset(Engine::Address::kImageSpaceManager) };
-		if (const std::byte* manager = *imageSpace.get())
-			if (const auto* ssr = Field<const std::byte*>(manager, kSsrShader))
-				f.ssrEnabled = Field<std::uint8_t>(ssr, kSsrShaderEnabled) != 0;
-		f.ssrIntensity = Read<float>(Address::kSsrIntensity);
-		f.ssrBlur = Read<float>(Address::kSsrBlur);
-		f.ssrPerturbation = Read<float>(Address::kSsrPerturbation);
-		f.waterLighting = ReadArray<float, 4>(Address::kWaterLighting);
-		f.defaultLightColor = ReadArray<float, 4>(Address::kDefaultLightColor);
-		f.flowmapSize = Read<std::int32_t>(Address::kFlowmapSize);
-		f.meshFlowCellOffset = ReadArray<float, 2>(Address::kMeshFlowCellOffset);
-		f.displacementOffset = ReadArray<float, 4>(Address::kDisplacementOffset);
-		f.waterLodRoot = Read<const RE::NiNode*>(Address::kWaterLOD);
 		if (native) {
 			// The main accumulator's eye is the world camera's position, the frame camera's eye.
 			const auto& frame = Snapshot::FrameCamera::Main().data;
@@ -145,22 +174,13 @@ namespace DCLF::Features::Water::Port
 			const auto& eye = a_accumulator->GetRuntimeData()->eyePosition;
 			f.eyePosition = { eye.x, eye.y, eye.z };
 		}
-		f.cameraUnderwater = Read<bool>(Address::kCameraUnderwater);
-		f.waterEnabled = Read<bool>(Address::kWaterEnabled);
-		f.localMapPasses = Read<bool>(Address::kLocalMapPasses);
 		// Native: the RenderWorld driver's water blend test (the post-resolve wrote the engine's global from the same test).
 		f.rawWater = native ? ::RenderGraph::Engine::Native::WorldPass::RawWater() : Read<bool>(Address::kRawWater);
-		f.renderMode = Read<std::uint32_t>(Address::kRenderMode);
 
 		f.linearLighting = globals::features::linearLighting.IsLinearLightingActive() && globals::state && globals::state->customPixelShader;
 		const auto uw = globals::features::unifiedWater.GetFlowRewrite();
 		f.unifiedWater = { uw.active, uw.width, uw.height, uw.offsetX, uw.offsetY };
 		f.physicalSkySampler = globals::features::physicalSky.IsRendering();
-		if (auto* tes = CS_ENGINE_READ(TES, CapturePoint, RE::TES::GetSingleton())) {
-			auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton());
-			auto* cell = player ? player->GetParentCell() : nullptr;
-			f.cubemapFixInterior = tes->interiorCell || (cell && cell->IsInteriorCell());
-		}
 		f.mapMenuOpen = globals::state && globals::state->isMapMenuOpen;
 		return f;
 	}
