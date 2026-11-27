@@ -325,12 +325,12 @@ namespace RenderGraph::Engine::Native::Scene
 		*/
 		void RecordFrame(const Prepared& a_frame, RE::NiCamera* a_camera, std::uint32_t a_target)
 		{
-			// A routed render: DCLF's frame start renders the game half's ticket, and the water work the capture queued draws, where
-			// Main::Draw's SetupSunAndSky point ran them.
-			if (a_frame.sceneTicket) {
+			// A routed render: DCLF's frame start renders the game half's ticket.
+			if (a_frame.sceneTicket)
 				globals::features::drawcallLimitFix.BeginNativeRenderHalf();
-				WaterEffects::Render();
-			}
+			// The water work the captures queued up to the adopted snapshot draws where Main::Draw's SetupSunAndSky point ran it, also in an
+			// update drawn on Main::DrawFrame (a paused menu over the world, the camera path), so the queue does not grow while one shows.
+			WaterEffects::Render();
 			ZoneScopedN("CS.Native.RenderScene.Render");
 			const Snapshot::EngineReads::RenderHalfScope half(Snapshot::EngineReads::Half::Record);
 			// The points below read a_frame through Current().
