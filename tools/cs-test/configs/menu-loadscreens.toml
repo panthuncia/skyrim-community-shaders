@@ -1,0 +1,34 @@
+# Every load screen model in turn (MistMenu, UI3DSceneManager::Render scheme 4 with its depth pass and shadow lights): at the main
+# menu, where the Mist Menu is open and no load replaces the model, `loadscreens` shows each distinct model 40 frames (signal 900 when
+# done), then the run exits. A model with a draw CS cannot compute is fatal in native; with --set env.CS_MENU_SCENES_OBSERVE=1 the engine draws them and
+# each draw CS could not compute is logged ("computed differs"). Compose it: native-vulkan+menu-loadscreens, guest+menu-loadscreens.
+extends = ["base"]
+
+[run]
+timeout_s = 900
+
+[game]
+mods_off = ["Skyrim Engine Telemetry", "Start On Save"]
+
+[[steps]]
+at = "main-menu"
+frames = 240
+do = "loadscreens"
+arg = "40"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "last-model"
+wait = "signal:900"
+wait_s = 780
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "main-menu"
+shots = ["last-model"]
