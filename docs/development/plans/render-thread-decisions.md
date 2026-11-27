@@ -949,3 +949,22 @@ pushes until the user is back.
      light live reads per world frame: quick 6.6 -> 0, interior 21 -> 0. Open: Light Limit Fix, Exponential Height Fog
      and Deferred still read shadow lights at record time (the set has their values); menu scene shadows still select
      where they record.
+
+## 2026-11-27: DCLF's frame start split by a per-update ticket (snap7-ticket; director accepted)
+
+205. **DCLF's frame start has a game half and a render half joined by a `FrameTicket`** (`Core/Render/FrameTicket.h`):
+     `FrameDriver::GameFrameStart` does every engine read and write in a capture scope (claims, LOD gates,
+     `ServeFrameRequests`, draw families, list filter, shading fields, `LatePoses::PrepareFrame`, first-person sampling
+     before the shift via `FrameValues::TakeRootViews`) and fills the ticket (frame globals, scene step, installed
+     publication, loading and utility-shader flags, late-pose plan, one-shot frame-value inputs); `FrameDriver::BeginFrame`
+     reads only the ticket (`FrameGlobals::Adopt`, coverage, kicks, `FrameValues::Kick`, payload). Tickets retire through
+     the engine lane. Frame-start live reads per world frame: 26.5 -> 0.04 (one-time reads of render-owned target tables).
+     The detector counts frame-start reads (`EngineReads::FrameStartScope`).
+206. **Ticket cadence:** a repeat renders the same ticket (a `FragmentSource::takes` callback in `Revision.cpp` stops DCLF
+     taking a newer scene during a repeat; if it still adopts one, the ticket is remade and counted); a dropped update runs
+     the game half through `Snapshot::RegisterUnrenderedUpdate`, its ticket retires unused and hands its one-shot inputs
+     to the next. Claims belong to the game half and DCLF's first install waits for a covered render (guest too; the
+     engine draws that frame). `sceneStep` stays per render (a per-update step would make a repeat skip its forward
+     epoch). Both halves still run at the SetupSunAndSky point until the thread exists. Open: the producer split (mover
+     sampling and pool kicks per ticket), scene pairing for the render thread, `coveredLast` and the family decision as
+     cross-thread messages, DCLF's other points (DepthCommitted, EarlyPrepass, Prepass, BeforeOpaquePass, EndFrame).
