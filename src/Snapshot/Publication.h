@@ -27,6 +27,12 @@ namespace Snapshot
 	/** @brief Adds a feature capture. Call at load (PostPostLoad); captures run in registration order. A capture that has nothing to say sets nothing. */
 	void RegisterCapture(CaptureFn a_capture);
 
+	/** @brief The game half of an update the cadence test mode renders no frame for. Main thread, after the update's capture. */
+	using UnrenderedFn = void (*)(const FrameSnapshot& a_snapshot);
+
+	/** @brief Adds an unrendered update's game half. Call at load (PostPostLoad). */
+	void RegisterUnrenderedUpdate(UnrenderedFn a_fn);
+
 	/** @brief Installs the publication hook at Main::Update's call of Main::DrawFrame (Hooks.cpp calls this). */
 	void InstallHooks();
 

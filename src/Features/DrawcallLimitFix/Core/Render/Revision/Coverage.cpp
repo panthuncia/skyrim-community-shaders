@@ -1,13 +1,14 @@
 // The frame's side of the scene revisions, on the render thread. It runs the build point, posts revision inputs, and decides
 // before the engine draws which epochs the adopted snapshot covers.
 
-#include "Features/DrawcallLimitFix/Core/Render/Internal.h"
-#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 
 #include "RenderGraph/Frame/FrameDriver.h"
@@ -300,7 +301,8 @@ namespace DCLF
 		// Why the engine draws each uncovered epoch, from what this frame's Begin adopted only. None on an uncovered epoch is a defect.
 		// A dormant epoch has no recording, so it is never covered.
 		const bool notDrawing = Scene::FrameView::Get().NotDrawingYet();
-		const bool loading = Scene::FrameView::IsLoadingScreenUp();
+		// The frame's ticket took it on the game side.
+		const bool loading = FrameGlobals::Current().loading;
 		for (std::uint32_t e = 0, epochs = EpochCount(); e < epochs; ++e) {
 			const auto& traits = EpochTraitsOf(e);
 			if (traits.dormant)

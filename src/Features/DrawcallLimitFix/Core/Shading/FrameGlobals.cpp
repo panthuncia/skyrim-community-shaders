@@ -261,7 +261,6 @@ namespace DCLF
 	{
 		DCLF_ZONE("CS.DCLF.FrameGlobals.Capture");
 		const Snapshot::EngineReads::CaptureScope captureScope;
-		renderThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
 		auto g = std::make_shared<FrameGlobals>();
 		g->loading = Scene::FrameView::IsLoadingScreenUp();
 		g->interior = Util::IsInterior();
@@ -348,9 +347,16 @@ namespace DCLF
 		g->technique = SampleTechniqueInputs();
 		g->shadowMaskHeld.copy_from(g->technique.shadowMask);  // the renderer's target holds it now, so it is alive
 		g->material = MaterialPort::SampleFrame();
-		recent[recentNext++ % recent.size()] = latest;
-		latest = g;
 		return g;
+	}
+
+	void FrameGlobals::Adopt(std::shared_ptr<const FrameGlobals> a_globals)
+	{
+		renderThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
+		if (!a_globals || a_globals == latest)
+			return;
+		recent[recentNext++ % recent.size()] = std::move(latest);
+		latest = std::move(a_globals);
 	}
 
 	const FrameGlobals& FrameGlobals::Current()

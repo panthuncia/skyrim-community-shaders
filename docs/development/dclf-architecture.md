@@ -107,7 +107,7 @@ lane and pool, and every frame draws the newest complete snapshot of it.
 | --- | --- | --- | --- |
 | `Main::Update`'s entry (main thread) | The frame's engine writes, at the one safe point: `kAccumulated` (`IndirectDraws::WriteAccumulated`), the fade write-back's stores, then the stand-in observers ("Main::Update's entry", below) | | |
 | The game update's capture (main thread, `Snapshot::Capture`) | Pushes the held detaches; after the publish, opens the engine-read window | | |
-| `Main::Draw`, before the main cull (`FrameDriver::BeginFrame`, the shell's `Main_Draw_Early` thunk) | The graph's build point (`IndirectDraws::BuildPoint`); ends the render half's hold on the engine-read window; applies the toggles; captures the frame globals and posts the frame inputs; the camera cut; hands over the snapshot the frame revision adopted at this frame's `Renderer::Begin` (`FrameView::HandOverAtFrameStart`), never waiting for a newer one; installs the claims; serves the scene lane's requests (switch catch-ups, the category capture, mirror capture requests); decides the draw families (tree LOD); publishes the scene-list filter; kicks the frame values (`FrameValues::Kick`) | **Scene pass** (`Coordinator::RunSceneWork`, whenever its producers wake the pump): events applied, walk, joins, `CommitSet`; then, at the snapshot builder's pace, `PublishScene`. **Snapshot builder** (`IndirectDraws::PostSnapshotWork`): payloads built, revision made and sealed, payload published as pooled versions. **FrameValues' producer**: placements, palettes, shading | The frame values' uploads on the upload queue; the payload's catch-up |
+| `Main::Draw`, before the main cull (`FrameDriver::SceneFrameStart`, the shell's `Main_Draw_Early` thunk; [The frame start](#the-frame-start)) | **Game half** (`GameFrameStart`, once per game update, makes the `FrameTicket`): ends the render half's hold on the engine-read window; applies the toggles; captures the frame globals and posts the frame inputs; the camera cut; hands over the snapshot the frame revision adopted at this frame's `Renderer::Begin` (`FrameView::HandOverAtFrameStart`), never waiting for a newer one; installs the claims; serves the scene lane's requests (switch catch-ups, the category capture, mirror capture requests); decides the draw families (tree LOD); publishes the scene-list filter; takes the frame values' inputs and samples first person. **Render half** (`BeginFrame`, every render, from the ticket): the graph's build point (`IndirectDraws::BuildPoint`); the coverage decision; kicks the frame values (`FrameValues::Kick`); the frame payload | **Scene pass** (`Coordinator::RunSceneWork`, whenever its producers wake the pump): events applied, walk, joins, `CommitSet`; then, at the snapshot builder's pace, `PublishScene`. **Snapshot builder** (`IndirectDraws::PostSnapshotWork`): payloads built, revision made and sealed, payload published as pooled versions. **FrameValues' producer**: placements, palettes, shading | The frame values' uploads on the upload queue; the payload's catch-up |
 | The engine's list jobs | The engine registers the passes it keeps. `PassCapture` withholds DCLF's objects; `PrimaryCull` stands in for DCLF's entries inside the list jobs; whole entries are out of the scene lists | | |
 | Inside `CalculateAndDrawShadowCasterLights` | The frame's shadow views begun and their coverage decided (`BeforeShadowCasters`), each kept light noted (`ShadowCasterKept`), the views listed from DCLF's selection (`ShadowCastersSelected`) | | |
 | `BeforeShadowMaps` | The shadow views' revision inputs and frame; then, before the engine draws the shadow maps, the occlusion maps DCLF draws this frame taken and set up (Skylighting's `RenderOcclusionAtShadowMaps`: `OcclusionReady`, the camera, `OcclusionView`, `RenderMask`'s clear) | | The maps' clears |
@@ -170,6 +170,24 @@ copies (about 4 us) and their barriers, every frame it drew; first person's dept
 
 DCLF is persistent: once a frame installs claims, no frame hands drawing back to the engine until the user switches DCLF off.
 
+-   **Two halves and a ticket** (`Core/Render/FrameTicket.h`, render-thread roadmap phase 7). `FrameDriver::SceneFrameStart` runs
+    the game half (`GameFrameStart`), which reads and writes the engine once per game update inside the live-read detector's capture
+    scope, and makes a `FrameTicket`: the frame globals, the scene step, the installed publication's sequence, `loading`, the utility
+    shader's presence, the late-pose plan and the frame values' one-shot inputs (placement plans, shading items and fields, the
+    first-person samples). Then the render half (`BeginFrame`) runs from the ticket alone, inside `EngineReads::FrameStartScope`, so
+    the detector's `frame-start read site` lines list any engine read left in it. Today both run at the same point, game half first.
+-   **Cadence.** A repeated render of a snapshot (`Snapshot::Render().repeat`) renders its ticket again: no game half, its own scene
+    step (`FrameView::StepRepeat`), a producer with no new inputs. The scene source takes no new fragment meanwhile
+    (`FragmentSource::takes`, `FrameDriver::HoldsScene`), so the installed publication stays the ticket's; a frame revision adopted
+    with a held scene can still bring a newer one, and then the ticket is made again (counted). An update the cadence renders no frame
+    for runs the game half all the same (`Snapshot::RegisterUnrenderedUpdate`); its ticket retires unused when the next is made, and
+    its one-shot inputs go to the next ticket, oldest first. Tickets retire through the retire queue's engine lane (their plans hold
+    engine references). `[DCLF] frame-start tickets` counts them.
+-   **Claims are the game half's.** The game half installs the installed publication's claims while DCLF draws. The first installation,
+    and the first after a stop, waits for a render whose coverage of the claims epochs passed (`coveredLast`, set by the render half,
+    cleared when a revision leaves DCLF's scene), so DCLF's first drawn frame is one render after its first covered one. The render half
+    decides coverage and reports an uncovered frame while drawing as a tap error, as before.
+
 -   **No claims** (the engine draws everything) only before DCLF's first covered frame (`FrameView::NotDrawingYet`: the tables,
     the main resources and the first revision being made; the first installation applies the whole set), under a load screen
     (the set does not survive a load: `NoteLoadingScreen`), or when `failed`. Every other frame draws the installed publication's
@@ -181,7 +199,7 @@ DCLF is persistent: once a frame installs claims, no frame hands drawing back to
     adoption, the scene's staged builds attach, so the graphs that run are the ones its recordings were made on.
     `IndirectDraws::InstallScene` installs it. A scene that cannot be adopted is handed back (`IndirectDraws::DropScene`: recorded
     against other frame versions, on a replaced build, refused staged builds, or superseded) and the builder makes a new one.
--   **No frame-start wait.** `FrameDriver::BeginFrame` only hands over what was adopted (`HandOverAtFrameStart`). If a newer
+-   **No frame-start wait.** The frame start only hands over what was adopted (`HandOverAtFrameStart`). If a newer
     snapshot is not ready, the frame draws the adopted one, recorded on the graphs that run. DCLF's builds are staged and attach
     with a scene, never inline (plan step 10a).
 -   **Inputs that cannot change once DCLF draws.** New main resources (a new render size or frame buffers), new target formats
@@ -340,7 +358,7 @@ roadmap, phase 6). It opens on the main thread after the game update's publish a
 `Main::DrawFrame`, before the update's game logic. The render side never takes a lease (the report counts main-thread leases).
 -   **The render half's hold.** While the engine's render half runs inside the window it writes the scene graph outside `Main::Draw`
     to Present (the decal manager's attaches before `Main::Draw`; the next update's jobs after Present). The window is held there
-    (`HoldForRenderHalf` at each `DrawFrame` call and at Present, `ReleaseRenderHalf` at `FrameDriver::BeginFrame`), so leases are
+    (`HoldForRenderHalf` at each `DrawFrame` call and at Present, `ReleaseRenderHalf` at the frame start's game half), so leases are
     taken from `Main::Draw` to Present as before. A dropped cadence update (no render half) leaves the whole window readable.
 -   A worker touching engine memory takes a `Lease` per item or per `ParallelFor` chunk. A refused lease means the window closed,
     and the rest waits for the next window: nothing refused is dropped. FrameValues hands a refused shading item back to the next

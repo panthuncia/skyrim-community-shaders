@@ -80,6 +80,7 @@ namespace Snapshot
 		struct Producer
 		{
 			std::vector<CaptureFn> captures;
+			std::vector<UnrenderedFn> unrendered;
 			std::shared_ptr<const FrameSnapshot> previous;  // the last published, adopted or not
 			std::uint64_t nextId = 1;
 			RE::FormID previousCell = 0;  // the player's cell at the previous update, by form id (an address can be reused)
@@ -415,6 +416,10 @@ namespace Snapshot
 					}
 				}
 				SideEffects::AfterRenderHalf(rendered);
+				// The cadence rendered nothing for this update: its game halves run all the same.
+				if (!rendered)
+					for (const auto fn : Game().unrendered)
+						fn(*Game().previous);
 				t_inGameUpdate = outer;
 				// Phase 7's "publish, then wait for the next update slot". Off unless CS_UPDATE_RATE_CAP=1.
 				PaceGameUpdate();
@@ -437,6 +442,11 @@ namespace Snapshot
 	void RegisterCapture(CaptureFn a_capture)
 	{
 		Game().captures.push_back(a_capture);
+	}
+
+	void RegisterUnrenderedUpdate(UnrenderedFn a_fn)
+	{
+		Game().unrendered.push_back(a_fn);
 	}
 
 	void InstallHooks()

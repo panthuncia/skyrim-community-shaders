@@ -1,7 +1,7 @@
 #pragma once
 
-// FrameGlobals: the engine globals the scene reads, captured once by the render thread at the frame's start and immutable after.
-// Scene work reads the capture its frame carries. The render thread reads its latest.
+// FrameGlobals: the engine globals the scene reads, captured once per game update by the frame start's game half and immutable after.
+// Scene work reads the capture its frame carries. The render thread reads the one its frame's ticket carries.
 
 #include <array>
 #include <cstdint>
@@ -51,8 +51,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief The engine's frame globals the scene reads, captured on the render thread at the frame's start, after the engine's update
-	 * and before the culls. Immutable after.
+	 * @brief The engine's frame globals the scene reads, captured by the frame start's game half once per game update, after the engine's
+	 * update and before the culls. Immutable after. The render half adopts its ticket's.
 	 * Scene work reads no engine memory, only the capture its frame carries. Reading it from any other thread without a scope is a defect,
 	 * which is counted and logged once.
 	 */
@@ -94,8 +94,10 @@ namespace DCLF
 		winrt::com_ptr<ID3D11ShaderResourceView> shadowMaskHeld;
 		MaterialPort::MaterialFrame material;
 
-		/** @brief Render thread, at the frame's start. The frame's capture, which Current() hands the render thread from now on. */
+		/** @brief Game half of the frame start (FrameDriver::GameFrameStart), once per game update. The update's capture. */
 		static std::shared_ptr<const FrameGlobals> Capture();
+		/** @brief Render half of the frame start. The ticket's capture, which Current() hands the render thread from now on. */
+		static void Adopt(std::shared_ptr<const FrameGlobals> a_globals);
 		/**
 		 * @brief Render thread, at RenderDepth's first-person draw. Records every node's hidden bit under a_root as the engine's culls saw them.
 		 * The next frame's capture uses these instead of the frame start's bits.

@@ -73,6 +73,7 @@ namespace Snapshot::EngineReads
 		Site* next = nullptr;
 		std::atomic<std::uint64_t> captured{ 0 };
 		std::atomic<std::uint64_t> ui{ 0 };  // live reads made inside the ImGui frame (also counted in live)
+		std::atomic<std::uint64_t> frameStart{ 0 };  // live reads made inside a FrameStartScope (also counted in live)
 		std::atomic<std::uint64_t> live[kThreads][kKinds]{};
 	};
 
@@ -88,6 +89,19 @@ namespace Snapshot::EngineReads
 
 	/** @brief Whether this thread is inside a CaptureScope. */
 	bool InCapture() noexcept;
+
+	/**
+	* @brief Marks the render side's frame start (DCLF's render half). Live reads inside it are also counted as frame-start reads, so the
+	* table shows what the render half still reads of the engine. Nests.
+	*/
+	class FrameStartScope
+	{
+	public:
+		FrameStartScope() noexcept;
+		~FrameStartScope();
+		FrameStartScope(const FrameStartScope&) = delete;
+		FrameStartScope& operator=(const FrameStartScope&) = delete;
+	};
 
 	/** @brief The ImGui frame starts and ends on this thread (GameThread::UiFrameScope). Live reads in it also count as UI-frame reads. Nests. */
 	void EnterUiFrame() noexcept;

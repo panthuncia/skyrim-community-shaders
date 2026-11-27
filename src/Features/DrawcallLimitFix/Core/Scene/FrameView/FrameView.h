@@ -35,8 +35,13 @@ namespace DCLF::Scene
 	public:
 		using Tables = SceneTables;
 		static FrameView& Get();
-		/** @brief DCLF's scene step: moves at each BeginFrame, only while DCLF runs. Not the CS frame (RenderGraph::FrameClock). */
+		/**
+		 * @brief DCLF's scene step: moves once per world render, only while DCLF runs (at the game half's BeginFrame, or at a repeated
+		 * render's StepRepeat), and at an update the cadence renders nothing for. Not the CS frame (RenderGraph::FrameClock).
+		 */
 		std::uint32_t SceneStep() const { return sceneStep; }
+		/** @brief Render half of a repeated render, which renders the last ticket again: the render's scene step. */
+		void StepRepeat();
 		/**
 		* @brief At a CS Begin, before DCLF's BeginFrame of that frame: the scene step the beginning frame runs. The frame driver's
 		* adoption point runs before DCLF's BeginFrame in both modes.

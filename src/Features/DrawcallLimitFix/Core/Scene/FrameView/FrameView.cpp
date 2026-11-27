@@ -66,6 +66,12 @@ namespace DCLF::Scene
 		PostFrameInputs();
 	}
 
+	void FrameView::StepRepeat()
+	{
+		++sceneStep;
+		DCLF::SceneClock::Set(sceneStep);
+	}
+
 	void FrameView::PostFrameInputs()
 	{
 		auto inputs = std::make_unique<FrameInputs>();
