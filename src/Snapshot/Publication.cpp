@@ -292,6 +292,10 @@ namespace Snapshot
 			const RE::FormID cellId = cell ? cell->GetFormID() : 0;
 			a_snapshot.interior = cell && cell->IsInteriorCell();
 			a_snapshot.worldLoaded = has3D && cell;
+			// Taken before the water update (WaterEffects::Capture), as RenderPlayerView takes it before SetupSunAndSky: in first
+			// person the reflection cube's update hides the root and leaves it to the first-person block to show again.
+			const auto* firstPersonRoot = player ? player->Get3D1(true) : nullptr;
+			a_snapshot.firstPersonShown = firstPersonRoot && !firstPersonRoot->GetFlags().any(RE::NiAVObject::Flag::kHidden);
 			a_snapshot.kind = MainThreadKind(menus, has3D);
 			a_snapshot.loadEpoch = g_loadEpoch.load(std::memory_order_acquire);
 			// Game side: the settings' raise count when the snapshot is built, not the variables the last render Begin took.

@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPersonView.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
@@ -25,13 +26,15 @@ namespace DCLF::Features::FirstPerson
 {
 	namespace
 	{
-		// Recomputes Main::Draw's first-person flag (cVar23, AE 0x1406444b0). This runs before 0x1406445a1 hides the root.
-		// The camera check reads the current state at PlayerCamera +0x28, not the free camera at +0xD0.
+		// Recomputes Main::Draw's first-person flag (cVar23, AE 0x1406444b0). The root's bit is the snapshot's, taken before the water
+		// update hides the root (native runs that update in the capture). The camera check reads the current state at PlayerCamera
+		// +0x28, not the free camera at +0xD0.
 		bool FirstPersonLatch()
 		{
 			bool latch = false;
-			if (auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton()))
-				if (const auto* root = player->Get3D(true); root && root != player->Get3D(false) && !root->GetFlags().any(RE::NiAVObject::Flag::kHidden)) {
+			const auto& snapshot = Snapshot::Current();
+			if (auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton()); player && snapshot && snapshot->firstPersonShown)
+				if (const auto* root = player->Get3D(true); root && root != player->Get3D(false)) {
 					auto* ui = CS_ENGINE_READ(UI, CapturePoint, RE::UI::GetSingleton());
 					const auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::PlayerCamera::GetSingleton());
 					const bool mainMenu = ui && ui->IsMenuOpen(RE::MainMenu::MENU_NAME);

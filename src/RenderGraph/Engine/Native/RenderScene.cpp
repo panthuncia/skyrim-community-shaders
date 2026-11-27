@@ -11,6 +11,7 @@
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Fatal.h"
+#include "Snapshot/Publication.h"
 #include "Utils/Logging.h"
 
 #include "Globals.h"
@@ -94,7 +95,7 @@ namespace RenderGraph::Engine::Native::Scene
 			bool menuMode = false;       // UI +0x160 above 0: RenderWorld's and RenderFirstPersonView's first argument
 		};
 
-		Branches ReadBranches(RE::PlayerCharacter& a_player)
+		Branches ReadBranches(RE::PlayerCharacter& a_player, const Snapshot::FrameSnapshot& a_snapshot)
 		{
 			Branches b;
 			auto* ui = RE::UI::GetSingleton();
@@ -102,10 +103,11 @@ namespace RenderGraph::Engine::Native::Scene
 			// RenderScene's test (AE 82074): the main menu is open.
 			const bool mainMenu = ui && strings && ui->IsMenuOpen(strings->mainMenu.c_str());
 			b.firstPersonRoot = a_player.Get3D1(true);
-			// RenderPlayerView's: the first-person root shown, no main menu, and the camera not in its free state.
+			// RenderPlayerView's: the first-person root shown, no main menu, and the camera not in its free state. The root's bit comes
+			// from the snapshot, taken before the water update that native runs in the capture (it hides the root in first person).
 			const auto* camera = RE::PlayerCamera::GetSingleton();
 			const bool freeCamera = camera && camera->currentState.get() == camera->GetRuntimeData().cameraStates[RE::CameraStates::kFree].get();
-			b.firstPerson = b.firstPersonRoot && !(Flags(b.firstPersonRoot) & kHidden) && !mainMenu && !freeCamera;
+			b.firstPerson = b.firstPersonRoot && a_snapshot.firstPersonShown && !mainMenu && !freeCamera;
 			// Actor::GetMovementController (SE 36776, AE 37792), then the controller's vfunc +0x78.
 			using GetController = void** (*)(RE::Actor*);
 			static REL::Relocation<GetController> getController{ REL::RelocationID(36776, 37792) };
@@ -230,7 +232,10 @@ namespace RenderGraph::Engine::Native::Scene
 			globals::state->BeginPerfEvent("Player View");
 			// The reflections' camera (SE 528353, AE 415299): the radial blur modifier's projection reads it on the game side (AE 107753).
 			Global<RE::NiCamera*>(528353, 415299) = camera;
-			const auto b = ReadBranches(*player);
+			const auto& snapshot = Snapshot::Current();
+			if (!snapshot)
+				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran before any snapshot was adopted");
+			const auto b = ReadBranches(*player, *snapshot);
 			SetListProcessCameras(camera);
 			// +0xD3, Main::SetupSunAndSky: DCLF's frame start and the water render point. Its result (the capture's) holds the node the
 			// shadow casters skip in first person.
