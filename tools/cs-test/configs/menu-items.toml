@@ -95,3 +95,4 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["inventory-enchanted-weapon", "inventory-enchanted-armour"]
+shot_refs = ["inventory-enchanted-weapon", "inventory-enchanted-armour"]

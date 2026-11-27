@@ -355,11 +355,41 @@ namespace DCLF::Features::MenuViews::Scenes
 			std::uint32_t pass = 0, vertex = 0, pixel = 0, rawPixel = 0;
 			MaterialRecord record{};
 		};
-		/** @brief The Effect draw of a_geometry as BSEffectShader's Setup functions would bind it. Particles and the lit, membrane and soft variants are refused. */
+		/** @brief The Effect draw of a_geometry as BSEffectShader's Setup functions would bind it. The lit, membrane, soft and projected variants are refused. */
 		bool ComputeEffect(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why);
 
-		/** @brief A menu root's visible geometry in draw order: the batches' in scene order, then the blended list sorted far to near. */
-		void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, bool a_closestPoint, std::vector<RE::BSGeometry*>& a_out);
+		/**
+		 * @brief The membrane pass descriptor BSLightingShaderProperty::GetRenderPasses (AE 0x1414adfb0) adds for a Lighting property with
+		 * effect data (an enchantment glow), or 0 when it adds none.
+		 */
+		std::uint32_t MembranePassOf(const RE::BSGeometry& a_geometry);
+		/** @brief The membrane pass of a_geometry as BSEffectShader's Setup functions would bind it (the material is the Lighting property's). */
+		bool ComputeMembrane(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why);
+
+		/** @brief What a draw needs besides its constants: the states the engine's batch leaves for it. */
+		struct DrawState
+		{
+			std::uint32_t blend = 0, write = 1, depth = 3, cull = 1, depthBias = 0;
+			float alphaRef = 0.0f;
+		};
+		/**
+		 * @brief A membrane pass's states, drawn in the accumulator's membrane group (accumulation hint 3, FUN_1414b3d50): the effect data's
+		 * blend, depth test without write, depth bias mode 10 (11 with a_closestPoint), back faces culled, write mode 11. False for a blend
+		 * pair the membrane setup leaves as it finds it.
+		 */
+		bool MembraneStateOf(const RE::BSGeometry& a_geometry, bool a_closestPoint, DrawState& a_out);
+
+		/** @brief One pass of a menu scene in draw order: a geometry's own pass, or the membrane pass its Lighting property adds. */
+		struct ScenePass
+		{
+			RE::BSGeometry* geometry = nullptr;
+			bool membrane = false;
+		};
+		/**
+		 * @brief A menu root's visible passes in draw order: the batches' in scene order, the membrane group, then the blended list sorted
+		 * far to near.
+		 */
+		void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, bool a_closestPoint, std::vector<ScenePass>& a_out);
 		/** @brief Whether a_geometry's pass goes to the accumulator's blended list (accumulation hint 1). */
 		bool BlendedList(const RE::BSGeometry& a_geometry);
 		/** @brief Whether the menu's colour accumulator sorts its blended list by each bound's closest point. */
@@ -402,7 +432,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		void Other(const char* a_shader, const RE::BSRenderPass* a_pass, std::uint32_t a_vertex, std::uint32_t a_pixel);
 		void Lighting(const RE::BSRenderPass* a_pass, const LightingSceneConstants& a_engine, const float (*a_frame)[4], const ID3D11ShaderResourceView* const* a_views,
 			const std::uint32_t* a_address, const std::uint32_t* a_filter, std::uint32_t a_vertex, std::uint32_t a_pixel);
-		void Effect(const RE::BSRenderPass* a_pass, const EffectSceneConstants& a_engine);
+		void Effect(const RE::BSRenderPass* a_pass, const EffectSceneConstants& a_engine, const ID3D11ShaderResourceView* const* a_views, const std::uint32_t* a_address,
+			const std::uint32_t* a_filter);
 		void State(const RE::BSRenderPass* a_pass, std::uint32_t a_blend, std::uint32_t a_coverage, std::uint32_t a_write, std::uint32_t a_extra, std::uint32_t a_depth,
 			std::uint32_t a_stencil, std::uint32_t a_stencilRef, std::uint32_t a_fill, std::uint32_t a_cull, std::uint32_t a_depthBias, float a_alphaRef,
 			const Family::Viewport& a_viewport, std::int32_t a_target);
