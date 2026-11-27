@@ -15,7 +15,6 @@
 #include "Menu.h"
 #include "Profiler.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
-#include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/Frame/Recipe.h"
 #include "ShaderCache.h"
 #include "Snapshot/Publication.h"
@@ -102,8 +101,8 @@ namespace Testing
 		template <class Filter>
 		std::pair<RE::Actor*, float> NearestActor(std::size_t a_index, Filter&& a_filter)
 		{
-			auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton());
-			auto* lists = CS_ENGINE_READ(Data, RecordTime, RE::ProcessLists::GetSingleton());
+			auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
+			auto* lists = CS_ENGINE_READ(Data, Other, RE::ProcessLists::GetSingleton());
 			if (!player || !lists)
 				return {};
 			std::vector<std::pair<float, RE::Actor*>> actors;
@@ -134,39 +133,13 @@ namespace Testing
 			return position;
 		}
 
-		// The commands' game work, run on the main thread after the frame's jobs (MainTick). There the engine is on one thread and its
-		// serving thread is idle, so a coc shows the loading screen as the console's does. SKSE's tasks run in a frame job
-		// ("Main render end"): a coc there loads the cells inside the frame-job wait, with no loading screen and no Present.
-		struct TaskQueue
-		{
-			std::mutex mutex;
-			std::vector<std::function<void()>> tasks;
-		};
-
-		TaskQueue& Tasks()
-		{
-			static TaskQueue queue;
-			return queue;
-		}
-
+		// The commands' game work runs through the game-thread queue, on the main thread after the frame's jobs (MainTick). There the
+		// engine is on one thread and its serving thread is idle, so a coc shows the loading screen as the console's does. SKSE's
+		// tasks run in a frame job ("Main render end"): a coc there loads the cells inside the frame-job wait, with no loading
+		// screen and no Present.
 		void AddTask(std::function<void()> a_task)
 		{
-			auto& queue = Tasks();
-			std::scoped_lock lock(queue.mutex);
-			queue.tasks.push_back(std::move(a_task));
-		}
-
-		/** @brief Main thread, after the frame's jobs: runs the tasks queued so far. A task that queues more leaves them for the next tick. */
-		void RunTasks()
-		{
-			std::vector<std::function<void()>> tasks;
-			{
-				auto& queue = Tasks();
-				std::scoped_lock lock(queue.mutex);
-				tasks.swap(queue.tasks);
-			}
-			for (auto& task : tasks)
-				task();
+			GameThread::Post("test: a command's game work", std::move(a_task));
 		}
 
 		/**
@@ -535,7 +508,7 @@ namespace Testing
 		{
 			RE::TESWeather* weather = nullptr;
 			std::string known;
-			if (auto* data = CS_ENGINE_READ(Data, RecordTime, RE::TESDataHandler::GetSingleton())) {
+			if (auto* data = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton())) {
 				for (auto* candidate : data->GetFormArray<RE::TESWeather>()) {
 					if (!candidate)
 						continue;
@@ -1038,7 +1011,7 @@ namespace Testing
 			RegisterCommand("cs-ui-expect", [](const std::string& a_arg, std::string& a_error) {
 				auto* editor = EditorWindow::GetSingleton();
 				auto calendar = Util::Climate::GetCalendar();
-				auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
+				auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 				float value = 0.0f;
 				std::string seen;
 				bool holds = false;
@@ -1111,8 +1084,8 @@ namespace Testing
 			// player activates it, so the lockpicking menu opens with its 3D lock (UI3DSceneManager's scheme 7).
 			RegisterCommand("lockpick", [](const std::string&, std::string&) {
 				AddTask([] {
-					auto* player = RE::PlayerCharacter::GetSingleton();
-					auto* tes = RE::TES::GetSingleton();
+					auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
+					auto* tes = CS_ENGINE_READ(TES, Other, RE::TES::GetSingleton());
 					if (!player || !tes)
 						return;
 					RE::TESObjectREFR* nearest = nullptr;
@@ -1157,7 +1130,7 @@ namespace Testing
 				AddTask([id] {
 					RE::TESObjectBOOK* book = id ? RE::TESForm::LookupByID<RE::TESObjectBOOK>(id) : nullptr;
 					if (!id)
-						if (auto* data = RE::TESDataHandler::GetSingleton())
+						if (auto* data = CS_ENGINE_READ(Data, Other, RE::TESDataHandler::GetSingleton()))
 							for (auto* candidate : data->GetFormArray<RE::TESObjectBOOK>())
 								if (candidate && !candidate->TeachesSpell() && !candidate->TeachesSkill() && !candidate->IsNoteScroll() &&
 									IsBookModel(candidate->GetModel())) {
@@ -1445,11 +1418,6 @@ namespace Testing
 		std::call_once(once, RegisterGeneric);
 	}
 
-	bool InstallTaskTick()
-	{
-		return RenderGraph::Engine::MainTick::Add("the test runner's tasks", RunTasks);
-	}
-
 	bool RunCommand(const std::string& a_name, const std::string& a_arg, std::string& a_error)
 	{
 		RegisterGenericCommands();
@@ -1495,7 +1463,7 @@ namespace Testing
 	void TurnPlayer(float a_radians)
 	{
 		AddTask([a_radians] {
-			if (auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()))
+			if (auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton()))
 				player->SetHeading(player->GetAngleZ() + a_radians);
 		});
 	}
@@ -1503,7 +1471,7 @@ namespace Testing
 	void MovePlayer(float a_units)
 	{
 		AddTask([a_units] {
-			if (auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton())) {
+			if (auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton())) {
 				auto position = player->GetPosition();
 				const float heading = player->GetAngleZ();
 				position.x += std::sin(heading) * a_units;

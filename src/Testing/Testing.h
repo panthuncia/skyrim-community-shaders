@@ -35,7 +35,7 @@ namespace Testing
 	/**
 	 * @brief Game side, after every Present's render frame end, on the thread that presented: milestones, the steps and their
 	 * commands, the status file. A Present outside a game update (the main menu, a loading screen's thread) is a game frame of its
-	 * own and runs the steps. Phase 7 calls it at the game thread's publish instead.
+	 * own and runs the steps. A routed update (native) calls it at its publish instead, and its render's Present does not.
 	 */
 	void OnGamePresent();
 
