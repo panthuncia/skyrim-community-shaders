@@ -203,14 +203,6 @@ namespace DCLF
 			const auto adopted = std::static_pointer_cast<const ScenePublication>(IndirectDraws::Get().AdoptedPublication());
 			return adopted ? adopted->sequence : 0;
 		}
-
-		/** @brief Puts a_from's items before a_to's own: a_from is older. */
-		template <class T>
-		void Prepend(std::vector<T>& a_to, std::vector<T>&& a_from)
-		{
-			a_from.insert(a_from.end(), std::make_move_iterator(a_to.begin()), std::make_move_iterator(a_to.end()));
-			a_to = std::move(a_from);
-		}
 	}
 
 	bool FrameDriver::HoldsScene() const
@@ -251,26 +243,14 @@ namespace DCLF
 		++ticketsMade;
 		if (!previous)
 			return;
-		// A ticket no render took retires unused. Its one-shot inputs are the next ticket's, oldest first.
-		if (auto left = previous->TakeOneShot()) {
-			++ticketsUnrendered;
-			auto next = ticket->TakeOneShot();
-			if (!next)
-				next = std::make_unique<FrameTicket::OneShot>();
-			Prepend(next->plans, std::move(left->plans));
-			Prepend(next->shading, std::move(left->shading));
-			Prepend(next->fields, std::move(left->fields));
-			if (left->rootViews && next->rootViews)
-				FrameValues::PrependRootViews(*next->rootViews, std::move(*left->rootViews));
-			else if (left->rootViews)
-				next->rootViews = std::move(left->rootViews);
-			ticket->oneShot.store(next.release(), std::memory_order_release);
-		}
-		// It may hold engine references (plans), so it goes to the engine lane, after the newest frame that may have rendered it.
+		// It may hold engine references (the late-pose plan), so it goes to the engine lane, after the newest frame that may have rendered
+		// it. A ticket no render took retires unused; its sampling job ran all the same.
 		if (std::exchange(ticketRendered, false))
 			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::move(previous));
-		else
+		else {
+			++ticketsUnrendered;
 			Snapshot::Retire::Push(Snapshot::Retire::Lane::Engine, std::move(previous), 0);
+		}
 	}
 
 	std::shared_ptr<const FrameTicket> FrameDriver::GameFrameStart(std::uint64_t a_snapshot)
@@ -369,19 +349,19 @@ namespace DCLF
 		{
 			DCLF_ZONE("CS.DCLF.BF.TakeFrameValueInputs");
 			// The capture reads the shading changes the take empties.
-			auto oneShot = std::make_unique<FrameTicket::OneShot>();
-			oneShot->fields = Extensions::CaptureShadingFields(view);
+			auto fields = Extensions::CaptureShadingFields(view);
 			t->latePlan = LatePoses::PrepareFrame();
-			oneShot->plans = view.TakePlacementPlans();
-			oneShot->shading = view.TakeShadingItems();
+			auto plans = view.TakePlacementPlans();
+			auto shading = view.TakeShadingItems();
 			// First person's rows and palettes must be taken before Main::Draw moves the skeleton into its root's space. Sampled whether
 			// or not this frame's render covers the root views: a render that draws them must find them.
 			bool rootViews = false;
 			for (std::uint32_t i = 0; i < Extensions::Views().rootCount; ++i)
 				rootViews = rootViews || Extensions::ViewRegistered(Extensions::Views().rootViews[i]);
 			const auto claims = rootViews ? view.FrameClaims() : nullptr;
-			oneShot->rootViews = FrameValues::Get().TakeRootViews(oneShot->plans, claims.get());
-			t->oneShot.store(oneShot.release(), std::memory_order_release);
+			auto samples = FrameValues::Get().TakeRootViews(plans, claims.get());
+			// The ticket's sampling job, rendered or not. Every render's upload job comes after it on the frame values' chain.
+			FrameValues::Get().KickSample(std::move(plans), std::move(shading), std::move(fields), t->globals, std::move(samples));
 		}
 		// The features' values the render half reads instead of the engine.
 		for (std::size_t part = 0; part < kTicketParts; ++part)
@@ -476,11 +456,8 @@ namespace DCLF
 			// Producers' uploads may only wait for CPU frames signalled before the last present.
 			::RenderGraph::Frame::Retirement::SealCpuFrames();
 			FrameValues::Get().SetLatePoses(t.latePlan);
-			// The ticket's one-shot inputs go to its first render's producer. A repeated render's producer has none.
-			auto oneShot = first ? t.TakeOneShot() : nullptr;
-			if (!oneShot)
-				oneShot = std::make_unique<FrameTicket::OneShot>();
-			(void)FrameValues::Get().Kick(std::move(oneShot->plans), std::move(oneShot->shading), std::move(oneShot->fields), t.globals, std::move(oneShot->rootViews));
+			// The render's upload of what the ticket's sampling job (and any before it) left. A repeated render uploads again.
+			(void)FrameValues::Get().Kick(t.globals);
 		}
 		{
 			DCLF_ZONE("CS.DCLF.BF.MakeFramePayload");

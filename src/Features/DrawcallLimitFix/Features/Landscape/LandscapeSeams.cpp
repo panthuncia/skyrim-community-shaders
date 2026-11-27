@@ -278,7 +278,7 @@ namespace DCLF::Features::Landscape
 		// The producers run one at a time in frame order.
 		KeptWholeArray<QuadData> producedQuads;
 
-		// Render thread, at Kick, after this frame's capture: every row made since the last kick.
+		// Game half, at the sampling kick, after this frame's capture: every row made since the last kick.
 		Api::FrameValueInput KickQuads(const Api::FrameValuePoolKick&)
 		{
 			const auto count = static_cast<std::uint32_t>(table.rows.size());

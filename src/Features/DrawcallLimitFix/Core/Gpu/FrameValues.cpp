@@ -366,7 +366,9 @@ namespace DCLF
 		{
 			const Extensions::FrameValuePoolEntry* entry = nullptr;
 			Pool pool;
-			std::uint64_t needed = 0;
+			// The rows its backing must hold: a game-side pool's kicks raise it in the game half, the render reads it at its lease.
+			std::atomic<std::uint64_t> needed{ 0 };
+			std::optional<std::uint64_t> sampleFloor;  // chain: the floor a game-side sample opens its build at
 		};
 
 		// Render thread.
@@ -474,9 +476,22 @@ namespace DCLF
 		}
 		~Impl() { (void)TakeRefusedShading(); }
 		std::vector<ShadingFieldValue> unsampledFieldValues;
+		// By sampling job: the plans it applies, held until it is done. Game half.
 		std::deque<std::pair<std::uint64_t, std::shared_ptr<const Plan>>> plans;
+		// The render's upload job: its sequence is the GPU's frame wait value. Render thread.
 		std::uint64_t seq = 0;
 		bool kicked = false;
+		// The sampling jobs, one per ticket. Game half.
+		std::uint64_t sampleSeq = 0;
+		std::atomic<std::uint64_t> sampleKicked{ 0 };
+		// Sampling and upload jobs run one at a time in kick order on one chain, so the kept rows need no lock.
+		std::atomic<std::uint64_t> chainKicked{ 0 }, chainDone{ 0 };
+		// The rows the built-in backings must hold, raised by each sampling kick. The kept arrays never shrink, so neither do these.
+		std::array<std::atomic<std::uint64_t>, kBuiltInPools> neededRows{};
+		// Chain: the floors the last upload leased at, which the next sampling jobs open their builds at. Floors only rise, so an older one
+		// trims less and stays safe.
+		std::array<std::optional<std::uint64_t>, kBuiltInPools> sampleFloors;
+		std::uint64_t pendingSampleUs = 0;  // chain: the sampling time since the last upload
 		bool unavailableLogged = false;
 
 		KeptWholeArray<BindlessPlacement> rows;
@@ -579,7 +594,9 @@ namespace DCLF
 
 		struct Job
 		{
-			std::uint64_t seq = 0;
+			bool upload = false;      // the render's upload job, else a ticket's sampling job
+			std::uint64_t chain = 0;  // its place on the chain
+			std::uint64_t seq = 0;    // the upload's frame wait value, or the sampling job's own sequence
 			const Plan* plan = nullptr;
 			std::uint64_t planSerial = 0;
 			std::vector<const Plan*> written;
@@ -724,12 +741,15 @@ namespace DCLF
 		std::uint64_t LeasePool(Pool& a_pool, std::string_view a_name, std::uint32_t a_stride, org::services::BackingFlags a_flags, std::uint64_t a_needed, org::services::BackingLease& a_frameLease,
 			org::services::BackingLease& a_jobLease, std::optional<std::uint64_t>& a_oldestContentEpoch, bool a_fresh = false);
 		void MakeRegistered();
-		void KickRegistered(Job& a_job, const FrameGlobals* a_globals);
+		void KickRegistered(Job& a_job, const FrameGlobals* a_globals, bool a_perRender);
 		void SampleRootViews(const std::vector<std::shared_ptr<const Plan>>& a_plans, const SetSnapshot& a_claims, std::vector<RootViewSample>& a_out);
-		void Run(const Job& a_job);
+		void WaitTurn(std::uint64_t a_chain);
+		void EndTurn(std::uint64_t a_chain);
+		void RunSample(Job& a_job);
+		void RunUpload(Job& a_job);
 		void Sample(const Job& a_job);
 		void ApplyPlans(const Job& a_job);
-		void TrackSpheres(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
+		void TrackSpheres(std::uint64_t a_seq, const std::vector<BindlessPlacement>& a_out);
 		void PostSnapshotSpheres(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
 		static void StoreLiveSpheres(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
 		void StoreForwardRows(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
@@ -740,8 +760,14 @@ namespace DCLF
 		void MarkRoot(std::uint32_t a_root);
 		void MarkDue(const Job& a_job);
 		void SampleShadingRows(const Job& a_job, std::size_t a_slots);
+		enum class Pools
+		{
+			GameSide,
+			RenderSide,
+			All
+		};
 		template <class Call>
-		void ForEachRegistered(const Job& a_job, Call&& a_call);
+		void ForEachRegistered(const Job& a_job, Pools a_pools, Call&& a_call);
 		void Upload(const Job& a_job);
 		template <class T>
 		void Send(const Job& a_job, Part a_part, const KeptWholeArray<T>& a_rows);
@@ -758,13 +784,51 @@ namespace DCLF
 		}
 	};
 
-	void FrameValues::Impl::Run(const Job& a_job)
+	void FrameValues::Impl::WaitTurn(std::uint64_t a_chain)
+	{
+		// One job at a time, in kick order. Each builds on the rows the previous one left, and upload signals rise monotonically.
+		for (auto finished = chainDone.load(std::memory_order_acquire); finished + 1 < a_chain; finished = chainDone.load(std::memory_order_acquire))
+			chainDone.wait(finished, std::memory_order_acquire);
+	}
+
+	void FrameValues::Impl::EndTurn(std::uint64_t a_chain)
+	{
+		chainDone.store(a_chain, std::memory_order_release);
+		chainDone.notify_all();
+	}
+
+	void FrameValues::Impl::RunSample(Job& a_job)
+	{
+		DCLF_ZONE("CS.DCLF.FrameValues.SampleJob");
+		WaitTurn(a_job.chain);
+		pendingFieldValues.insert(pendingFieldValues.end(), a_job.fieldValues.begin(), a_job.fieldValues.end());
+		// The builds open at the floors the last upload leased at.
+		a_job.oldestContentEpochs = sampleFloors;
+		for (std::size_t i = 0; i < a_job.registered.size(); ++i)
+			a_job.registered[i].oldestContentEpoch = registered[i].sampleFloor;
+		const auto start = std::chrono::steady_clock::now();
+		try {
+			Sample(a_job);
+		} catch (const std::exception& e) {
+			if (failures++ == 0)
+				logger::error("[DCLF] frame values' sampling {} failed: {}; the next upload sends the rows as they are", a_job.seq, e.what());
+		}
+		MarkSampled(a_job.seq);
+		const auto us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+		sampleUs += us;
+		pendingSampleUs += us;
+		EndTurn(a_job.chain);
+	}
+
+	void FrameValues::Impl::RunUpload(Job& a_job)
 	{
 		DCLF_ZONE("CS.DCLF.FrameValues");
-		// One producer at a time, in order. Each builds on the previous one's rows, and signals must rise monotonically.
-		for (auto finished = done.load(std::memory_order_acquire); finished + 1 < a_job.seq; finished = done.load(std::memory_order_acquire))
-			done.wait(finished, std::memory_order_acquire);
-		pendingFieldValues.insert(pendingFieldValues.end(), a_job.fieldValues.begin(), a_job.fieldValues.end());
+		WaitTurn(a_job.chain);
+		// It reads only sampled rows and render-side state: a lease asked for here is counted as a defect.
+		const EngineReadWindow::RenderSideJob renderSide;
+		sampleFloors = a_job.oldestContentEpochs;
+		for (std::size_t i = 0; i < a_job.registered.size(); ++i)
+			registered[i].sampleFloor = a_job.registered[i].oldestContentEpoch;
 		std::erase_if(backingFieldOwners, [](const auto& entry) { return entry.second.backing.expired(); });
 		// A backing the pool stopped handing out is nobody's fallback, so release its descriptors' imports now.
 		for (auto& [generation, entry] : backingFieldOwners)
@@ -773,36 +837,44 @@ namespace DCLF
 		if (const auto previous = backingFieldOwners.find(a_job.leases[kShading]->generation); previous != backingFieldOwners.end())
 			a_job.fieldResources->push_back(previous->second.resources);
 		const auto start = std::chrono::steady_clock::now();
-		bool marked = false;
 		try {
-			Sample(a_job);
-			MarkSampled(a_job.seq);
-			marked = true;
+			// The late copies' rows of the last upload go back to the plain rows in every backing that held them.
+			MarkLateDirty();
+			const auto& out = rows.Get();
+			StoreLiveSpheres(a_job, out);
+			StoreForwardRows(a_job, out);
+			PostSnapshotSpheres(a_job, out);
+			{
+				DCLF_ZONE("CS.DCLF.FV.S.OnSampled");
+				Direct::OnFrameValuesSampled(a_job.seq, std::span<const BindlessPlacement>(out));
+			}
+			{
+				DCLF_ZONE("CS.DCLF.FV.S.RenderSidePools");
+				ForEachRegistered(a_job, Pools::RenderSide, [](const Extensions::FrameValuePoolEntry& a_entry, Api::FrameValuePoolProducer& a_producer) { a_entry.sample(a_producer); });
+			}
 			if (a_job.latePlan)
 				BuildLateRows(a_job);
-			const auto sampledAt = std::chrono::steady_clock::now();
-			sampleUs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(sampledAt - start).count());
 			// Uploads into reused copies wait on the GPU, not here. Resolve waits for the submission thread to pass the point.
 			const auto writeAfter = a_job.writeAfter.Resolve();
 			if (!writeAfter.empty() && !a_job.uploads->QueueStreamingWait(writeAfter))
 				throw std::runtime_error("the dedicated uploader cannot wait for the frame its copies were bound to");
 			Upload(a_job);
-			uploadUs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - sampledAt).count());
+			uploadUs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
 		} catch (const std::exception& e) {
 			if (failures++ == 0)
 				logger::error("[DCLF] frame values {} failed: {}; the frame draws the rows its buffers held", a_job.seq, e.what());
 		}
-		if (!marked)
-			MarkSampled(a_job.seq);
 		// Always signal. Every batch of the frame waits for it.
 		signal = a_job.uploads ? a_job.uploads->QueueStreamingSignal(a_job.timeline, a_job.seq) : nullptr;
 		if (!signal)
 			::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("frame values {} could not signal the frame's wait; the GPU would wait for it forever", a_job.seq));
-		const auto total = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+		const auto total = std::exchange(pendingSampleUs, 0) +
+		                   static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
 		for (auto max = maxTotalUs.load(std::memory_order_relaxed); total > max && !maxTotalUs.compare_exchange_weak(max, total, std::memory_order_relaxed);) {}
 		++frames;
 		done.store(a_job.seq, std::memory_order_release);
 		done.notify_all();
+		EndTurn(a_job.chain);
 	}
 
 	namespace
@@ -1234,7 +1306,6 @@ namespace DCLF
 			paletteOut.resize(paletteRows, PaletteRow{});
 			palettes.MarkRange(first, paletteRows - first);
 		}
-		MarkLateDirty();
 		TracyCZoneEnd(sBegin);
 		MarkDue(a_job);
 		TracyCZoneN(sList, "CS.DCLF.FV.S.ListItems", true);
@@ -1304,7 +1375,8 @@ namespace DCLF
 		rootsDue += dueRoots.size();
 		if (const auto refusals = refusedHere.load())
 			refused += refusals;
-		TrackSpheres(a_job, out);
+		// Sampled for the next upload: done holds the last upload's sequence.
+		TrackSpheres(done.load(std::memory_order_acquire) + 1, out);
 		for (const auto slot : listedSlots)
 			listed[slot] = 0;
 		for (const auto block : listedBlocks)
@@ -1313,19 +1385,11 @@ namespace DCLF
 		listedBlocks.clear();
 		TracyCZoneEnd(sMarked);
 		SampleShadingRows(a_job, a_job.shadingSlots);
-		// The rows are final from here, since registered pools write none.
-		StoreLiveSpheres(a_job, out);
-		StoreForwardRows(a_job, out);
-		PostSnapshotSpheres(a_job, out);
-		{
-			DCLF_ZONE("CS.DCLF.FV.S.OnSampled");
-			Direct::OnFrameValuesSampled(a_job.seq, std::span<const BindlessPlacement>(out));
-		}
 		DCLF_ZONE_NAMED(sRegistered, "CS.DCLF.FV.S.Registered", true);
-		ForEachRegistered(a_job, [](const Extensions::FrameValuePoolEntry& a_entry, Api::FrameValuePoolProducer& a_producer) { a_entry.sample(a_producer); });
+		ForEachRegistered(a_job, Pools::GameSide, [](const Extensions::FrameValuePoolEntry& a_entry, Api::FrameValuePoolProducer& a_producer) { a_entry.sample(a_producer); });
 	}
 
-	void FrameValues::Impl::TrackSpheres(const Job& a_job, const std::vector<BindlessPlacement>& a_out)
+	void FrameValues::Impl::TrackSpheres(std::uint64_t a_seq, const std::vector<BindlessPlacement>& a_out)
 	{
 		// Only slots sampled this frame can have moved their bound.
 		if (lastSphere.size() < a_out.size()) {
@@ -1339,7 +1403,7 @@ namespace DCLF
 			auto& last = lastSphere[slot];
 			if (std::memcmp(last.data(), bound, sizeof(bound)) != 0) {
 				std::memcpy(last.data(), bound, sizeof(bound));
-				sphereSeq[slot] = a_job.seq;
+				sphereSeq[slot] = a_seq;
 			}
 		}
 	}
@@ -2091,7 +2155,7 @@ namespace DCLF
 	}
 
 	template <class Call>
-	void FrameValues::Impl::ForEachRegistered(const Job& a_job, Call&& a_call)
+	void FrameValues::Impl::ForEachRegistered(const Job& a_job, Pools a_pools, Call&& a_call)
 	{
 		struct Owner
 		{
@@ -2104,13 +2168,16 @@ namespace DCLF
 			impl.SendRows(job.registered[a_pool].lease, impl.registered[a_pool].pool, impl.registered[a_pool].entry->name, job, a_count, a_contentEpoch, a_view, a_emit);
 		};
 		for (std::size_t i = 0; i < a_job.registered.size(); ++i) {
+			const bool perRender = registered[i].entry->perRender;
+			if ((a_pools == Pools::GameSide && perRender) || (a_pools == Pools::RenderSide && !perRender))
+				continue;
 			const auto& part = a_job.registered[i];
 			Api::FrameValuePoolProducer producer;
 			producer.seq = a_job.seq;
 			producer.globals = a_job.globals.get();
 			producer.input = &part.input;
 			producer.oldestContentEpoch = part.oldestContentEpoch;
-			producer.kickedSeq = &kickedSeq;
+			producer.kickedSeq = a_job.upload ? &kickedSeq : &sampleKicked;
 			producer.send = send;
 			producer.owner = &owner;
 			producer.pool = i;
@@ -2167,7 +2234,7 @@ namespace DCLF
 			backingFieldOwners[a_job.leases[kShading]->generation] = { a_job.leases[kShading].Get(), std::move(owners), a_job.seq };
 		}
 		// Tracy zone names are static, so the pool's name goes in the zone text.
-		ForEachRegistered(a_job, [](const Extensions::FrameValuePoolEntry& a_entry, Api::FrameValuePoolProducer& a_producer) {
+		ForEachRegistered(a_job, Pools::All, [](const Extensions::FrameValuePoolEntry& a_entry, Api::FrameValuePoolProducer& a_producer) {
 			DCLF_ZONE("CS.DCLF.FrameValues.Send.Registered");
 			ZoneText(a_entry.name.data(), a_entry.name.size());
 			a_entry.send(a_producer);
@@ -2242,7 +2309,8 @@ namespace DCLF
 
 	void FrameValues::Impl::LeaseBackings(Job& a_job)
 	{
-		const std::array<std::uint64_t, kBuiltInPools> needed{ plan ? plan->slots : 0u, plan ? 2ull * plan->boneCapacity : 0u, a_job.shadingSlots };
+		const std::array<std::uint64_t, kBuiltInPools> needed{ neededRows[kPlacements].load(std::memory_order_acquire), neededRows[kPalettes].load(std::memory_order_acquire),
+			neededRows[kShading].load(std::memory_order_acquire) };
 		// Each lease, so the ones bound to work the job may not wait for can be leased again fresh.
 		const auto leaseAll = [&](bool a_freshIfBound, std::uint64_t a_completed) {
 			std::uint64_t writeAfter = 0;
@@ -2267,7 +2335,8 @@ namespace DCLF
 			for (std::size_t i = 0; i < a_job.registered.size(); ++i) {
 				auto& entry = registered[i];
 				auto& part = a_job.registered[i];
-				lease(entry.pool, entry.entry->name, entry.entry->stride, { .unorderedAccess = entry.entry->unorderedAccess, .deviceAddress = entry.entry->deviceAddress }, entry.needed,
+				lease(entry.pool, entry.entry->name, entry.entry->stride, { .unorderedAccess = entry.entry->unorderedAccess, .deviceAddress = entry.entry->deviceAddress },
+					entry.needed.load(std::memory_order_acquire),
 					registeredFrameLeases[i], part.lease, part.oldestContentEpoch);
 			}
 			return writeAfter;
@@ -2363,16 +2432,23 @@ namespace DCLF
 		registeredMade.store(entries.size(), std::memory_order_release);
 	}
 
-	void FrameValues::Impl::KickRegistered(Job& a_job, const FrameGlobals* a_globals)
+	void FrameValues::Impl::KickRegistered(Job& a_job, const FrameGlobals* a_globals, bool a_perRender)
 	{
 		MakeRegistered();
 		const std::size_t count = registeredMade.load(std::memory_order_relaxed);
 		a_job.registered.resize(count);
 		const Api::FrameValuePoolKick kick{ a_job.seq, a_globals, a_job.shadingSlots };
 		for (std::size_t i = 0; i < count; ++i) {
+			if (registered[i].entry->perRender != a_perRender)
+				continue;
 			auto input = registered[i].entry->kick(kick);
 			a_job.registered[i].input = std::move(input.input);
-			registered[i].needed = input.rows;
+			// A game-side pool's sampling jobs may outnumber the uploads, so its backing holds the most any of them asked for.
+			auto& needed = registered[i].needed;
+			if (a_perRender)
+				needed.store(input.rows, std::memory_order_release);
+			else
+				for (auto held = needed.load(std::memory_order_relaxed); input.rows > held && !needed.compare_exchange_weak(held, input.rows, std::memory_order_acq_rel);) {}
 		}
 	}
 
@@ -2430,14 +2506,92 @@ namespace DCLF
 		return views;
 	}
 
-	void FrameValues::PrependRootViews(RootViews& a_to, RootViews&& a_older)
+	void FrameValues::KickSample(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
+		std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals, std::shared_ptr<RootViews> a_rootViews)
 	{
-		a_older.samples.insert(a_older.samples.end(), std::make_move_iterator(a_to.samples.begin()), std::make_move_iterator(a_to.samples.end()));
-		a_to.samples = std::move(a_older.samples);
+		auto& s = *impl;
+		TracyCZoneN(kStart, "CS.DCLF.FV.K.FrameStartRegistered", true);
+		// Runs whether or not the ticket has a sampling job.
+		Impl::FrameStartRegistered(a_globals);
+		TracyCZoneEnd(kStart);
+		TracyCZoneN(kPlans, "CS.DCLF.FV.K.Plans", true);
+		// Refused items first since they are oldest, then untaken ones, then this ticket's.
+		if (auto refused = s.TakeRefusedShading(); !refused.empty())
+			s.unsampledShading.insert(s.unsampledShading.begin(), std::make_move_iterator(refused.begin()), std::make_move_iterator(refused.end()));
+		s.unsampledShading.insert(s.unsampledShading.end(), std::make_move_iterator(a_shading.begin()), std::make_move_iterator(a_shading.end()));
+		s.unsampledFieldValues.insert(s.unsampledFieldValues.end(), a_fieldValues.begin(), a_fieldValues.end());
+		s.QueuePlans(a_plans);
+		TracyCZoneEnd(kPlans);
+		// Startup tickets come before the upload queue exists, so their inputs wait for the first sampling job.
+		if (!Available())
+			return;
+		TracyCZoneN(kJob, "CS.DCLF.FV.K.SampleJob", true);
+		// Plans hold engine references, so they are released here, in the game half, once their job is done.
+		const auto sampled = s.sampledSeq.load(std::memory_order_acquire);
+		while (!s.plans.empty() && s.plans.front().first <= sampled)
+			s.plans.pop_front();
+		static const Plan kEmpty{};
+		const std::uint64_t seq = ++s.sampleSeq;
+		s.sampleKicked.store(seq, std::memory_order_release);
+		Impl::Job job;
+		job.seq = seq;
+		job.plan = s.plan ? s.plan.get() : &kEmpty;
+		job.planSerial = s.plan ? s.planSerial : 0;
+		// Held until the job is done.
+		for (auto& unsampled : s.unsampled) {
+			job.written.push_back(unsampled.get());
+			s.plans.emplace_back(seq, std::move(unsampled));
+		}
+		s.unsampled.clear();
+		job.shadingItems = std::exchange(s.unsampledShading, {});
+		job.fieldValues = std::exchange(s.unsampledFieldValues, {});
+		job.shadingSlots = job.plan->slots;
+		for (const auto& item : job.shadingItems)
+			if (item.slot != kNoObjectSlot)
+				job.shadingSlots = std::max<std::size_t>(job.shadingSlots, std::size_t(item.slot) + 1);
+		for (const auto& value : job.fieldValues)
+			if (value.slot != kNoObjectSlot)
+				job.shadingSlots = std::max<std::size_t>(job.shadingSlots, std::size_t(value.slot) + 1);
+		job.globals = a_globals;
+		// The rows the arrays will hold, before the job takes its place on the chain: an upload kicked after it leases for them.
+		const std::array<std::uint64_t, kBuiltInPools> rowsAsked{ job.plan->slots, 2ull * job.plan->boneCapacity, job.shadingSlots };
+		for (std::size_t part = 0; part < kBuiltInPools; ++part)
+			for (auto held = s.neededRows[part].load(std::memory_order_relaxed);
+				rowsAsked[part] > held && !s.neededRows[part].compare_exchange_weak(held, rowsAsked[part], std::memory_order_acq_rel);) {}
+		TracyCZoneEnd(kJob);
+		TracyCZoneN(kReg, "CS.DCLF.FV.K.KickRegistered", true);
+		s.KickRegistered(job, a_globals.get(), false);
+		TracyCZoneEnd(kReg);
+		TracyCZoneN(kRoot, "CS.DCLF.FV.K.PaletteKicksAndRootViews", true);
+		for (std::size_t c = 0; c < job.paletteInputs.size(); ++c)
+			if (const auto* entry = Extensions::PaletteRows(static_cast<Api::FrameValueItemClass>(c + 1)); entry && entry->contribution.kick)
+				entry->contribution.kick({ seq, job.paletteInputs[c] });
+		// The first-person members the game half sampled before Main::Draw's first-person shift (FUN_1414cb020).
+		if (a_rootViews)
+			job.rootViewSamples = std::move(a_rootViews->samples);
+		TracyCZoneEnd(kRoot);
+		if (s.plan)
+			s.plans.emplace_back(seq, s.plan);
+		job.chain = s.chainKicked.fetch_add(1, std::memory_order_acq_rel) + 1;
+		DCLF_ZONE("CS.DCLF.FV.K.DispatchSample");
+		if (!::RenderGraph::Frame::SharedExecutor().DispatchFrameCritical(SceneScheduler::Scope(), "frame values sampling", [&s, job = std::move(job)](const auto&) mutable {
+				s.RunSample(job);
+				if (!job.refusedShading.empty()) {
+					std::vector<ShadingItem> refused;
+					refused.reserve(job.refusedShading.size());
+					for (const auto i : job.refusedShading)
+						refused.push_back(std::move(job.shadingItems[i]));
+					s.PushRefusedShading(std::move(refused));
+				}
+				// Engine references go to the render thread, never dropped on this worker.
+				for (auto& item : job.shadingItems)
+					if (item.property)  // a refused item's went back with it
+						EngineReleases::Push(RE::NiPointer<RE::NiRefObject>(std::move(item.property)));
+			}))
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the frame values' sampling was refused by DCLF's executor");
 	}
 
-	bool FrameValues::Kick(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
-		std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals, std::shared_ptr<RootViews> a_rootViews)
+	bool FrameValues::Kick(std::shared_ptr<const FrameGlobals> a_globals)
 	{
 		auto& s = *impl;
 		s.kicked = false;
@@ -2447,22 +2601,10 @@ namespace DCLF
 		s.ReleaseLatePoses();
 		s.RetireFieldOwners();
 		TracyCZoneEnd(kBind);
-		TracyCZoneN(kStart, "CS.DCLF.FV.K.FrameStartRegistered", true);
-		// Runs whether or not the frame has a producer.
-		Impl::FrameStartRegistered(a_globals);
-		TracyCZoneEnd(kStart);
-		TracyCZoneN(kPlans, "CS.DCLF.FV.K.Plans", true);
-		// Refused items first since they are oldest, then untaken ones, then this frame's.
-		if (auto refused = s.TakeRefusedShading(); !refused.empty())
-			s.unsampledShading.insert(s.unsampledShading.begin(), std::make_move_iterator(refused.begin()), std::make_move_iterator(refused.end()));
-		s.unsampledShading.insert(s.unsampledShading.end(), std::make_move_iterator(a_shading.begin()), std::make_move_iterator(a_shading.end()));
-		s.unsampledFieldValues.insert(s.unsampledFieldValues.end(), a_fieldValues.begin(), a_fieldValues.end());
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto timeline = RenderGraphRuntime::Get().FrameWaitTimeline();
 		auto uploads = host ? host->RetainUploads() : nullptr;
 		if (!host || !timeline || !uploads || !uploads->HasDedicatedStreamingQueue()) {
-			// Startup frames come before the upload queue exists, so plans wait for the first producer.
-			s.QueuePlans(a_plans);
 			if (host)
 				host->SetFrameWaitValue(0);
 			// With no backing leased, no index can name a backing the pool may release.
@@ -2475,61 +2617,31 @@ namespace DCLF
 			}
 			return false;
 		}
-		s.QueuePlans(a_plans);
-		TracyCZoneEnd(kPlans);
 		TracyCZoneN(kJob, "CS.DCLF.FV.K.Job", true);
-		// Plans hold engine references, so release them here on the render thread.
-		const auto finished = s.done.load(std::memory_order_acquire);
-		while (!s.plans.empty() && s.plans.front().first <= finished)
-			s.plans.pop_front();
-		static const Plan kEmpty{};
 		const std::uint64_t seq = ++s.seq;
 		s.kickedSeq.store(seq, std::memory_order_release);
 		Impl::Job job;
+		job.upload = true;
 		job.seq = seq;
-		job.plan = s.plan ? s.plan.get() : &kEmpty;
-		job.planSerial = s.plan ? s.planSerial : 0;
-		// Held until the producer is done.
-		for (auto& unsampled : s.unsampled) {
-			job.written.push_back(unsampled.get());
-			s.plans.emplace_back(seq, std::move(unsampled));
-		}
-		s.unsampled.clear();
-		job.shadingItems = std::exchange(s.unsampledShading, {});
-		job.fieldValues = std::exchange(s.unsampledFieldValues, {});
+		// Its place on the chain before the rows it leases for: every sampling job before it has raised them.
+		job.chain = s.chainKicked.fetch_add(1, std::memory_order_acq_rel) + 1;
 		job.fieldResources = s.frameFieldOwners = std::make_shared<Impl::ResourceOwners>();
-		job.shadingSlots = job.plan->slots;
-		for (const auto& item : job.shadingItems)
-			if (item.slot != kNoObjectSlot)
-				job.shadingSlots = std::max<std::size_t>(job.shadingSlots, std::size_t(item.slot) + 1);
-		for (const auto& value : job.fieldValues)
-			if (value.slot != kNoObjectSlot)
-				job.shadingSlots = std::max<std::size_t>(job.shadingSlots, std::size_t(value.slot) + 1);
+		job.shadingSlots = s.neededRows[Impl::kShading].load(std::memory_order_acquire);
 		job.globals = a_globals;
 		job.viewBatches = viewBatches;
 		job.forwardRows = std::exchange(forwardRows, nullptr);
 		TracyCZoneEnd(kJob);
 		TracyCZoneN(kReg, "CS.DCLF.FV.K.KickRegistered", true);
-		s.KickRegistered(job, a_globals.get());
+		s.KickRegistered(job, a_globals.get(), true);
 		TracyCZoneEnd(kReg);
 		TracyCZoneN(kLease, "CS.DCLF.FV.K.LeaseBackings", true);
-		// The floor, the oldest content in circulation, is what the producer's journal keeps.
+		// The floor, the oldest content in circulation, is what the journals keep.
 		s.LeaseBackings(job);
 		job.latePlan = std::move(s.late.plan);
 		job.lateLeases = std::move(s.late.jobLeases);
 		TracyCZoneEnd(kLease);
-		TracyCZoneN(kRoot, "CS.DCLF.FV.K.PaletteKicksAndRootViews", true);
 		job.timeline = std::move(timeline);
 		job.uploads = std::move(uploads);
-		for (std::size_t c = 0; c < job.paletteInputs.size(); ++c)
-			if (const auto* entry = Extensions::PaletteRows(static_cast<Api::FrameValueItemClass>(c + 1)); entry && entry->contribution.kick)
-				entry->contribution.kick({ seq, job.paletteInputs[c] });
-		// The first-person members the game half sampled before Main::Draw's first-person shift (FUN_1414cb020).
-		if (a_rootViews)
-			job.rootViewSamples = std::move(a_rootViews->samples);
-		TracyCZoneEnd(kRoot);
-		if (s.plan)
-			s.plans.emplace_back(seq, s.plan);
 		DCLF_ZONE("CS.DCLF.FV.K.Dispatch");
 		frameIndex = s.frameLeases[Impl::kPlacements]->srvIndex;
 		paletteIndex = s.frameLeases[Impl::kPalettes]->srvIndex;
@@ -2540,28 +2652,15 @@ namespace DCLF
 			s.PublishFrameVersion(i, s.frameLeases[i]);
 		for (std::size_t i = 0; i < s.registeredFrameLeases.size(); ++i)
 			s.PublishFrameVersion(s.frameLeases.size() + i, s.registeredFrameLeases[i]);
-		// Batches submitted from here wait for the frame's values. The producer always signals.
+		// Batches submitted from here wait for the frame's values. The upload job always signals.
 		host->SetFrameWaitValue(seq);
 		s.kicked = true;
-		if (!::RenderGraph::Frame::SharedExecutor().DispatchFrameCritical(SceneScheduler::Scope(),
-				"frame values", [&s, job = std::move(job)](const auto&) mutable {
-					const EngineReadWindow::RenderSideJob renderSide;
-					s.Run(job);
-					if (!job.refusedShading.empty()) {
-						std::vector<ShadingItem> refused;
-						refused.reserve(job.refusedShading.size());
-						for (const auto i : job.refusedShading)
-							refused.push_back(std::move(job.shadingItems[i]));
-						s.PushRefusedShading(std::move(refused));
-					}
-					job.leases = {};
-					for (auto& part : job.registered)
-						part.lease = org::services::BackingLease{};
-					// Engine references go to the render thread, never dropped on this worker.
-					for (auto& item : job.shadingItems)
-						if (item.property)  // a refused item's went back with it
-							EngineReleases::Push(RE::NiPointer<RE::NiRefObject>(std::move(item.property)));
-				}))
+		if (!::RenderGraph::Frame::SharedExecutor().DispatchFrameCritical(SceneScheduler::Scope(), "frame values", [&s, job = std::move(job)](const auto&) mutable {
+				s.RunUpload(job);
+				job.leases = {};
+				for (auto& part : job.registered)
+					part.lease = org::services::BackingLease{};
+			}))
 			::RenderGraph::Fatal("Drawcall Limit Fix", "the frame values' producer was refused by DCLF's executor");
 		return true;
 	}
@@ -2713,7 +2812,7 @@ namespace DCLF
 	void FrameValues::WaitSampled() const
 	{
 		auto& s = *impl;
-		const auto kicked = s.kickedSeq.load(std::memory_order_acquire);
+		const auto kicked = s.sampleKicked.load(std::memory_order_acquire);
 		for (auto sampled = s.sampledSeq.load(std::memory_order_acquire); sampled < kicked; sampled = s.sampledSeq.load(std::memory_order_acquire))
 			s.sampledSeq.wait(sampled, std::memory_order_acquire);
 	}

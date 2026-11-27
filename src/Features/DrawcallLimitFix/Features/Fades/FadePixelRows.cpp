@@ -185,8 +185,10 @@ namespace DCLF::Features::Fades
 	{
 		pixelRowsPool = a_context.RegisterFrameValuePool({ .name = "pixel-rows", .stride = Draws::kPixelObjectRowBytes, .deviceAddress = true,
 			.unorderedAccess = true,  // without it, a buffer view ref's UAV is a null view on D3D12
+			.perRender = true,        // the render's object rows, read on the render thread
 			.kick = &PixelRowsKick,
-			.sample = &PixelRowsSample, .send = &PixelRowsSend });
+			.sample = &PixelRowsSample,
+			.send = &PixelRowsSend });
 		a_context.RegisterFrameBinding({ .name = "object rows SRV", .textureRegister = kPixelObjectsRegister, .select = &SelectPixelRowsBinding });
 		a_context.RegisterPass({ .key = "fades.pixel-rows", .passName = "cs.dclf.z.pixel-rows", .make = &MakePixelRows, .setup = &PixelRowsSetup,
 			.frameRows = &PixelFrameRows, .cpuPipeline = true });

@@ -423,7 +423,7 @@ namespace DCLF::Integrations::AdvancedSkin
 		// The producers run one at a time in frame order.
 		KeptWholeArray<MaterialRow> producedRows;
 
-		// Render thread, at Kick, after this frame's capture: every row made since the last kick.
+		// Game half, at the sampling kick, after this frame's capture: every row made since the last kick.
 		Api::FrameValueInput KickMaterials(const Api::FrameValuePoolKick&)
 		{
 			DCLF_ZONE("CS.DCLF.FV.Kick.SkinMaterials");

@@ -66,7 +66,7 @@ namespace DCLF::Features::TreeWind
 			std::uint32_t rows = 0;
 		};
 
-		// Render thread: seeds no kick handed over yet, and the most rows named. The rows never shrink.
+		// Game half: seeds no kick handed over yet, and the most rows named. The rows never shrink.
 		std::vector<std::pair<std::uint32_t, TreeStatic>> unsent;
 		std::uint32_t seedRows = 0;
 		std::shared_ptr<const SeedInput> idle;
@@ -74,7 +74,7 @@ namespace DCLF::Features::TreeWind
 		// The producers run one at a time in frame order.
 		KeptWholeArray<TreeStatic> seeds;
 
-		// Render thread, every frame's start: the seeds the installed publications asked for (the component's listings: FrameView).
+		// Game half, every ticket's start: the seeds the installed publications asked for (the component's listings: FrameView).
 		void FrameStart(const Api::FrameValuePoolFrameStart& a_start)
 		{
 			FrameGlobals::Scope scope(a_start.globals);
@@ -91,7 +91,7 @@ namespace DCLF::Features::TreeWind
 			}
 		}
 
-		// Render thread, at Kick: every seed read since the last kick, for the frame's producer.
+		// Game half, at the sampling kick: every seed read since the last kick, for its sampling job.
 		Api::FrameValueInput Kick(const Api::FrameValuePoolKick&)
 		{
 			DCLF_ZONE("CS.DCLF.FV.Kick.TreeSeeds");

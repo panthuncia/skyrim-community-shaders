@@ -50,10 +50,12 @@ namespace DCLF
 	/**
 	 * @brief Makes the per-frame values a frame's draws read: placements, skin palettes and shading rows.
 	 *
-	 * Each frame the render thread kicks one producer on DCLF's pool. Producers run one after another. Each applies the new placement
-	 * plans to the set it keeps, samples only what moved under engine-read leases, and uploads the changed rows on the dedicated
-	 * upload queue. It then signals the frame-wait timeline, always, even after a failure. The GPU waits for that signal and the
-	 * render thread never does.
+	 * Two kinds of job run on DCLF's pool, one after another in kick order (one chain). The game half kicks a sampling job per ticket:
+	 * it applies the new placement plans to the set it keeps, samples only what moved under engine-read leases, and runs the game-side
+	 * pools' samples. The render half kicks an upload job per render: it reads only the sampled rows, fills the render's CPU slot (forward
+	 * sort rows, live spheres), runs the per-render pools, and uploads the changed rows on the dedicated upload queue. It then signals
+	 * the frame-wait timeline, always, even after a failure. The GPU waits for that signal and the render thread never does. Nothing
+	 * the render half kicks takes an engine-read lease.
 	 *
 	 * Each row set lives in pooled backings. A backing is bound to the frame's last submission, so no producer writes a backing a
 	 * frame in flight still reads. Feature-registered pools run after the built-in row sets at every step.
@@ -69,7 +71,7 @@ namespace DCLF
 
 		static FrameValues& Get();
 
-		/** @brief The first-person members' rows and palettes, sampled by the game half. Kick hands them to its producer. */
+		/** @brief The first-person members' rows and palettes, sampled by the game half. KickSample hands them to its job. */
 		struct RootViews;
 
 		/** @brief An object's placement row read from the engine now. Without a listed root the bound is unbounded. */
@@ -79,11 +81,17 @@ namespace DCLF
 		static bool SampleSlot(const SceneTables& a_tables, std::uint32_t a_slot, BindlessPlacement& a_out);
 
 		/**
-		 * @brief Render thread, at the scene's start. Kicks the frame's producer and sets the host's frame wait to its sequence number.
-		 * Returns false when there is no graph or dedicated upload queue. The frame then waits for nothing and its inputs wait for the first producer.
+		 * @brief Game half, once per ticket (rendered or not). Runs the pools' frame starts and the game-side pools' kicks, and kicks the
+		 * ticket's sampling job with its one-shot inputs. Without a graph or dedicated upload queue the inputs wait for the next one.
 		 */
-		bool Kick(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
+		void KickSample(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
 			std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals, std::shared_ptr<RootViews> a_rootViews);
+		/**
+		 * @brief Render thread, at the scene's start, each render. Leases the render's backings, kicks its upload job after every sampling
+		 * job kicked before it, and sets the host's frame wait to its sequence number. Returns false when there is no graph or dedicated
+		 * upload queue. The frame then waits for nothing.
+		 */
+		bool Kick(std::shared_ptr<const FrameGlobals> a_globals);
 		/** @brief Render thread, before Kick. Kick also leases late-pose placement and palette backings, filled by the same producer. */
 		void SetLatePoses(std::shared_ptr<const LatePoses::FramePlan> a_plan);
 		/** @brief Render thread, at the depth commit. Draws from here read the late backings. The shadow epoch keeps the first ones. */
@@ -93,8 +101,6 @@ namespace DCLF
 		 * a_plans to the first-person members and samples those a_claims holds (none when null). The producer never samples them.
 		 */
 		std::shared_ptr<RootViews> TakeRootViews(const std::vector<std::shared_ptr<const PlacementPlan>>& a_plans, const SetSnapshot* a_claims);
-		/** @brief Puts a_older's samples before a_to's, so a slot both sampled takes a_to's. For a ticket no render took. */
-		static void PrependRootViews(RootViews& a_to, RootViews&& a_older);
 		/**
 		 * @brief Render thread, before Kick. The CPU pipeline's view batches, kept until replaced. Producers fill their live sphere column.
 		 * The next producer also fills a_forwardRows, the frame slot's forward sort rows, from the Forward and Refraction lists.
@@ -170,8 +176,8 @@ namespace DCLF
 		/** @brief Diagnostics, render thread. Whether the frame's producer is done, optionally waiting for it. */
 		bool ProducerDone(bool a_wait = false) const;
 		/**
-		 * @brief Any thread. Returns once the newest producer has finished reading engine memory.
-		 * Engine writers inside the window call this. Its uploads may still run.
+		 * @brief Any thread. Returns once the newest sampling job has finished reading engine memory.
+		 * Engine writers inside the window call this. Uploads may still run.
 		 */
 		void WaitSampled() const;
 		/** @brief A pool's sample counts its refused engine-read lease here. */

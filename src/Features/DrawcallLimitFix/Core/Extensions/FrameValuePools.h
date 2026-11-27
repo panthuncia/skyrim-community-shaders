@@ -34,7 +34,7 @@ namespace DCLF::Api
 	class FrameValuePoolKick
 	{
 	public:
-		std::uint64_t seq = 0;                     // the frame's producer
+		std::uint64_t seq = 0;                     // the job's: a ticket's sampling job, or a perRender pool's upload
 		const FrameGlobals* globals = nullptr;     // null when none were captured
 		std::uint64_t objectSlots = 0;             // object slots the frame's shading rows hold
 	};
@@ -60,7 +60,7 @@ namespace DCLF::Api
 		using EmitRowsFn = void (*)(const void* a_view, std::uint64_t a_contentEpoch, const SendTarget& a_target, const RowSink& a_sink);
 		using SendRowsFn = void (*)(void* a_owner, std::size_t a_pool, std::size_t a_count, std::uint64_t a_contentEpoch, const void* a_view, EmitRowsFn a_emit);
 
-		std::uint64_t seq = 0;                       // the frame's producer
+		std::uint64_t seq = 0;                       // the job's: a ticket's sampling job, or a perRender pool's upload
 		const FrameGlobals* globals = nullptr;       // null when none were captured
 		const std::shared_ptr<const void>* input = nullptr;  // what the pool's kick handed over this frame
 
