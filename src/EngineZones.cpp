@@ -63,6 +63,8 @@ namespace EngineZones
 		// Main::RenderPlayerView's calls of RenderWorld, RenderPostProcess and RenderFirstPersonView are not listed: they go to CS's
 		// drivers in native, and the sites inside the functions count the engine's work where it still runs. Its call of ClearMasks is
 		// not listed either: native does not make it (FirstPersonHooks.cpp).
+		// Main::DrawFrame's world call of Main::RenderScene (AE +0x4C8) is not listed: it goes to CS's driver in native
+		// (Native/RenderScene.h), and the sites inside RenderScene and RenderPlayerView count the engine's skeleton wherever it still runs.
 		constexpr Site kSites[] = {
 			{ 35556, 0x39, 75458, 36555, 0x39, 77243, Role::Helper, "Renderer::Lock (in Main::DrawFrame)" },
 			{ 35556, 0x47, 75460, 36555, 0x47, 77245, Role::Helper, "Renderer::Begin (in Main::DrawFrame)" },
@@ -86,7 +88,6 @@ namespace EngineZones
 			{ 35556, 0x47C, 99025, 36555, 0x442, 105676, Role::Render, "ImageSpaceManager::RenderEffect #3 (in Main::DrawFrame)" },
 			{ 35556, 0x48E, 35882, 36555, 0x454, 36853, Role::Helper, "AE 36853 (in Main::DrawFrame)" },
 			{ 0, 0x0, 0, 36555, 0x4BE, 51639, Role::Helper, "AE 51639 (in Main::DrawFrame)" },
-			{ 0, 0x0, 0, 36555, 0x4C8, 36558, Role::Render, "Main::RenderScene #2 (in Main::DrawFrame)" },
 			{ 35556, 0x49F, 51364, 36555, 0x50B, 52211, Role::Helper, "AE 52211 (in Main::DrawFrame)" },
 			{ 35556, 0x558, 79938, 36555, 0x5C3, 82075, Role::Helper, "Main::FreezeTest #2 (in Main::DrawFrame)" },
 			{ 35556, 0x561, 35887, 36555, 0x5CC, 36858, Role::Helper, "AE 36858 (in Main::DrawFrame)" },

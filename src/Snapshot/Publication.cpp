@@ -15,6 +15,7 @@
 #include "RenderGraph/Async/LatestSlot.h"
 #include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderScene.h"
 #include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -446,6 +447,7 @@ namespace Snapshot
 		SideEffects::InstallHooks();
 		FaceTint::InstallHooks();
 		RenderGraph::Engine::Native::WaterEffects::InstallHooks();
+		RenderGraph::Engine::Native::Scene::InstallHooks();
 		(void)CadenceMode();
 		logger::info("[Snapshot] frame snapshots: published at Main::Update's call of Main::DrawFrame, adopted at Renderer::Begin");
 	}
