@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <type_traits>
+#include <utility>
 
 namespace DCLF
 {
@@ -303,6 +304,21 @@ namespace Snapshot
 					return;
 				}
 			snapshot.blocks[index] = std::make_shared<const T>(a_block);
+			++made;
+		}
+
+		/** @brief Sets a_T's block, moving it when the previous snapshot's is not equal. For blocks with heap members. */
+		template <FeatureBlock T>
+		void Set(T&& a_block)
+		{
+			constexpr auto index = static_cast<std::size_t>(T::kId);
+			if (previous)
+				if (const auto* before = previous->Block<T>(); before && *before == a_block) {
+					snapshot.blocks[index] = previous->blocks[index];
+					++shared;
+					return;
+				}
+			snapshot.blocks[index] = std::make_shared<const T>(std::move(a_block));
 			++made;
 		}
 

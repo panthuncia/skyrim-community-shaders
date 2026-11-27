@@ -68,6 +68,27 @@ namespace Snapshot
 	/** @brief The adopted snapshot. Null before the first adoption. Render owner (the thread whose Begin adopted it). */
 	const std::shared_ptr<const FrameSnapshot>& Current();
 
+	/** @brief a_T's block in the adopted snapshot, or null before the first adoption or when its feature captured none. Render owner. */
+	template <FeatureBlock T>
+	const T* CurrentBlock()
+	{
+		const auto& snapshot = Current();
+		return snapshot ? snapshot->Block<T>() : nullptr;
+	}
+
+	/**
+	* @brief The adopted snapshot's events.gameDelta the first time a caller steps for it, else 0. a_lastId is the caller's record of
+	* the snapshot it last stepped for, so a repeated snapshot holds still and a caller that skipped a frame still steps once. Render owner.
+	*/
+	inline float StepOnce(std::uint64_t& a_lastId)
+	{
+		const auto& snapshot = Current();
+		if (!snapshot || snapshot->id == a_lastId)
+			return 0.0f;
+		a_lastId = snapshot->id;
+		return snapshot->events.gameDelta;
+	}
+
 	/** @brief The adopted snapshot's id, 0 before the first. Any thread (for the test runner's status and logs). */
 	std::uint64_t CurrentId();
 
