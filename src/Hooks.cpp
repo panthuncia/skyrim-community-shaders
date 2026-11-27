@@ -19,6 +19,8 @@
 #include "ShaderTools/BSShaderHooks.h"
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
 #include "Utils/ExternalEmittance.h"
+#include "Utils/GameThread.h"
+#include "CSEditor/EditorWindow.h"
 #include "Utils/VersionedRelocation.h"
 
 #include "Aftermath.h"
@@ -1652,6 +1654,10 @@ namespace Hooks
 
 		// The frame snapshot's publication point (and the cadence test mode): Main::Update's call of Main::DrawFrame.
 		Snapshot::InstallHooks();
+		// The queue the UI's engine and game writes go through, then the game view the menus read (scene settings use it without
+		// the CS Editor too).
+		GameThread::Install();
+		EditorWindow::InstallGameTick();
 
 		logger::info("Hooking BSImagespaceShader");
 		stl::detour_thunk<CSShadersSupport::BSImagespaceShader_DispatchComputeShader>(REL::RelocationID(100952, 107734));

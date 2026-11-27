@@ -73,8 +73,8 @@ namespace CS
 		/**
 		 * @brief Raises the setting bound at a_address if its bytes differ from the ones last raised.
 		 *
-		 * For code that wrote the value through a raw address, such as the scene widget interceptor.
-		 * An address with no binding does nothing.
+		 * For code that wrote the value through a raw address, such as the scene widget interceptor. An address inside a
+		 * struct-valued setting raises that setting. An address with no binding does nothing.
 		 */
 		static void RaiseAt(const void* a_address);
 

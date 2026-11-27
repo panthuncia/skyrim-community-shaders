@@ -11,7 +11,7 @@ namespace
 	void __stdcall OpenCommunityShadersMenu()
 	{
 		if (globals::menu)
-			globals::menu->Open();
+			globals::menu->RequestOpen(true);
 	}
 }
 

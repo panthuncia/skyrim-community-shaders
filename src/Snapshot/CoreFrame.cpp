@@ -48,7 +48,7 @@ namespace Snapshot
 			const auto& skySync = globals::features::skySync;
 			const auto toFloat4 = [](const RE::NiPoint3& a_dir) { return float4{ a_dir.x, a_dir.y, a_dir.z, 0.0f }; };
 			const auto moonColor = [&](const RE::Moon* a_moon, const Util::ColorSpace::LightColor& a_base) {
-				return Util::Moon::GetLightColor(a_moon, a_base, skySync.settings.NewMoonIntensity, skySync.settings.CrescentMoonIntensity, skySync.settings.FullMoonIntensity);
+				return Util::Moon::GetLightColor(a_moon, a_base, skySync.settings.NewMoonIntensity.Adopted(), skySync.settings.CrescentMoonIntensity.Adopted(), skySync.settings.FullMoonIntensity.Adopted());
 			};
 
 			if (const auto* sun = sky->sun; sun && sun->root && sky->root) {

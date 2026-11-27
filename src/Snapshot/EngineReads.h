@@ -71,6 +71,7 @@ namespace Snapshot::EngineReads
 		std::atomic<bool> listed{ false };
 		Site* next = nullptr;
 		std::atomic<std::uint64_t> captured{ 0 };
+		std::atomic<std::uint64_t> ui{ 0 };  // live reads made inside the ImGui frame (also counted in live)
 		std::atomic<std::uint64_t> live[kThreads][kKinds]{};
 	};
 
@@ -86,6 +87,13 @@ namespace Snapshot::EngineReads
 
 	/** @brief Whether this thread is inside a CaptureScope. */
 	bool InCapture() noexcept;
+
+	/** @brief The ImGui frame starts and ends on this thread (GameThread::UiFrameScope). Live reads in it also count as UI-frame reads. Nests. */
+	void EnterUiFrame() noexcept;
+	void LeaveUiFrame() noexcept;
+
+	/** @brief Whether this thread is inside the ImGui frame. */
+	bool InUiFrame() noexcept;
 
 	/** @brief Renderer::Begin, before the frame's work: a_kind is the frame's RenderGraph::Frame::Kind. Its thread is the render thread. */
 	void BeginFrame(std::uint8_t a_kind) noexcept;

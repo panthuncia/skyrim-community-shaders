@@ -20,6 +20,8 @@
 #include "ShaderCache.h"
 #include "Snapshot/Publication.h"
 #include "State.h"
+#include "Utils/Climate.h"
+#include "Utils/GameThread.h"
 #include "Vram/MemProbe.h"
 #include "Vram/SpillLab.h"
 #include "Vram/VramLedger.h"
@@ -423,14 +425,9 @@ namespace Testing
 			return true;
 		}
 
-		bool Weather(const std::string& a_arg, std::string& a_error)
+		/** @brief A weather by editor id, else by hex form id. Null with a_error set when there is none. */
+		RE::TESWeather* FindWeather(const std::string& a_arg, std::string& a_error)
 		{
-			auto* editor = EditorWindow::GetSingleton();
-			if (a_arg == "off") {
-				editor->UnlockWeather();
-				return true;
-			}
-			// By editor id first, then by hex form id.
 			RE::TESWeather* weather = nullptr;
 			std::string known;
 			if (auto* data = CS_ENGINE_READ(Data, RecordTime, RE::TESDataHandler::GetSingleton())) {
@@ -449,10 +446,21 @@ namespace Testing
 				if (end && *end == '\0')
 					weather = RE::TESForm::LookupByID<RE::TESWeather>(id);
 			}
-			if (!weather) {
+			if (!weather)
 				a_error = fmt::format("no weather '{}'. Loaded weathers: {}", a_arg, known);
-				return false;
+			return weather;
+		}
+
+		bool Weather(const std::string& a_arg, std::string& a_error)
+		{
+			auto* editor = EditorWindow::GetSingleton();
+			if (a_arg == "off") {
+				editor->UnlockWeather();
+				return true;
 			}
+			auto* weather = FindWeather(a_arg, a_error);
+			if (!weather)
+				return false;
 			logger::info("[TEST] weather {:08X} {}", weather->GetFormID(), weather->GetFormEditorID() ? weather->GetFormEditorID() : "?");
 			// The CS editor's lock holds it against scripts and climate timers; the console's fw depends on frame timing.
 			editor->LockWeatherForUser(weather);
@@ -859,27 +867,128 @@ namespace Testing
 				return true;
 			});
 			// "cs-menu": open|close, Community Shaders' own menu. font=<px> sets a fixed font size (a font reload) and font=saved puts the
-			// saved size back, so closing the menu saves the user's settings unchanged.
+			// saved size back, so closing the menu saves the user's settings unchanged. Each acts at the next ImGui frame's start, as
+			// the menu's own input does.
 			RegisterCommand("cs-menu", [](const std::string& a_arg, std::string& a_error) {
 				static std::optional<std::pair<bool, float>> savedFont;
-				auto& settings = Menu::GetSingleton()->GetSettings();
-				if (a_arg == "open") {
-					Menu::GetSingleton()->Open();
-				} else if (a_arg == "close") {
-					Menu::GetSingleton()->Close();
+				auto* menu = Menu::GetSingleton();
+				if (a_arg == "open" || a_arg == "close") {
+					menu->RequestOpen(a_arg == "open");
 				} else if (a_arg == "font=saved") {
-					if (savedFont)
-						std::tie(settings.UseResolutionFont, settings.Theme.FontSize) = *std::exchange(savedFont, std::nullopt);
+					menu->PostUiTask([menu] {
+						if (savedFont)
+							std::tie(menu->GetSettings().UseResolutionFont, menu->GetSettings().Theme.FontSize) = *std::exchange(savedFont, std::nullopt);
+					});
 				} else if (a_arg.starts_with("font=")) {
-					if (!savedFont)
-						savedFont = std::pair{ settings.UseResolutionFont, settings.Theme.FontSize };
-					settings.UseResolutionFont = false;
-					settings.Theme.FontSize = std::strtof(a_arg.c_str() + 5, nullptr);
+					menu->PostUiTask([menu, size = std::strtof(a_arg.c_str() + 5, nullptr)] {
+						auto& settings = menu->GetSettings();
+						if (!savedFont)
+							savedFont = std::pair{ settings.UseResolutionFont, settings.Theme.FontSize };
+						settings.UseResolutionFont = false;
+						settings.Theme.FontSize = size;
+					});
 				} else {
 					a_error = "cs-menu takes open, close, font=<px> or font=saved";
 					return false;
 				}
 				return true;
+			});
+			// "cs-ui": an action taken as the CS menu's and editor's widgets take it, inside the next ImGui frame, so its engine writes
+			// go through the game-thread queue: setting <ShortName>.<key>=<JSON>, hour=<h>, timescale=<x>, pause, resume,
+			// lock=<weather editor id or hex form id>, unlock. Check the result with "cs-ui-expect" a few frames later.
+			RegisterCommand("cs-ui", [](const std::string& a_arg, std::string& a_error) {
+				auto* menu = Menu::GetSingleton();
+				auto* editor = EditorWindow::GetSingleton();
+				float value = 0.0f;
+				if (a_arg.starts_with("setting ")) {
+					menu->PostUiTask([line = a_arg.substr(8)] {
+						std::string error;
+						if (!SetSetting(line, error))
+							logger::error("[TEST] cs-ui setting {}: {}", line, error);
+					});
+				} else if (std::sscanf(a_arg.c_str(), "hour=%f", &value) == 1) {
+					menu->PostUiTask([editor, value] { editor->SetGameHour(value); });
+				} else if (std::sscanf(a_arg.c_str(), "timescale=%f", &value) == 1) {
+					menu->PostUiTask([editor, value] { editor->SetTimeScale(value); });
+				} else if (a_arg == "pause" || a_arg == "resume") {
+					menu->PostUiTask([editor, pause = a_arg == "pause"] { pause ? editor->PauseTime() : editor->ResumeTime(); });
+				} else if (a_arg.starts_with("lock=")) {
+					auto* weather = FindWeather(a_arg.substr(5), a_error);
+					if (!weather)
+						return false;
+					menu->PostUiTask([editor, weather] { editor->LockWeatherForUser(weather); });
+				} else if (a_arg == "unlock") {
+					menu->PostUiTask([editor] { editor->ReleaseUserWeatherLock(); });
+				} else {
+					a_error = "cs-ui takes setting <ShortName>.<key>=<JSON>, hour=<h>, timescale=<x>, pause, resume, lock=<weather> or unlock";
+					return false;
+				}
+				logger::info("[TEST] cs-ui {}: queued for the ImGui frame", a_arg);
+				return true;
+			});
+			// "cs-ui-expect": fails unless the game state is as a "cs-ui" action left it: hour=<h> (within 0.05), timescale=<x>,
+			// paused, running, lock=<weather>, unlocked, setting <ShortName>.<key>=<JSON> (the feature's saved value), ui-writes=0
+			// (no engine write from the ImGui frame went around the game-thread queue).
+			RegisterCommand("cs-ui-expect", [](const std::string& a_arg, std::string& a_error) {
+				auto* editor = EditorWindow::GetSingleton();
+				auto calendar = Util::Climate::GetCalendar();
+				auto* sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
+				float value = 0.0f;
+				std::string seen;
+				bool holds = false;
+				if (std::sscanf(a_arg.c_str(), "hour=%f", &value) == 1) {
+					const float hour = calendar && calendar->gameHour ? calendar->gameHour->value : -1.0f;
+					holds = std::abs(hour - value) < 0.05f;
+					seen = fmt::format("the game hour is {:.3f}", hour);
+				} else if (std::sscanf(a_arg.c_str(), "timescale=%f", &value) == 1) {
+					const float scale = calendar && calendar->timeScale ? calendar->timeScale->value : -1.0f;
+					holds = std::abs(scale - value) < 0.001f;
+					seen = fmt::format("the timescale is {:.3f}", scale);
+				} else if (a_arg == "paused" || a_arg == "running") {
+					const float scale = calendar && calendar->timeScale ? calendar->timeScale->value : -1.0f;
+					holds = (a_arg == "paused") == (editor->IsTimePaused() && scale == 0.0f);
+					seen = fmt::format("time is {} with timescale {:.3f}", editor->IsTimePaused() ? "paused" : "running", scale);
+				} else if (a_arg.starts_with("lock=")) {
+					auto* weather = FindWeather(a_arg.substr(5), a_error);
+					if (!weather)
+						return false;
+					auto* locked = editor->GetLockedWeather();
+					holds = editor->IsWeatherLockedByUser(weather) && sky && sky->currentWeather == weather;
+					seen = fmt::format("the lock holds {:08X}, the sky shows {:08X}", locked ? locked->GetFormID() : 0, sky && sky->currentWeather ? sky->currentWeather->GetFormID() : 0);
+				} else if (a_arg == "unlocked") {
+					holds = !editor->IsWeatherLocked();
+					seen = holds ? "no lock" : "a weather is locked";
+				} else if (a_arg.starts_with("setting ")) {
+					const auto line = a_arg.substr(8);
+					const auto dot = line.find('.');
+					const auto equals = line.find('=');
+					const auto& list = Feature::GetFeatureList();
+					const auto found = dot == std::string::npos || equals == std::string::npos || equals < dot ?
+					                       list.end() :
+					                       std::ranges::find_if(list, [&](Feature* a_feature) { return a_feature && a_feature->GetShortName() == line.substr(0, dot); });
+					if (found == list.end()) {
+						a_error = fmt::format("'{}' is not setting <ShortName>.<key>=<JSON> of a loaded feature", a_arg);
+						return false;
+					}
+					json settings;
+					(*found)->SaveSettings(settings);
+					std::string path;
+					const json* current = FindSettingByKey(settings, line.substr(dot + 1, equals - dot - 1), path);
+					const auto expected = json::parse(line.substr(equals + 1), nullptr, false);
+					holds = current && !expected.is_discarded() && *current == expected;
+					seen = current ? fmt::format("{} is {}", path, current->dump()) : std::string("no such setting");
+				} else if (a_arg == "ui-writes=0") {
+					const auto missed = GameThread::MissedWrites();
+					holds = missed == 0;
+					seen = fmt::format("{} engine writes from the ImGui frame went around the queue", missed);
+				} else {
+					a_error = "cs-ui-expect takes hour=<h>, timescale=<x>, paused, running, lock=<weather>, unlocked, setting <ShortName>.<key>=<JSON> or ui-writes=0";
+					return false;
+				}
+				logger::info("[TEST] cs-ui-expect {}: {} ({})", a_arg, holds ? "holds" : "does not hold", seen);
+				if (!holds)
+					a_error = fmt::format("cs-ui-expect {}: {}", a_arg, seen);
+				return holds;
 			});
 			// "menu": <menu name>=show|hide, through the UI message queue ("Journal Menu" is the one Escape opens).
 			RegisterCommand("menu", [](const std::string& a_arg, std::string& a_error) {

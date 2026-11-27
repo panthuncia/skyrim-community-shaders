@@ -175,16 +175,27 @@ namespace CS
 		std::vector<std::byte> bytes;
 		{
 			std::scoped_lock lock(table.mutex);
-			const auto found = table.idsByAddress.find(a_address);
-			if (found == table.idsByAddress.end())
-				return;
-			auto& binding = table.bindings[found->second];
+			if (const auto found = table.idsByAddress.find(a_address); found != table.idsByAddress.end())
+				id = found->second;
+			else {
+				// A member of a struct-valued setting: the binding whose bytes hold the address.
+				const auto at = reinterpret_cast<std::uintptr_t>(a_address);
+				for (const auto& [bound, binding] : table.bindings) {
+					const auto begin = reinterpret_cast<std::uintptr_t>(binding.address);
+					if (at > begin && at < begin + binding.size) {
+						id = bound;
+						break;
+					}
+				}
+				if (id == 0)
+					return;
+			}
+			auto& binding = table.bindings[id];
 			if (SettingBytesRaised(binding))
 				return;
 			RecordSettingBytes(binding);
 			bytes = binding.raised;
 			serial.fetch_add(1, std::memory_order_acq_rel);
-			id = found->second;
 			name = table.names[id - 1];
 			hook = table.hook;
 		}

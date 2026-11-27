@@ -532,6 +532,7 @@ PhysicalSky::PhysicalSky()
 {
 	settings.enabled.Bind(CS::SettingRegistry::Declare("PhysicalSky.enabled"));
 	settings.enableVolumetricClouds.Bind(CS::SettingRegistry::Declare("PhysicalSky.enableVolumetricClouds"));
+	settings.forceEnableAllInteriorCells.Bind(CS::SettingRegistry::Declare("PhysicalSky.forceEnableAllInteriorCells"));
 }
 
 void PhysicalSky::DataLoaded()
@@ -686,7 +687,7 @@ void PhysicalSky::SettingsGeneral()
 	ImGui::SameLine();
 	ImGui::Checkbox(T(TKEY("enable_all_exterior_cells"), "Enable All Exterior Cells"), &settings.enableAllExteriorCells);
 	ImGui::SameLine();
-	ImGui::Checkbox(T(TKEY("force_enable_all_interior_cells"), "Force Enable All Interior Cells"), &settings.forceEnableAllInteriorCells);
+	Util::Checkbox(T(TKEY("force_enable_all_interior_cells"), "Force Enable All Interior Cells"), settings.forceEnableAllInteriorCells);
 	if (settings.enableAllExteriorCells || settings.forceEnableAllInteriorCells) {
 		ImGui::InputFloat(T(TKEY("fallback_z_bottom"), "Fallback Z Bottom"), &settings.fallbackZBottom, 10.f, 100.f, "%.1f");
 		if (auto _tt = Util::HoverTooltipWrapper())

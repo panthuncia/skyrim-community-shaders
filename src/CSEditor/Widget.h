@@ -257,8 +257,14 @@ public:
 	/** @brief Save widget-specific settings to the internal JSON object. Must be implemented by subclasses. */
 	virtual void SaveSettings() = 0;
 
-	/** @brief Apply the current widget settings to the live game form. Must be implemented by subclasses. */
+	/** @brief Game thread. Apply the current widget settings to the live game form. Must be implemented by subclasses. Call RequestApply. */
 	virtual void ApplyChanges() = 0;
+
+	/**
+	 * @brief Applies the widget's settings to its form on the game thread: now on a game hook or task, else through the game-thread
+	 * queue. A widget is deleted only from the ImGui frame, after a confirmation popup, so the queued apply never outlives it.
+	 */
+	void RequestApply();
 
 	/** @brief Revert widget settings to the last loaded state. Default implementation calls LoadSettings. */
 	virtual void RevertChanges() { LoadSettings(); }
@@ -273,7 +279,8 @@ public:
 	virtual void RestoreEdits(const UndoHistory::Snapshot&) {}
 
 	/**
-	 * @brief Reinitialize a weather form to apply form references that are only read at load time.
+	 * @brief Reinitialize a weather form to apply form references that are only read at load time. On the game thread (queued
+	 * from elsewhere).
 	 * @param weather The weather form to reinitialize.
 	 */
 	static void ForceWeatherReinit(RE::TESWeather* weather);
@@ -546,14 +553,14 @@ public:
 	void RevertChanges() override
 	{
 		settings = vanillaSettings;
-		ApplyChanges();
+		RequestApply();
 	}
 	bool HasUnsavedChanges() const override { return !(settings == originalSettings); }
 	UndoHistory::SnapshotPtr CaptureEdits() const override { return UndoHistory::Capture(settings); }
 	void RestoreEdits(const UndoHistory::Snapshot& snapshot) override
 	{
 		settings = UndoHistory::Get<Settings>(snapshot);
-		ApplyChanges();
+		RequestApply();
 	}
 
 protected:
@@ -578,7 +585,7 @@ protected:
 			}
 		}
 		originalSettings = settings;
-		ApplyChanges();
+		RequestApply();
 	}
 
 	/** @brief LoadSavedSettings for Settings with JSON serializers: saved keys override vanilla, missing ones keep it. */

@@ -16,6 +16,7 @@
 
 #define TDM_API_COMMONLIB
 #include "TDM/TrueDirectionalMovementAPI.h"
+#include "Utils/Setting.h"
 
 struct PhysicalLens;
 
@@ -62,6 +63,8 @@ namespace CinematicCamera
 		float SensorWidthMM = 36.0f;
 		float SensorHeightMM = 24.0f;
 		int GateFit = (int)GateFit::Horizontal;
+
+		bool operator==(const FilmbackSettings&) const = default;
 	};
 
 	struct LensSettings
@@ -71,6 +74,8 @@ namespace CinematicCamera
 		int ApertureBladeCount = 6;
 		float ApertureBladeRotationDeg = 0.0f;
 		float ApertureRoundness = 0.5f;
+
+		bool operator==(const LensSettings&) const = default;
 	};
 
 	struct FocusSettings
@@ -79,6 +84,8 @@ namespace CinematicCamera
 		float ManualDistanceM = 10.0f;
 		float2 ScreenPointUV = float2(0.5f, 0.5f);
 		float TransitionSpeed = 0.5f;
+
+		bool operator==(const FocusSettings&) const = default;
 	};
 
 	struct ExposureSettings
@@ -90,15 +97,19 @@ namespace CinematicCamera
 		float FrameRate = 24.0f;
 		float ShutterAngleDeg = 180.0f;
 		float ExposureCompensationEV = 0.0f;
+
+		bool operator==(const ExposureSettings&) const = default;
 	};
 
+	// Bound: the controller's update runs in Post Processing's capture on the game thread and reads them adopted. The menu edits
+	// the groups through Raw() and raises them once per draw.
 	struct CameraSettings
 	{
-		bool Enabled = false;
-		FilmbackSettings Filmback;
-		LensSettings Lens;
-		FocusSettings Focus;
-		ExposureSettings Exposure;
+		CS::Setting<bool> Enabled = false;
+		CS::Setting<FilmbackSettings> Filmback;
+		CS::Setting<LensSettings> Lens;
+		CS::Setting<FocusSettings> Focus;
+		CS::Setting<ExposureSettings> Exposure;
 	};
 
 	// Immutable per-frame physical camera state. The only contract between the
@@ -196,6 +207,8 @@ namespace CinematicCamera
 
 		FocusResolver focusResolver;
 
+		Controller();
+
 		// Per-frame published state (null to effects while !stateValid).
 		PhysicalCameraState activeState{};
 		bool stateValid = false;
@@ -216,8 +229,8 @@ namespace CinematicCamera
 		void SaveSettings(json& o_json);
 		void RestoreDefaultSettings();
 
-		// Per-frame update. `runnable` is false while Post Processing cannot
-		// run (bypassed, Effects11 owns the tonemap, main/loading menu open).
+		// Per-frame update, on the game thread (Post Processing's capture). `runnable` is false while Post Processing cannot
+		// run (bypassed, Effects11 owns the tonemap, main/loading menu open). Reads the settings adopted.
 		void Update(bool runnable, float viewportAspect);
 
 		[[nodiscard]] const PhysicalCameraState* GetState() const { return stateValid ? &activeState : nullptr; }
@@ -230,6 +243,8 @@ namespace CinematicCamera
 
 	private:
 		[[nodiscard]] PhysicalCameraState BuildState(float viewportAspect) const;
+		/** @brief Raises the setting groups the menu edited through Raw(). */
+		void RaiseEdits();
 		void ApplyFOV(float viewportAspect);
 		void ValidateSettings();
 

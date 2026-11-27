@@ -26,9 +26,12 @@
 #include "SceneManager/SceneSettingsManager.h"
 #include "SceneManager/SceneSettingsUI.h"
 #include "State.h"
+#include "RenderGraph/Engine/MainTick.h"
+#include "RenderGraph/Fatal.h"
 #include "Utils/Climate.h"
 #include "Utils/FileSystem.h"
 #include "Utils/Game.h"
+#include "Utils/GameThread.h"
 #include "Utils/Notifications.h"
 #include "Utils/UI.h"
 #include "Utils/UIAnim.h"
@@ -1218,10 +1221,8 @@ void EditorWindow::RenderUI()
 			// Weather lock + name, and period title, centered in the header
 			const bool weatherLocked = IsWeatherLockedByUser();
 			RE::TESWeather* statusWeather = GetLockedWeather();
-			if (!statusWeather) {
-				if (auto* sky = CS_ENGINE_READ(Sky, Other, RE::Sky::GetSingleton()))
-					statusWeather = sky->currentWeather;
-			}
+			if (!statusWeather)
+				statusWeather = PublishedGameView().currentWeather;
 			const char* weatherName = nullptr;
 			if (statusWeather)
 				weatherName = statusWeather->GetFormEditorID();
@@ -1318,15 +1319,14 @@ void EditorWindow::RenderUI()
 				Util::AddTooltip(IsTimePaused() ? T(TKEY("resume_time"), "Resume Time") : T(TKEY("pause_time"), "Pause Time"));
 			}
 
-			auto calendar = Util::Climate::GetCalendar();
-			if (calendar && calendar->gameHour && calendar->timeScale) {
+			if (const auto view = PublishedGameView(); view.hasCalendar) {
 				ImGui::SetCursorScreenPos(ImVec2(gameTimeSliderX, iconY));
 				ImGui::SetNextItemWidth(gameTimeSliderWidth);
 				DrawPausedAwareGameHourSlider("##MenuBarGameTimeSlider");
 
 				ImGui::SetCursorScreenPos(ImVec2(timeSpeedSliderX, iconY));
 				ImGui::SetNextItemWidth(halfSliderWidth);
-				DrawTimeScaleSlider("##MenuBarTimeScaleSlider", calendar);
+				DrawTimeScaleSlider("##MenuBarTimeScaleSlider", view);
 			}
 
 			// Save: the editor's own save, red while any widget has unsaved changes.
@@ -1502,8 +1502,14 @@ void EditorWindow::UpdateOpenState()
 				weatherWidget->cloudTextureCache.clear();
 	}
 
-	if (overlayWeatherLockPending)
-		LockWeatherForOverlay();
+	// The overlay's lock reads the sky, so it is tried on the game thread, one attempt queued at a time.
+	if (overlayWeatherLockPending && !overlayWeatherLockQueued.exchange(true))
+		GameThread::Post("CS Editor: the overlay's weather lock", [this] {
+			// The editor may have closed since.
+			if (overlayWeatherLockPending)
+				LockWeatherForOverlay();
+			overlayWeatherLockQueued = false;
+		});
 
 	wasOpen = open;
 }
@@ -2023,6 +2029,7 @@ bool EditorWindow::AreWeatherLockHooksInstalled()
 
 void EditorWindow::MaintainWeatherLock()
 {
+	GameThread::NoteEngineWrite("CS Editor: the weather lock's sky repair");
 	auto* locked = GetActiveLock();
 	auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
 	if (!locked || !sky)
@@ -2052,13 +2059,15 @@ void EditorWindow::LockWeather(RE::TESWeather* weather)
 	if (!weather)
 		return;
 
-	// ForceWeather clears the sky's region; UnlockWeather restores it so the engine doesn't reroll.
-	if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky); sky && !IsWeatherLocked())
-		regionBeforeLock = sky->region;
-
+	const bool wasLocked = IsWeatherLocked();
 	g_lockedWeather.store(weather, std::memory_order_release);
 	g_weatherLockActive.store(true, std::memory_order_release);
-	MaintainWeatherLock();
+	GameThread::Run("CS Editor: lock the weather", [this, wasLocked] {
+		// ForceWeather clears the sky's region; UnlockWeather restores it so the engine doesn't reroll.
+		if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky); sky && !wasLocked)
+			regionBeforeLock = sky->region;
+		MaintainWeatherLock();
+	});
 
 	logger::info("Weather locked: {}", weather->GetFormEditorID() ? weather->GetFormEditorID() : "Unknown");
 }
@@ -2135,18 +2144,79 @@ void EditorWindow::UnlockWeather()
 
 	// ReleaseWeatherOverride makes the next sky update pick a random region weather; hand the
 	// current weather back as the natural one instead so progression resumes from it.
-	if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky)) {
-		sky->overrideWeather = nullptr;
-		sky->defaultWeather = sky->currentWeather;
-		sky->region = regionBeforeLock;
-	}
-	regionBeforeLock = nullptr;
+	GameThread::Run("CS Editor: unlock the weather", [this] {
+		if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky)) {
+			sky->overrideWeather = nullptr;
+			sky->defaultWeather = sky->currentWeather;
+			sky->region = regionBeforeLock;
+		}
+		regionBeforeLock = nullptr;
+	});
 
 	logger::info("Weather unlocked: {}", locked->GetFormEditorID() ? locked->GetFormEditorID() : "Unknown");
 }
 
+namespace
+{
+	struct PublishedView
+	{
+		std::mutex mutex;
+		EditorWindow::GameView view;
+	};
+
+	PublishedView& Published()
+	{
+		static PublishedView s_published;
+		return s_published;
+	}
+}
+
+EditorWindow::GameView EditorWindow::PublishedGameView()
+{
+	auto& published = Published();
+	std::scoped_lock lock(published.mutex);
+	return published.view;
+}
+
+void EditorWindow::InstallGameTick()
+{
+	if (REL::Module::IsVR())
+		return;  // no main tick on VR
+	// After the game-thread queue's tasks (added earlier), so the view a frame reads includes the writes it asked for.
+	if (!RenderGraph::Engine::MainTick::Add("CS Editor's game side", [] {
+			auto* editor = GetSingleton();
+			MaintainWeatherLock();
+			GameView view;
+			if (auto calendar = Util::Climate::GetCalendar(); calendar && calendar->gameHour && calendar->timeScale) {
+				view.hasCalendar = true;
+				view.gameHour = calendar->gameHour->value;
+				view.timeScale = calendar->timeScale->value;
+				// An external timescale change (console, other mods, the menu guard) overrides our pause.
+				if (editor->timePaused && view.timeScale > 0.0f)
+					editor->timePaused = false;
+			}
+			if (const auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky)) {
+				view.hasSky = true;
+				view.skyGameHour = sky->currentGameHour;
+				view.currentWeather = sky->currentWeather;
+				view.lastWeather = sky->lastWeather;
+				view.defaultWeather = sky->defaultWeather;
+				view.currentWeatherPct = sky->currentWeatherPct;
+				view.climate = sky->currentClimate;
+			}
+			auto& published = Published();
+			std::scoped_lock lock(published.mutex);
+			published.view = view;
+		}))
+		RenderGraph::Fatal("CS Editor", "the frame-job wait is not hooked, so the weather lock and the editor's game view would never update");
+}
+
 void EditorWindow::PauseTime()
 {
+	if (!GameThread::CanWriteNow()) {
+		GameThread::Post("CS Editor: pause time", [this] { PauseTime(); });
+		return;
+	}
 	if (timePaused)
 		return;
 	auto calendar = Util::Climate::GetCalendar();
@@ -2154,24 +2224,33 @@ void EditorWindow::PauseTime()
 		savedTimeScale = calendar->timeScale->value;
 		calendar->timeScale->value = 0.0f;
 		timePaused = true;
-		logger::info("Time paused (saved timescale: {})", savedTimeScale);
+		logger::info("Time paused (saved timescale: {})", savedTimeScale.load());
 	}
 }
 
 void EditorWindow::ResumeTime()
 {
+	if (!GameThread::CanWriteNow()) {
+		GameThread::Post("CS Editor: resume time", [this] { ResumeTime(); });
+		return;
+	}
 	if (!timePaused)
 		return;
 	auto calendar = Util::Climate::GetCalendar();
 	if (calendar && calendar->timeScale) {
 		calendar->timeScale->value = savedTimeScale;
 		timePaused = false;
-		logger::info("Time resumed (timescale: {})", savedTimeScale);
+		logger::info("Time resumed (timescale: {})", savedTimeScale.load());
 	}
 }
 
 void EditorWindow::ResetTimeScale()
 {
+	if (!GameThread::CanWriteNow()) {
+		timeScaleSlider = kVanillaTimeScale;
+		GameThread::Post("CS Editor: reset the timescale", [this] { ResetTimeScale(); });
+		return;
+	}
 	auto calendar = Util::Climate::GetCalendar();
 	if (!calendar || !calendar->timeScale)
 		return;
@@ -2179,7 +2258,27 @@ void EditorWindow::ResetTimeScale()
 		savedTimeScale = kVanillaTimeScale;
 	else
 		calendar->timeScale->value = kVanillaTimeScale;
-	timeScaleSlider = kVanillaTimeScale;
+}
+
+void EditorWindow::SetGameHour(float a_hour)
+{
+	GameThread::Run("CS Editor: set the game hour", [a_hour] {
+		auto calendar = Util::Climate::GetCalendar();
+		if (!calendar || !calendar->gameHour)
+			return;
+		calendar->gameHour->value = std::clamp(a_hour, 0.0f, kGameHourMax);
+		// Backward clock edits otherwise look like a midnight wrap and expire the weather override.
+		if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky); sky && GetActiveLock())
+			sky->lastWeatherUpdate = calendar->gameHour->value;
+	});
+}
+
+void EditorWindow::SetTimeScale(float a_scale)
+{
+	GameThread::Run("CS Editor: set the timescale", [a_scale] {
+		if (auto calendar = Util::Climate::GetCalendar(); calendar && calendar->timeScale)
+			calendar->timeScale->value = a_scale;
+	});
 }
 
 namespace
@@ -2220,7 +2319,7 @@ void EditorWindow::SetTimeRunningForMenu(bool a_needsRunningTime)
 		if (timePaused)
 			ResumeTime();
 		else
-			calendar->timeScale->value = std::max(savedTimeScale, kVanillaTimeScale);
+			calendar->timeScale->value = std::max(savedTimeScale.load(), kVanillaTimeScale);
 		timeRestoredForMenu = true;
 	} else if (timeRestoredForMenu) {
 		if (wasPausedBeforeMenu)
@@ -2354,15 +2453,18 @@ void EditorWindow::ClaimTimePeriodSet(TimePeriodSet periodSet)
 
 bool EditorWindow::DrawGameHourSlider(const char* label, const char* format)
 {
-	auto calendar = Util::Climate::GetCalendar();
-	if (!calendar || !calendar->gameHour)
+	const auto view = PublishedGameView();
+	if (!view.hasCalendar)
 		return false;
-	const bool changed = ImGui::SliderFloat(label, &calendar->gameHour->value, 0.0f, kGameHourMax, format);
+	// While dragging, the slider shows its own value: the published hour catches up at the next main tick.
+	float hour = gameHourDragging ? gameHourSlider : view.gameHour;
+	const bool changed = ImGui::SliderFloat(label, &hour, 0.0f, kGameHourMax, format);
+	gameHourDragging = ImGui::IsItemActive();
+	gameHourSlider = hour;
 	if (const auto segments = GetPeriodSegments(timePeriodSet); segments.count > 0)
 		DrawPeriodStrip(segments, kGameHourMax);
-	// Backward clock edits otherwise look like a midnight wrap and expire the weather override.
-	if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky); changed && sky && GetActiveLock())
-		sky->lastWeatherUpdate = calendar->gameHour->value;
+	if (changed)
+		SetGameHour(hour);
 	if (ImGui::IsItemActivated())
 		gameHourScrubRefreshIssued = false;
 
@@ -2409,25 +2511,26 @@ bool EditorWindow::DrawTimePauseToggle(const char* id, const ImVec2& size)
 	const bool clicked = DrawToggleIconButton(id, Icons::TI(ICON_TI_CLOCK_PAUSE), isPaused, pausedColor, buttonSize, glyphColor);
 	if (clicked) {
 		TogglePause();
-		// Only a pause the user just started becomes theirs; a failed pause or resume leaves ownership alone.
-		if (!isPaused && IsTimePaused())
+		// Only a pause the user just started becomes theirs. The pause lands on the game thread; it fails only without a
+		// calendar, and then the controls are not drawn.
+		if (!isPaused)
 			SceneSettingsUI::ClaimTimePause();
 	}
 	return clicked;
 }
 
-void EditorWindow::DrawTimeScaleSlider(const char* id, RE::Calendar* calendar)
+void EditorWindow::DrawTimeScaleSlider(const char* id, const GameView& view)
 {
-	assert(calendar && calendar->timeScale);
-	if (timePaused)
-		timeScaleSlider = std::max(savedTimeScale, kTimeScaleMin);
-	else if (std::abs(calendar->timeScale->value - timeScaleSlider) > ThemeManager::Constants::CSE_TIME_SCALE_SYNC_EPSILON)
-		timeScaleSlider = calendar->timeScale->value;
+	const bool paused = IsTimePaused();
+	if (paused)
+		timeScaleSlider = std::max(savedTimeScale.load(), kTimeScaleMin);
+	else if (std::abs(view.timeScale - timeScaleSlider) > ThemeManager::Constants::CSE_TIME_SCALE_SYNC_EPSILON)
+		timeScaleSlider = view.timeScale;
 
-	ImGui::BeginDisabled(timePaused);
+	ImGui::BeginDisabled(paused);
 	if (ImGui::SliderFloat(id, &timeScaleSlider, kTimeScaleMin, kTimeScaleMax,
 			timeScaleSlider == kVanillaTimeScale ? T(TKEY("vanilla_speed"), "Vanilla Speed") : "%.1fx", ImGuiSliderFlags_Logarithmic))
-		calendar->timeScale->value = timeScaleSlider;
+		SetTimeScale(timeScaleSlider);
 	if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
 		ResetTimeScale();
 	ImGui::EndDisabled();
@@ -2437,13 +2540,9 @@ void EditorWindow::DrawTimeScaleSlider(const char* id, RE::Calendar* calendar)
 
 void EditorWindow::DrawTimeControls()
 {
-	auto calendar = Util::Climate::GetCalendar();
-	if (!calendar || !calendar->gameHour || !calendar->timeScale)
+	const auto view = PublishedGameView();
+	if (!view.hasCalendar)
 		return;
-
-	// An external timescale change (console, other mods, the menu guard) overrides our pause
-	if (timePaused && calendar->timeScale->value > 0.0f)
-		timePaused = false;
 
 	const float gap = ImGui::GetStyle().ItemSpacing.x;
 	const float iconSize = ImGui::GetFrameHeight();
@@ -2460,7 +2559,7 @@ void EditorWindow::DrawTimeControls()
 
 	ImGui::SameLine();
 	ImGui::SetNextItemWidth(sliderWidth);
-	DrawTimeScaleSlider("##TimeScale", calendar);
+	DrawTimeScaleSlider("##TimeScale", view);
 
 	ImGui::SameLine();
 	const ImVec4 textColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
@@ -2514,11 +2613,13 @@ void EditorWindow::HideGameMenus()
 	if (IsViewportActive())
 		return;
 
-	if (auto ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton())) {
-		ui->ShowMenus(false);
-		gameMenusHidden = true;
-		logger::info("Game menus hidden for CS editor");
-	}
+	gameMenusHidden = true;
+	GameThread::Post("CS Editor: hide the game's menus", [] {
+		if (auto ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton())) {
+			ui->ShowMenus(false);
+			logger::info("Game menus hidden for CS editor");
+		}
+	});
 }
 
 void EditorWindow::ShowGameMenus()
@@ -2526,11 +2627,13 @@ void EditorWindow::ShowGameMenus()
 	if (!gameMenusHidden)
 		return;
 
-	if (auto ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton())) {
-		ui->ShowMenus(true);
-		gameMenusHidden = false;
-		logger::info("Game menus restored after CS editor");
-	}
+	gameMenusHidden = false;
+	GameThread::Post("CS Editor: show the game's menus", [] {
+		if (auto ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton())) {
+			ui->ShowMenus(true);
+			logger::info("Game menus restored after CS editor");
+		}
+	});
 }
 
 void EditorWindow::EnterPreviewMode(PreviewMode mode)
@@ -2558,8 +2661,10 @@ void EditorWindow::EnterPreviewMode(PreviewMode mode)
 
 	if (mode == PreviewMode::FreeCamera) {
 		flySpeed = kDefaultFlySpeed;
-		RE::Console::ExecuteCommand("tfc");
-		RE::Console::ExecuteCommand(std::format("sucsm {:.0f}", flySpeed).c_str());
+		GameThread::Post("CS Editor: enter the free camera", [command = std::format("sucsm {:.0f}", flySpeed)] {
+			RE::Console::ExecuteCommand("tfc");
+			RE::Console::ExecuteCommand(command.c_str());
+		});
 	}
 
 	logger::info("Entered preview mode: {}", mode == PreviewMode::FreeCamera ? "FreeCamera" : "PlayMode");
@@ -2570,7 +2675,7 @@ void EditorWindow::ExitPreviewMode()
 	bool wasFlying = IsPreviewFlying();
 
 	if (previewMode == PreviewMode::FreeCamera || previewMode == PreviewMode::FreeCameraLocked)
-		RE::Console::ExecuteCommand("tfc");
+		GameThread::Post("CS Editor: leave the free camera", [] { RE::Console::ExecuteCommand("tfc"); });
 
 	logger::info("Exited preview mode");
 	previewMode = PreviewMode::None;
@@ -2606,7 +2711,7 @@ void EditorWindow::AdjustFlySpeed(float scrollDelta)
 		return;
 
 	flySpeed = std::clamp(flySpeed + scrollDelta * kFlySpeedScrollStep, kMinFlySpeed, kMaxFlySpeed);
-	RE::Console::ExecuteCommand(std::format("sucsm {:.0f}", flySpeed).c_str());
+	GameThread::Post("CS Editor: the free camera's speed", [command = std::format("sucsm {:.0f}", flySpeed)] { RE::Console::ExecuteCommand(command.c_str()); });
 }
 
 bool EditorWindow::ShouldHandleEscapeKey()

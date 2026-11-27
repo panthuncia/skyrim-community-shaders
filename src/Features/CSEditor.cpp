@@ -11,6 +11,7 @@
 #include "State.h"
 #include "Util.h"
 #include "Utils/Game.h"
+#include "Utils/GameThread.h"
 #include "Utils/UI.h"
 
 #include "CSEditor/EditorWindow.h"
@@ -207,8 +208,6 @@ void CSEditor::Prepass()
 	if (ShouldPreloadEditorResources()) {
 		EnsureDataLoaded();
 	}
-
-	EditorWindow::MaintainWeatherLock();
 }
 
 void CSEditor::LerpWeather(RE::TESWeather* oldWeather, RE::TESWeather* newWeather, float currentWeatherPct)
@@ -586,6 +585,9 @@ void CSEditor::DisplayWeatherInfo(RE::TESWeather* weather, float weatherPct, boo
 
 void CSEditor::SyncWeatherFilter()
 {
+	// A reset on the game thread names the default weather it went back to.
+	if (auto* reset = s_resetToWeather.exchange(nullptr))
+		s_selectedWeatherIdx = FindWeatherIndex(reset);
 	if (s_lastWeatherFlagFilter != s_weatherFlagFilter) {
 		UpdateFilteredWeathers();
 		s_selectedWeatherIdx = -1;
@@ -601,10 +603,12 @@ void CSEditor::SelectWeather(RE::Sky* sky, int filteredIdx)
 	s_selectedWeatherIdx = filteredIdx;
 	auto selectedWeather = s_filteredWeathers[filteredIdx];
 
-	if (s_accelerateWeatherChange)
-		Util::ForceWeather(sky, selectedWeather, false);
-	else
-		sky->SetWeather(selectedWeather, true, false);
+	GameThread::Post("CS Editor: change the weather", [sky, selectedWeather, accelerate = s_accelerateWeatherChange] {
+		if (accelerate)
+			Util::ForceWeather(sky, selectedWeather, false);
+		else
+			sky->SetWeather(selectedWeather, true, false);
+	});
 
 	auto editorWindow = EditorWindow::GetSingleton();
 	if (editorWindow->IsWeatherLocked())
@@ -624,9 +628,11 @@ void CSEditor::ResetWeatherToDefault(RE::Sky* sky)
 	if (editorWindow->IsWeatherLocked())
 		editorWindow->UnlockWeather();
 
-	sky->ResetWeather();
-	s_selectedWeatherIdx = FindWeatherIndex(sky->defaultWeather);
-	logger::info("[CSEditor] Reset weather to default");
+	GameThread::Post("CS Editor: reset the weather", [sky] {
+		sky->ResetWeather();
+		s_resetToWeather = sky->defaultWeather;
+		logger::info("[CSEditor] Reset weather to default");
+	});
 }
 
 void CSEditor::DrawWeatherTransitionBar(RE::Sky* sky, float width, bool verboseOverlay)

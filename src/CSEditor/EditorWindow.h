@@ -215,12 +215,37 @@ public:
 	void Draw();
 
 	/**
-	 * @brief Lock the game to a specific weather for editing.
+	 * @brief What the menu reads of the game's clock and sky: the game thread publishes it at each main tick (GameTick), so the
+	 * ImGui frame never reads the calendar or the sky itself.
+	 */
+	struct GameView
+	{
+		bool hasCalendar = false;
+		float gameHour = 12.0f;
+		float timeScale = 20.0f;
+		bool hasSky = false;
+		float skyGameHour = 12.0f;  // the sky's currentGameHour
+		RE::TESWeather* currentWeather = nullptr;
+		RE::TESWeather* lastWeather = nullptr;  // the weather being left during a transition
+		RE::TESWeather* defaultWeather = nullptr;
+		float currentWeatherPct = 1.0f;
+		RE::TESClimate* climate = nullptr;  // the sky's current climate
+	};
+
+	/** @brief Any thread. The game view as the last main tick published it. */
+	static GameView PublishedGameView();
+
+	/** @brief Main thread, at plugin load: runs GameTick at every main tick. */
+	static void InstallGameTick();
+
+	/**
+	 * @brief Lock the game to a specific weather for editing. The lock takes effect at once; the sky is changed on the game
+	 * thread (through the game-thread queue).
 	 * @param weather The weather form to force active and guard against engine weather changes.
 	 */
 	void LockWeather(RE::TESWeather* weather);
 
-	/** @brief Unlock the weather, releasing the override so natural progression resumes. */
+	/** @brief Unlock the weather, releasing the override so natural progression resumes. The sky is restored on the game thread. */
 	void UnlockWeather();
 
 	/** @brief Returns true if a weather is currently locked for editing. */
@@ -259,10 +284,11 @@ public:
 	/** @brief Returns true if InstallWeatherLockHooks successfully redirected both call sets. */
 	static bool AreWeatherLockHooksInstalled();
 
-	/** @brief Repair the locked weather if the engine changed it or queued an override release. Call once per frame. */
+	/** @brief Game thread. Repair the locked weather if the engine changed it or queued an override release. GameTick calls it. */
 	static void MaintainWeatherLock();
 
-	// Time controls
+	// Time controls. The calendar is written on the game thread: called from anywhere else, these post themselves to the
+	// game-thread queue.
 	/** @brief Pause in-game time by setting the timescale to zero. */
 	void PauseTime();
 
@@ -270,13 +296,19 @@ public:
 	void ResumeTime();
 
 	/** @brief Toggle between paused and resumed time states. */
-	inline void TogglePause() { timePaused ? ResumeTime() : PauseTime(); }
+	inline void TogglePause() { IsTimePaused() ? ResumeTime() : PauseTime(); }
 
 	/** @brief Reset the timescale to the vanilla default (20x). */
 	void ResetTimeScale();
 
+	/** @brief Sets the game hour (0-24), renewing a held weather lock's expiry as a clock edit must. */
+	void SetGameHour(float a_hour);
+
+	/** @brief Sets the timescale. */
+	void SetTimeScale(float a_scale);
+
 	/** @brief Returns true if in-game time is currently paused. */
-	bool IsTimePaused() const { return timePaused; }
+	bool IsTimePaused() const { return timePaused.load(std::memory_order_acquire); }
 
 	/**
 	 * @brief Restores time around menus the engine cannot complete with a zero timescale, and
@@ -319,7 +351,7 @@ public:
 	bool DrawTimePauseToggle(const char* id, const ImVec2& size = ImVec2(0, 0));
 
 	/** @brief Logarithmic time-scale slider synced to the calendar, disabled while time is paused. */
-	void DrawTimeScaleSlider(const char* id, RE::Calendar* calendar);
+	void DrawTimeScaleSlider(const char* id, const GameView& view);
 
 	/** @brief Draw the full time controls panel (pause, game time, timescale). */
 	void DrawTimeControls();
@@ -511,8 +543,8 @@ private:
 	/** @brief Locks the current weather once any in-progress transition finishes, unless the user already locked one. */
 	void LockWeatherForOverlay();
 
-	/// True while the lock belongs to the overlay, so closing it only releases what it took.
-	bool weatherLockedByOverlay = false;
+	/// True while the lock belongs to the overlay, so closing it only releases what it took. Set by the game thread too.
+	std::atomic<bool> weatherLockedByOverlay = false;
 	/** @brief The main menu was open when the editor opened, so closing the editor reopens it. */
 	bool returnToMenu = false;
 
@@ -526,17 +558,21 @@ private:
 	/** @brief Acts on the answer to toolPrompt. */
 	void DrawToolPrompt();
 
-	/// True from overlay open until its weather lock engages or the overlay closes.
-	bool overlayWeatherLockPending = false;
-	/// Sky region at lock time, restored on unlock since ForceWeather clears it.
+	/// True from overlay open until its weather lock engages or the overlay closes. Cleared by the game thread too.
+	std::atomic<bool> overlayWeatherLockPending = false;
+	/// An overlay lock attempt is queued for the game thread.
+	std::atomic<bool> overlayWeatherLockQueued = false;
+	/// Sky region at lock time, restored on unlock since ForceWeather clears it. Game thread.
 	RE::TESRegion* regionBeforeLock = nullptr;
 
-	// Time control state
-	bool timePaused = false;
-	float savedTimeScale = kVanillaTimeScale;
+	// Time control state. timePaused and savedTimeScale are the game thread's; the menu reads them.
+	std::atomic<bool> timePaused = false;
+	std::atomic<float> savedTimeScale = kVanillaTimeScale;
 	float timeScaleSlider = kVanillaTimeScale;
-	bool timeRestoredForMenu = false;
-	bool wasPausedBeforeMenu = false;
+	float gameHourSlider = 12.0f;  // the hour shown while the slider is dragged, ahead of the published one
+	bool gameHourDragging = false;
+	bool timeRestoredForMenu = false;  // game thread
+	bool wasPausedBeforeMenu = false;  // game thread
 	// Each refresh recomputes the whole terrain shadow map, so scrubbing is throttled well below frame rate.
 	static constexpr double kGameHourScrubRefreshIntervalSeconds = 0.1;
 	double lastGameHourScrubRefreshTime = 0.0;

@@ -128,9 +128,9 @@ public:
 	// Shared weather-control backend, used by both the feature page and the Weather Picker Window.
 	/** @brief Rebuilds the filtered weather list (and clears the selection) if the flag filter changed. */
 	static void SyncWeatherFilter();
-	/** @brief Switches to the weather at @p filteredIdx of the filtered list, honouring accelerate and the weather lock. */
+	/** @brief Switches to the weather at @p filteredIdx of the filtered list, honouring accelerate and the weather lock. The sky changes on the game thread. */
 	static void SelectWeather(RE::Sky* sky, int filteredIdx);
-	/** @brief Returns the sky to its default weather, releasing the weather lock first so the reset can take hold. */
+	/** @brief Returns the sky to its default weather, releasing the weather lock first so the reset can take hold. The sky changes on the game thread. */
 	static void ResetWeatherToDefault(RE::Sky* sky);
 	/**
 	 * Draws the transition progress bar for the current -> last weather blend.
@@ -172,6 +172,7 @@ private:
 	static inline std::vector<RE::TESWeather*> s_allWeathers;
 	static inline std::vector<RE::TESWeather*> s_filteredWeathers;
 	static inline int s_selectedWeatherIdx = -1;
+	static inline std::atomic<RE::TESWeather*> s_resetToWeather{ nullptr };  // set by a reset on the game thread, taken by SyncWeatherFilter
 	static inline uint32_t s_weatherFlagFilter = ALL_WEATHER_FLAGS;  // Start with all filters enabled by default (bits 0-6)
 	static inline uint32_t s_lastWeatherFlagFilter = UNCLASSIFIED_FLAG;
 	static inline bool s_accelerateWeatherChange = true;

@@ -319,7 +319,7 @@ void PrecipitationWidget::RevertChanges()
 	lastInvalidTexture.clear();
 	lastCheckedBuffer.clear();
 	lastCheckedExists = false;
-	ApplyChanges();
+	RequestApply();
 }
 
 std::vector<Widget::SearchResult> PrecipitationWidget::CollectSearchableSettings() const

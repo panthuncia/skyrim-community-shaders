@@ -7,6 +7,7 @@
 #include "LinearLighting.h"
 #include "Utils/Climate.h"
 #include "Utils/Game.h"
+#include "Utils/GameThread.h"
 
 #define I18N_KEY_PREFIX "feature.sky_sync."
 
@@ -31,6 +32,26 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	FullMoonIntensity,
 	DisabledWorldspaces)
 
+SkySync::SkySync()
+{
+	const auto bind = [](auto& a_setting, std::string_view a_name) { a_setting.Bind(CS::SettingRegistry::Declare(fmt::format("SkySync.{}", a_name))); };
+	bind(settings.Enabled, "Enabled");
+	bind(settings.UseAlternateSunPath, "UseAlternateSunPath");
+	bind(settings.MoonLightSource, "MoonLightSource");
+	bind(settings.SunPath, "SunPath");
+	bind(settings.CustomAngle, "CustomAngle");
+	bind(settings.MinShadowElevation, "MinShadowElevation");
+	bind(settings.ShadowTransitionDuration, "ShadowTransitionDuration");
+	bind(settings.DimSunlightUnderHorizon, "DimSunlightUnderHorizon");
+	bind(settings.DimVolumetricLighting, "DimVolumetricLighting");
+	bind(settings.HorizonFadeHours, "HorizonFadeHours");
+	bind(settings.HorizonFadeElevation, "HorizonFadeElevation");
+	bind(settings.HorizonElevation, "HorizonElevation");
+	bind(settings.NewMoonIntensity, "NewMoonIntensity");
+	bind(settings.CrescentMoonIntensity, "CrescentMoonIntensity");
+	bind(settings.FullMoonIntensity, "FullMoonIntensity");
+}
+
 void SkySync::DrawSettings()
 {
 	const char* sunPathNames[] = {
@@ -45,77 +66,75 @@ void SkySync::DrawSettings()
 		T(TKEY("moon_light_source_secunda"), "Secunda")
 	};
 
-	ImGui::Checkbox(T(TKEY("enabled"), "Enabled"), &settings.Enabled);
+	Util::Checkbox(T(TKEY("enabled"), "Enabled"), settings.Enabled);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::TextUnformatted(T(TKEY("enabled_tooltip"), "Enable or disable Sky Sync features."));
 	}
 
-	ImGui::Checkbox(T(TKEY("use_alternate_sun_path"), "Use alternate sun path"), &settings.UseAlternateSunPath);
+	Util::Checkbox(T(TKEY("use_alternate_sun_path"), "Use alternate sun path"), settings.UseAlternateSunPath);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::TextUnformatted(T(TKEY("use_alternate_sun_path_tooltip"), "Calculate sun position based on time of day and season instead of vanilla movement."));
 	}
 
 	if (settings.UseAlternateSunPath) {
-		if (ImGui::SliderInt(T(TKEY("sun_path"), "Sun path"), &settings.SunPath, 0, static_cast<uint8_t>(SunPath::Count) - 1, sunPathNames[settings.SunPath], ImGuiSliderFlags_AlwaysClamp))
-			SetSunAngle();
+		Util::SliderInt(T(TKEY("sun_path"), "Sun path"), settings.SunPath, 0, static_cast<uint8_t>(SunPath::Count) - 1, sunPathNames[settings.SunPath.Get()], ImGuiSliderFlags_AlwaysClamp);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::TextUnformatted(T(TKEY("sun_path_tooltip"), "Choose the trajectory the sun takes across the sky."));
 		}
 
 		if (settings.SunPath == static_cast<int32_t>(SunPath::Custom)) {
-			if (ImGui::SliderFloat(T(TKEY("custom_angle"), "Custom angle"), &settings.CustomAngle, -90.0f, 90.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp))
-				SetSunAngle();
+			Util::SliderFloat(T(TKEY("custom_angle"), "Custom angle"), settings.CustomAngle, -90.0f, 90.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				ImGui::TextUnformatted(T(TKEY("custom_angle_tooltip"), "Set a custom angle for the sun's trajectory."));
 			}
 		}
 	}
 
-	ImGui::SliderInt(T(TKEY("moon_light_source"), "Moon light source"), &settings.MoonLightSource, 0, static_cast<uint8_t>(MoonLightSource::Count) - 1, moonLightSourceNames[settings.MoonLightSource], ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderInt(T(TKEY("moon_light_source"), "Moon light source"), settings.MoonLightSource, 0, static_cast<uint8_t>(MoonLightSource::Count) - 1, moonLightSourceNames[settings.MoonLightSource.Get()], ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::TextUnformatted(T(TKEY("moon_light_source_tooltip"), "Select which moon casts shadows during the night."));
 	}
 
-	ImGui::SliderFloat(T(TKEY("min_shadow_elevation"), "Min Shadow Elevation"), &settings.MinShadowElevation, 0.0f, 45.0f, "%.1f deg", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderFloat(T(TKEY("min_shadow_elevation"), "Min Shadow Elevation"), settings.MinShadowElevation, 0.0f, 45.0f, "%.1f deg", ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("min_shadow_elevation_tooltip"), "The minimum angle sunlight will set to. Caps shadow length. Higher = shorter shadows at sunset/sunrise."));
 	}
 
-	ImGui::SliderFloat(T(TKEY("shadow_transition_duration"), "Shadow Transition Duration"), &settings.ShadowTransitionDuration, 0.0f, 500.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderFloat(T(TKEY("shadow_transition_duration"), "Shadow Transition Duration"), settings.ShadowTransitionDuration, 0.0f, 500.0f, "%.0f", ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("shadow_transition_duration_tooltip"), "How long (in game-time units) the shadow direction takes to fade between sources. 300 = ~15 seconds at timescale 20."));
 	}
 
-	ImGui::SliderFloat(T(TKEY("horizon_elevation"), "Effective Horizon"), &settings.HorizonElevation, MinHorizonElevation, 0.0f, "%.1f deg", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderFloat(T(TKEY("horizon_elevation"), "Effective Horizon"), settings.HorizonElevation, MinHorizonElevation, 0.0f, "%.1f deg", ImGuiSliderFlags_AlwaysClamp);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::TextUnformatted(T(TKEY("horizon_elevation_tooltip"), "Elevation treated as the horizon, where light fades to zero and the sun and moons hand over. Lower it to let the light fade out slightly below the visible horizon."));
 	}
 
-	ImGui::Checkbox(T(TKEY("dim_sunlight_under_horizon"), "Dim Sunlight Under Horizon"), &settings.DimSunlightUnderHorizon);
+	Util::Checkbox(T(TKEY("dim_sunlight_under_horizon"), "Dim Sunlight Under Horizon"), settings.DimSunlightUnderHorizon);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::TextUnformatted(T(TKEY("dim_sunlight_under_horizon_tooltip"), "Fade directional light to zero as the sun or moon approaches the horizon."));
 	}
 
-	ImGui::Checkbox(T(TKEY("fade_volumetric_lighting"), "Fade Volumetric Lighting"), &settings.DimVolumetricLighting);
+	Util::Checkbox(T(TKEY("fade_volumetric_lighting"), "Fade Volumetric Lighting"), settings.DimVolumetricLighting);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::TextUnformatted(T(TKEY("fade_volumetric_lighting_tooltip"), "Also fade volumetric lighting with the directional dim around dawn and dusk."));
 	}
 
 	if (settings.DimSunlightUnderHorizon || settings.DimVolumetricLighting) {
-		ImGui::SliderFloat(T(TKEY("horizon_fade_duration"), "Moonlight Fade Duration"), &settings.HorizonFadeHours, 0.0f, MaxHorizonFadeHours, "%.1f h", ImGuiSliderFlags_AlwaysClamp);
+		Util::SliderFloat(T(TKEY("horizon_fade_duration"), "Moonlight Fade Duration"), settings.HorizonFadeHours, 0.0f, MaxHorizonFadeHours, "%.1f h", ImGuiSliderFlags_AlwaysClamp);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::TextUnformatted(T(TKEY("horizon_fade_duration_tooltip"), "How long (in game hours) moonlight takes to fade in once a moon casts shadows."));
 		}
 
-		ImGui::SliderFloat(T(TKEY("horizon_fade_elevation"), "Horizon Fade Elevation"), &settings.HorizonFadeElevation, 0.0f, MaxHorizonFadeElevation, "%.1f deg", ImGuiSliderFlags_AlwaysClamp);
+		Util::SliderFloat(T(TKEY("horizon_fade_elevation"), "Horizon Fade Elevation"), settings.HorizonFadeElevation, 0.0f, MaxHorizonFadeElevation, "%.1f deg", ImGuiSliderFlags_AlwaysClamp);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::TextUnformatted(T(TKEY("horizon_fade_elevation_tooltip"), "Height above the horizon at which the sun or moon light starts fading out. Higher = longer fade."));
 		}
 	}
 
-	ImGui::SliderFloat(T(TKEY("new_moon_intensity"), "New Moon Intensity"), &settings.NewMoonIntensity, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
-	ImGui::SliderFloat(T(TKEY("crescent_intensity"), "Crescent Intensity"), &settings.CrescentMoonIntensity, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
-	ImGui::SliderFloat(T(TKEY("full_moon_intensity"), "Full Moon Intensity"), &settings.FullMoonIntensity, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderFloat(T(TKEY("new_moon_intensity"), "New Moon Intensity"), settings.NewMoonIntensity, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderFloat(T(TKEY("crescent_intensity"), "Crescent Intensity"), settings.CrescentMoonIntensity, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
+	Util::SliderFloat(T(TKEY("full_moon_intensity"), "Full Moon Intensity"), settings.FullMoonIntensity, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 
 	if (ImGui::TreeNodeEx(T(TKEY("disabled_worldspaces"), "Disabled Worldspaces"), ImGuiTreeNodeFlags_None)) {
 		Util::TextUnformattedDisabled(T(TKEY("disabled_worldspaces_hint"), "Sky Sync leaves lighting to vanilla in these worldspaces."));
@@ -142,18 +161,18 @@ void SkySync::DrawSettings()
 		}
 		if (removed) {
 			worldspaces.erase(worldspaces.begin() + *removed);
-			UpdateWorldspaceDisabled();
+			PublishDisabledWorldspaces();
 		}
 
 		const auto player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
 		const auto worldspace = player ? player->GetWorldspace() : nullptr;
 		const std::string editorID = worldspace && worldspace->GetFormEditorID() ? worldspace->GetFormEditorID() : "";
 		{
-			auto addGuard = Util::DisableGuard(editorID.empty() || IsWorldspaceDisabled(worldspace));
+			auto addGuard = Util::DisableGuard(editorID.empty() || IsWorldspaceDisabled(worldspaces, worldspace));
 			const auto addLabel = I18n::GetSingleton()->Format(TKEY("add_current_worldspace"), { { "name", editorID.empty() ? std::string("-") : editorID } }, "Add Current Worldspace ({name})");
 			if (Util::Button(addLabel.c_str())) {
 				worldspaces.push_back(editorID);
-				UpdateWorldspaceDisabled();
+				PublishDisabledWorldspaces();
 			}
 		}
 
@@ -164,15 +183,14 @@ void SkySync::DrawSettings()
 void SkySync::LoadSettings(json& o_json)
 {
 	settings = o_json;
-	settings.MoonLightSource = std::clamp(settings.MoonLightSource, static_cast<int32_t>(MoonLightSource::Brightest), static_cast<int32_t>(MoonLightSource::Secunda));
-	settings.SunPath = std::clamp(settings.SunPath, static_cast<int32_t>(SunPath::Southern), static_cast<int32_t>(SunPath::Custom));
-	settings.CustomAngle = std::clamp(settings.CustomAngle, -90.0f, 90.0f);
-	settings.MinShadowElevation = std::clamp(settings.MinShadowElevation, 0.0f, 45.0f);
-	settings.HorizonFadeHours = std::clamp(settings.HorizonFadeHours, 0.0f, MaxHorizonFadeHours);
-	settings.HorizonFadeElevation = std::clamp(settings.HorizonFadeElevation, 0.0f, MaxHorizonFadeElevation);
-	settings.HorizonElevation = std::clamp(settings.HorizonElevation, MinHorizonElevation, 0.0f);
-	SetSunAngle();
-	UpdateWorldspaceDisabled();
+	settings.MoonLightSource = std::clamp(settings.MoonLightSource.Get(), static_cast<int32_t>(MoonLightSource::Brightest), static_cast<int32_t>(MoonLightSource::Secunda));
+	settings.SunPath = std::clamp(settings.SunPath.Get(), static_cast<int32_t>(SunPath::Southern), static_cast<int32_t>(SunPath::Custom));
+	settings.CustomAngle = std::clamp(settings.CustomAngle.Get(), -90.0f, 90.0f);
+	settings.MinShadowElevation = std::clamp(settings.MinShadowElevation.Get(), 0.0f, 45.0f);
+	settings.HorizonFadeHours = std::clamp(settings.HorizonFadeHours.Get(), 0.0f, MaxHorizonFadeHours);
+	settings.HorizonFadeElevation = std::clamp(settings.HorizonFadeElevation.Get(), 0.0f, MaxHorizonFadeElevation);
+	settings.HorizonElevation = std::clamp(settings.HorizonElevation.Get(), MinHorizonElevation, 0.0f);
+	PublishDisabledWorldspaces();
 }
 
 void SkySync::SaveSettings(json& o_json)
@@ -183,8 +201,15 @@ void SkySync::SaveSettings(json& o_json)
 void SkySync::RestoreDefaultSettings()
 {
 	settings = {};
-	SetSunAngle();
-	UpdateWorldspaceDisabled();
+	PublishDisabledWorldspaces();
+}
+
+void SkySync::PublishDisabledWorldspaces()
+{
+	GameThread::Post("Sky Sync's disabled worldspaces", [this, list = settings.DisabledWorldspaces]() mutable {
+		gameDisabledWorldspaces = std::move(list);
+		UpdateWorldspaceDisabled();
+	});
 }
 
 void SkySync::PostPostLoad()
@@ -266,7 +291,7 @@ void SkySync::DisableOnConflict(std::string_view conflictName)
 
 void SkySync::OnSkyUpdateColors(RE::Sky* sky)
 {
-	if (!settings.Enabled || !active || !sky) {
+	if (!settings.Enabled.Adopted() || !active || !sky) {
 		flashWeight = 0.0f;
 		return;
 	}
@@ -275,12 +300,12 @@ void SkySync::OnSkyUpdateColors(RE::Sky* sky)
 	// Lightning strikes from overhead rather than the caster, so only the light under the flash is dimmed
 	const float flash = GetDirectionalFlash(sky);
 	const RE::NiColor flashLight{ std::min(flash, dirLight.red), std::min(flash, dirLight.green), std::min(flash, dirLight.blue) };
-	dirLight = (dirLight - flashLight) * GetLightFactor(settings.DimSunlightUnderHorizon) + flashLight;
+	dirLight = (dirLight - flashLight) * GetLightFactor(settings.DimSunlightUnderHorizon.Adopted()) + flashLight;
 	const float totalLight = dirLight.red + dirLight.green + dirLight.blue;
 	flashWeight = totalLight > 0.0f ? (flashLight.red + flashLight.green + flashLight.blue) / totalLight : 0.0f;
 
 	if (gVolumetricLighting)
-		gVolumetricLighting->intensity *= GetLightFactor(settings.DimVolumetricLighting);
+		gVolumetricLighting->intensity *= GetLightFactor(settings.DimVolumetricLighting.Adopted());
 }
 
 void SkySync::ApplyMoonlightColors(RE::Sky* sky)
@@ -288,7 +313,7 @@ void SkySync::ApplyMoonlightColors(RE::Sky* sky)
 	moonNightWeight = 0.0f;
 	lightNightWeight = 0.0f;
 	// Only where vanilla lights from weather colours; lighting templates and rooms are left alone
-	if (!settings.Enabled || !active || !sky || !sunBelowHorizon || !sky->currentWeather || sky->mode.get() != RE::Sky::Mode::kFull ||
+	if (!settings.Enabled.Adopted() || !active || !sky || !sunBelowHorizon || !sky->currentWeather || sky->mode.get() != RE::Sky::Mode::kFull ||
 		sky->extLightingOverride || sky->currentRoom || sky->previousRoom)
 		return;
 
@@ -304,7 +329,7 @@ void SkySync::ApplyMoonlightColors(RE::Sky* sky)
 	};
 
 	// Full night at once, since the light is dimmed out at the handover; undimmed, vanilla's blend avoids a pop
-	if (settings.DimSunlightUnderHorizon) {
+	if (settings.DimSunlightUnderHorizon.Adopted()) {
 		auto sunlightBlend = nightBlend(RE::TESWeather::ColorTypes::kSunlight);
 		sky->SetColor(sky->skyColor[RE::TESWeather::ColorTypes::kSunlight], &sunlightBlend, GetDirectionalFlash(sky));
 		lightNightWeight = 1.0f;
@@ -318,7 +343,7 @@ void SkySync::ApplyMoonlightColors(RE::Sky* sky)
 	moonNightWeight = twilightCap;
 	moonGlare += (nightMoonGlare - moonGlare) * moonNightWeight;
 
-	if (gVolumetricLighting && settings.DimVolumetricLighting)
+	if (gVolumetricLighting && settings.DimVolumetricLighting.Adopted())
 		*gVolumetricLighting = BlendNightVolumetricLighting(sky, currentWeight, lastWeight);
 }
 
@@ -411,7 +436,7 @@ bool SkySync::Update(const RE::Sky* sky)
 	active = false;
 	currentDim = 1.0f;
 
-	if (!settings.Enabled) {
+	if (!settings.Enabled.Adopted()) {
 		ResetSkyRotation(sky);
 		return std::exchange(immediateTransitionReady, false);
 	}
@@ -445,7 +470,7 @@ bool SkySync::Update(const RE::Sky* sky)
 	}
 
 	auto& physicalSky = globals::features::physicalSky;
-	bool physicalSkyInteriorOverride = physicalSky.IsActive() && physicalSky.settings.forceEnableAllInteriorCells;
+	bool physicalSkyInteriorOverride = physicalSky.IsActive() && physicalSky.settings.forceEnableAllInteriorCells.Adopted();
 	// Exterior worldspaces run unless listed as disabled; interior cells require the sunlight-shadows flag.
 	if (worldspaceDisabled || (cell && cell->IsInteriorCell() && !cell->cellFlags.all(static_cast<RE::TESObjectCELL::Flag>(CellFlagExt::kSunlightShadows)) && !physicalSkyInteriorOverride)) {
 		// Vanilla drives the sun in a disabled worldspace, so a pending transition has nothing to wait for
@@ -486,7 +511,7 @@ bool SkySync::Update(const RE::Sky* sky)
 	const bool transitionCompleted = std::exchange(immediateTransitionReady, false);
 	const bool wasTransitioning = shadowFader.transitioning;
 	const Caster previousTarget = shadowFader.target;
-	shadowFader.Update(sky, directions, intensities, settings.ShadowTransitionDuration, fadeAdvance, transitionCompleted || resetTransition);
+	shadowFader.Update(sky, directions, intensities, settings.ShadowTransitionDuration.Adopted(), fadeAdvance, transitionCompleted || resetTransition);
 	// A finished caster fade counts as a completed transition, so cached shadows (terrain) refresh to the new caster.
 	// A swap can also start and finish in one update (zero duration), so a changed target counts too.
 	const bool casterSettled = (wasTransitioning || shadowFader.target != previousTarget) && !shadowFader.transitioning;
@@ -514,18 +539,18 @@ void SkySync::ApplyLightColor(const RE::Sky* sky) const
 	};
 	const float sourceShare = shadowFader.sourceShare;
 	const RE::NiColor color = bodyLight(source) * sourceShare + bodyLight(target) * (1.0f - sourceShare);
-	globals::features::linearLighting.SetSunlightColor(sky->sun->light.get(), color * GetLightFactor(settings.DimSunlightUnderHorizon));
+	globals::features::linearLighting.SetSunlightColor(sky->sun->light.get(), color * GetLightFactor(settings.DimSunlightUnderHorizon.Adopted()));
 }
 
 float SkySync::GetHeightAboveHorizon(const RE::NiPoint3& dir) const
 {
-	return DirectX::XMScalarASinEst(dir.z) - DirectX::XMConvertToRadians(settings.HorizonElevation);
+	return DirectX::XMScalarASinEst(dir.z) - DirectX::XMConvertToRadians(settings.HorizonElevation.Adopted());
 }
 
 float SkySync::GetHorizonDim(float heightAboveHorizon) const
 {
 	// Elevation-based so every path fades over the same arc, however long it lingers near the horizon
-	const float fadeRadians = std::max(DirectX::XMConvertToRadians(settings.HorizonFadeElevation), FLT_EPSILON);
+	const float fadeRadians = std::max(DirectX::XMConvertToRadians(settings.HorizonFadeElevation.Adopted()), FLT_EPSILON);
 	return std::clamp(heightAboveHorizon / fadeRadians, 0.0f, 1.0f);
 }
 
@@ -544,7 +569,7 @@ float SkySync::GetTwilightCap(const RE::TESClimate::Timing& timing, float hour, 
 	// Derived from the clock rather than accumulated, so scrubbing either way gives the same light
 	const float sunriseHorizon = GetSunHorizonHours(timing).first;
 	const float hoursToSunrise = hour < sunriseHorizon ? sunriseHorizon - hour : sunriseHorizon + HoursPerDay - hour;
-	float hoursSinceHandover = hour - GetSunCrossingHour(timing, DirectX::XMConvertToRadians(settings.HorizonElevation), false);
+	float hoursSinceHandover = hour - GetSunCrossingHour(timing, DirectX::XMConvertToRadians(settings.HorizonElevation.Adopted()), false);
 	if (hoursSinceHandover < 0.0f)
 		hoursSinceHandover += HoursPerDay;
 	if (hoursToSunrise < hoursSinceHandover)
@@ -568,7 +593,7 @@ float SkySync::GetSunCrossingHour(const RE::TESClimate::Timing& timing, float el
 
 void SkySync::HoldLowSunDirection(const RE::TESClimate::Timing& timing, float hour, const RE::NiPoint3& sunDir, RE::NiPoint3& shadowDir) const
 {
-	const float minElevation = DirectX::XMConvertToRadians(settings.MinShadowElevation);
+	const float minElevation = DirectX::XMConvertToRadians(settings.MinShadowElevation.Adopted());
 	if (DirectX::XMScalarASinEst(sunDir.z) >= minElevation)
 		return;
 
@@ -581,7 +606,7 @@ void SkySync::HoldLowSunDirection(const RE::TESClimate::Timing& timing, float ho
 RE::NiPoint3 SkySync::GetSunDirectionAtHour(const RE::TESClimate::Timing& timing, float hour) const
 {
 	const auto [sunrise, sunset] = GetSunHorizonHours(timing);
-	return settings.UseAlternateSunPath ? CalculateAlternateSunDirection(hour, sunrise, sunset, sunAngle) : CalculateVanillaSunDirection(hour, sunrise, sunset);
+	return settings.UseAlternateSunPath.Adopted() ? CalculateAlternateSunDirection(hour, sunrise, sunset, GetSunAngle()) : CalculateVanillaSunDirection(hour, sunrise, sunset);
 }
 
 RE::NiPoint3 SkySync::CalculateVanillaSunDirection(float hour, float sunrise, float sunset)
@@ -619,7 +644,7 @@ RE::NiPoint3 SkySync::CalculateAlternateSunDirection(float hour, float sunrise, 
 
 float SkySync::GetSunDistance(const RE::Sky* sky) const
 {
-	if (settings.UseAlternateSunPath) {
+	if (settings.UseAlternateSunPath.Adopted()) {
 		const auto [sunrise, sunset] = GetSunHorizonHours(sky->currentClimate->timing);
 		const float sinPhi = DirectX::XMScalarSinEst(GetAlternateSunPhase(sky->currentGameHour, sunrise, sunset));
 		return std::lerp(SunHorizonDistance, SunPeakDistance, std::max(sinPhi, 0.0f));
@@ -629,22 +654,19 @@ float SkySync::GetSunDistance(const RE::Sky* sky) const
 	return distance < FLT_EPSILON ? SunPeakDistance : distance;
 }
 
-void SkySync::SetSunAngle()
+float SkySync::GetSunAngle() const
 {
-	switch (static_cast<SunPath>(settings.SunPath)) {
+	switch (static_cast<SunPath>(settings.SunPath.Adopted())) {
 	case SunPath::Southern:
-		sunAngle = SouthernSunAngle;
-		break;
+		return SouthernSunAngle;
 	case SunPath::Northern:
-		sunAngle = NorthernSunAngle;
-		break;
+		return NorthernSunAngle;
 	case SunPath::Vanilla:
-		sunAngle = VanillaSunAngle;
-		break;
+		return VanillaSunAngle;
 	case SunPath::Custom:
-		sunAngle = 90.0f + settings.CustomAngle;
-		break;
-	default:;
+		return 90.0f + settings.CustomAngle.Adopted();
+	default:
+		return VanillaSunAngle;
 	}
 }
 
@@ -682,17 +704,17 @@ void SkySync::ResetSkyRotation(const RE::Sky* sky)
 	skyRotationApplied = false;
 }
 
-bool SkySync::IsWorldspaceDisabled(const RE::TESWorldSpace* worldspace) const
+bool SkySync::IsWorldspaceDisabled(const std::vector<std::string>& a_list, const RE::TESWorldSpace* worldspace)
 {
 	const char* editorID = worldspace ? worldspace->GetFormEditorID() : nullptr;
 	// Editor IDs are case-insensitive in the engine
-	return editorID && std::ranges::any_of(settings.DisabledWorldspaces, [editorID](const std::string& listed) { return !_stricmp(listed.c_str(), editorID); });
+	return editorID && std::ranges::any_of(a_list, [editorID](const std::string& listed) { return !_stricmp(listed.c_str(), editorID); });
 }
 
 std::pair<float, float> SkySync::GetSunHorizonHours(const RE::TESClimate::Timing& timing) const
 {
 	// Vanilla's sun touches the horizon where its alpha fade ends: the interval midpoint +- half fSunAlphaTransTime
-	const float halfTransition = settings.UseAlternateSunPath ? AlternateSunHorizonOffsetHours :
+	const float halfTransition = settings.UseAlternateSunPath.Adopted() ? AlternateSunHorizonOffsetHours :
 	                                                            (gSunAlphaTransTime ? gSunAlphaTransTime->GetFloat() : DefaultSunAlphaTransTime) * 0.5f;
 	return { Util::Climate::GetMiddleHour(timing.sunrise) - halfTransition, Util::Climate::GetMiddleHour(timing.sunset) + halfTransition };
 }
@@ -738,10 +760,10 @@ void SkySync::ProcessMoon(const RE::Sky* sky, const Caster type, RE::NiPoint3 di
 	dirs[idx] = Util::Moon::GetFacingAxis(moon->root->local.rotate);
 
 	const auto& baseColor = type == Caster::Masser ? Util::Moon::MasserBaseColor : Util::Moon::SecundaBaseColor;
-	float4 color = Util::Moon::GetLightColor(moon, baseColor, settings.NewMoonIntensity, settings.CrescentMoonIntensity, settings.FullMoonIntensity).GetColor();
+	float4 color = Util::Moon::GetLightColor(moon, baseColor, settings.NewMoonIntensity.Adopted(), settings.CrescentMoonIntensity.Adopted(), settings.FullMoonIntensity.Adopted()).GetColor();
 	colors[idx] = color;
 
-	const auto src = static_cast<MoonLightSource>(settings.MoonLightSource);
+	const auto src = static_cast<MoonLightSource>(settings.MoonLightSource.Adopted());
 	const bool isValidSource = src == MoonLightSource::Brightest || (src == MoonLightSource::Masser && type == Caster::Masser) || (src == MoonLightSource::Secunda && type == Caster::Secunda);
 	if (!isValidSource)
 		return;
@@ -793,7 +815,7 @@ SkySync::Caster SkySync::GetMoonLightCaster(const RE::Sky* sky) const
 	const float masser = visibility(sky->masser);
 	const float secunda = visibility(sky->secunda);
 
-	switch (static_cast<MoonLightSource>(settings.MoonLightSource)) {
+	switch (static_cast<MoonLightSource>(settings.MoonLightSource.Adopted())) {
 	case MoonLightSource::Masser:
 		return masser > 0.0f ? Caster::Masser : Caster::Zenith;
 	case MoonLightSource::Secunda:
@@ -983,7 +1005,7 @@ float SkySync::ShadowFader::ComputeAlignmentFactor(const RE::NiPoint3& current, 
 
 inline void SkySync::ShadowFader::ClampDirection(RE::NiPoint3& dir)
 {
-	const float minDegrees = globals::features::skySync.settings.MinShadowElevation;
+	const float minDegrees = globals::features::skySync.settings.MinShadowElevation.Adopted();
 	const float minElev = DirectX::XMConvertToRadians(minDegrees);
 	const float elev = DirectX::XMScalarASinEst(dir.z);
 	if (elev >= minElev)

@@ -45,9 +45,10 @@ struct DoF : public PostProcessFeature
 		// Max blur disc radius, as a fraction of the screen width.
 		float MaxNearCoCRadius = 0.025f;
 		float MaxFarCoCRadius = 0.025f;
-		bool targetFocus = false;
+		// Read adopted by Post Processing's capture on the game thread (the focus target search).
+		CS::Setting<bool> targetFocus = false;
 		float targetFocusFocalLength = 50.0f;
-		bool consoleSelection = true;
+		CS::Setting<bool> consoleSelection = true;
 	} settings;
 
 	struct alignas(16) DoFCB

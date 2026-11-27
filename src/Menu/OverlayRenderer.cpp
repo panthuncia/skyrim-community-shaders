@@ -26,6 +26,7 @@
 #include "ShaderCache.h"
 #include "State.h"
 #include "Util.h"
+#include "Utils/GameThread.h"
 #include "Utils/Notifications.h"
 #include "Utils/UISurface.h"
 #include "Vram/DxvkMemory.h"
@@ -238,6 +239,8 @@ void OverlayRenderer::RenderOverlay(
 		Menu& menu;
 		~PublishAtEnd() { menu.PublishInputState(); }
 	} const publishAtEnd{ menu };
+	// Engine and game writes from here go through the game-thread queue; the scope catches the ones that do not.
+	const GameThread::UiFrameScope uiFrame;
 
 	// Input reaches ImGui only through the queue: the input poll and the window proc add to it, the frame's start takes it.
 	processInputEventQueue();
