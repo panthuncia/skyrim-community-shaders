@@ -13,6 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
+#include "RenderGraph/Engine/Native/RenderScene.h"
 
 namespace DCLF::Features::FirstPerson
 {
@@ -25,16 +26,27 @@ namespace DCLF::Features::FirstPerson
 
 		using ViewSubmit = IndirectDraws::ViewSubmit;
 
-		// Builds VS_PerFrame (b12) for the first-person camera. The eye comes from DrawWorld +0x00, which is in world space.
+		// Builds VS_PerFrame (b12) for the first-person camera, as the native driver's game half took it after the first-person shift.
+		// The eye comes from DrawWorld +0x00, which is in world space.
 		bool CaptureCamera(FirstPersonFrame& a_f)
 		{
 			auto& f = a_f;
-			auto* camera = *REL::Relocation<RE::NiCamera**>{ REL::Offset(kFirstPersonCamera) };
-			if (!camera)
-				return false;
-			const auto* eyeWorld = REL::Relocation<const float*>{ REL::Offset(Engine::Address::kDrawWorldEye) }.get();
 			ShadowCameras::Camera view;
-			ShadowCameras::CameraMatrices(*camera, view);
+			std::array<float, 3> eyeWorld{};
+			// The engine's own skeleton (guest, and native's frozen-menu capture) leaves its camera in place.
+			if (const auto& prepared = RenderGraph::Engine::Native::Scene::Current(); prepared.valid) {
+				const auto& taken = prepared.firstPersonCamera;
+				if (!taken.valid)
+					return false;
+				ShadowCameras::CameraMatrices(taken.world, taken.frustum, taken.port, view);
+				eyeWorld = taken.eye;
+			} else {
+				auto* camera = *REL::Relocation<RE::NiCamera**>{ REL::Offset(kFirstPersonCamera) };
+				if (!camera)
+					return false;
+				ShadowCameras::CameraMatrices(*camera, view);
+				std::memcpy(eyeWorld.data(), REL::Relocation<const float*>{ REL::Offset(Engine::Address::kDrawWorldEye) }.get(), sizeof(eyeWorld));
+			}
 			const RE::NiPoint3 eye{ eyeWorld[0], eyeWorld[1], eyeWorld[2] };
 			// The rows were sampled before the first-person shift, so the eye must be the world eye too.
 			view.eye = { eye.x, eye.y, eye.z };

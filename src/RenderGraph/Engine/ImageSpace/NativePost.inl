@@ -573,7 +573,13 @@ namespace NativePost
 		if (const auto dof = EffectAt(3))
 			if (const auto* steps = Field<const bool*>(dof, 0x98))
 				std::memcpy(f.dofSteps.data(), steps, sizeof(f.dofSteps));
-		if (*g.dofCamera) {
+		// Native's driver took the camera's near and far in its game half; the engine's own skeleton leaves the camera in place.
+		if (const auto& prepared = Native::Scene::Current(); prepared.valid) {
+			if (prepared.dofCamera) {
+				f.dofNear = prepared.dofNear;
+				f.dofFar = prepared.dofFar;
+			}
+		} else if (*g.dofCamera) {
 			f.dofNear = Field<float>(*g.dofCamera, 0x160);
 			f.dofFar = Field<float>(*g.dofCamera, 0x164);
 		}
@@ -1776,9 +1782,9 @@ namespace NativePost
 		*g.currentCamera = camera;
 		std::array<std::byte, 16> port{};
 		std::memcpy(port.data(), reinterpret_cast<const std::byte*>(camera) + 0x174, port.size());
-		if (const auto dof = Field<std::uintptr_t>(Field<std::uintptr_t>(base, 0x28), 0x18); dof && *g.dofCamera) {
-			Field<float>(dof, 0x150) = Field<float>(*g.dofCamera, 0x164);
-			Field<float>(dof, 0x14c) = Field<float>(*g.dofCamera, 0x160);
+		if (const auto dof = Field<std::uintptr_t>(Field<std::uintptr_t>(base, 0x28), 0x18); dof && r.frame.readB) {
+			Field<float>(dof, 0x150) = r.frame.dofFar;
+			Field<float>(dof, 0x14c) = r.frame.dofNear;
 		}
 		for (std::uint32_t slot = 0; slot < 4; ++slot)
 			g.setTarget(g.targets, slot, -1, 3, true);

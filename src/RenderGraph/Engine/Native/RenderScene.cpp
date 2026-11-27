@@ -204,39 +204,60 @@ namespace RenderGraph::Engine::Native::Scene
 
 		/**
 		* @brief The clears RenderPlayerView makes before RenderWorld, through the skeleton as Renderer::ClearColor's detour takes them:
-		* the normals target to (c, c, 0, 0), kMAIN to RenderScene's clear colour (414618, alpha 1), and with improved snow the snow
-		* target (0x70) to zero.
+		* the normals target to (c, c, 0, 0), kMAIN to RenderScene's clear colour (alpha 1), and with improved snow the snow target (0x70)
+		* to zero. The values are the game half's.
 		*/
-		void ClearWorldTargets()
+		void ClearWorldTargets(const Prepared& a_frame)
 		{
-			const float half = Global<const float>(230690, 187405);
-			const float normals[4]{ half, half, 0.0f, 0.0f };
+			const float normals[4]{ a_frame.normalsClear, a_frame.normalsClear, 0.0f, 0.0f };
 			Untaken(Skeleton::ClearColour(static_cast<RE::RENDER_TARGET>(WorldPass::NormalsTarget()), normals), "the normals target");
-			const auto& colour = Global<const std::array<float, 3>>(527696, 414618);
-			const float main[4]{ colour[0], colour[1], colour[2], 1.0f };
+			const float main[4]{ a_frame.mainClear[0], a_frame.mainClear[1], a_frame.mainClear[2], 1.0f };
 			Untaken(Skeleton::ClearColour(RE::RENDER_TARGET::kMAIN, main), "kMAIN");
-			if (Global<const bool>(513332, 391105)) {
+			if (a_frame.snowClear) {
 				constexpr float zero[4]{};
 				Untaken(Skeleton::ClearColour(static_cast<RE::RENDER_TARGET>(0x70), zero), "the snow target");
 			}
 		}
 
-		/** @brief Main::RenderScene and Main::RenderPlayerView in native: see RenderScene.h. Main thread, inside Main::DrawFrame. */
-		void RenderScene(RE::Main* a_main, std::uint32_t a_target)
+		/** @brief The first-person camera (415007) as the shift placed it, with Main::DrawWorld's eye (415027, world space). */
+		Prepared::FirstPersonCamera TakeFirstPersonCamera()
 		{
-			auto* player = RE::PlayerCharacter::GetSingleton();
-			auto* camera = RE::Main::WorldRootCamera();
-			if (!player || !camera)
-				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran without the player or the world camera");
-			ZoneScopedN("CS.Native.RenderScene");
-			globals::state->BeginPerfEvent("Player View");
+			Prepared::FirstPersonCamera taken;
+			auto* camera = Global<RE::NiCamera*>(528062, 415007);
+			if (!camera)
+				return taken;
+			taken.valid = true;
+			taken.world = camera->world;
+			const auto& data = camera->GetRuntimeData2();
+			taken.frustum = data.viewFrustum;
+			std::memcpy(taken.port.data(), &data.port, sizeof(taken.port));  // NiRect<float>'s members are protected
+			taken.eye = Global<const std::array<float, 3>>(528082, 415027);
+			return taken;
+		}
+
+		// The world frame's game half, for the render half that follows it.
+		Prepared g_current;
+
+		/**
+		* @brief The driver's game half (decision 8), on the game thread, in the engine's order: the reflections' camera, the branches, the
+		* list processes' camera, the queued lights and the shadow casters with the first-person root and the sky node hidden, the
+		* first-person shift with its camera taken, the sky colours, the first-person port, the shift back, and Main::Draw's tail. Two
+		* points still run here because their game work and their recording are not split yet: SetupSunAndSky (DCLF's frame start, which
+		* takes the first-person rows before the shift, and the water render point) and the shadow casters. The other points are the render
+		* half's.
+		*/
+		Prepared PrepareFrame(RE::Main* a_main, RE::PlayerCharacter& a_player, RE::NiCamera* a_camera, const Snapshot::FrameSnapshot& a_snapshot)
+		{
+			ZoneScopedN("CS.Native.RenderScene.Game");
+			Prepared p;
+			p.valid = true;
 			// The reflections' camera (SE 528353, AE 415299): the radial blur modifier's projection reads it on the game side (AE 107753).
-			Global<RE::NiCamera*>(528353, 415299) = camera;
-			const auto& snapshot = Snapshot::Current();
-			if (!snapshot)
-				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran before any snapshot was adopted");
-			const auto b = ReadBranches(*player, *snapshot);
-			SetListProcessCameras(camera);
+			Global<RE::NiCamera*>(528353, 415299) = a_camera;
+			const auto b = ReadBranches(a_player, a_snapshot);
+			p.firstPerson = b.firstPerson;
+			p.controlDriven = b.controlDriven;
+			p.menuMode = b.menuMode;
+			SetListProcessCameras(a_camera);
 			// +0xD3, Main::SetupSunAndSky: DCLF's frame start and the water render point. Its result (the capture's) holds the node the
 			// shadow casters skip in first person.
 			const auto sky = Point<std::uintptr_t (*)(RE::Main*)>(0xD3, 0xD3, "SetupSunAndSky")(a_main);
@@ -248,53 +269,100 @@ namespace RenderGraph::Engine::Native::Scene
 			const bool skippedHidden = skipped && (Flags(skipped) & kHidden);
 			if (skipped)
 				Flags(skipped) |= kHidden;
-			Point<void (*)(RE::NiCamera*)>(0x1C4, 0x1C4, "CalculateAndDrawShadowCasterLights")(camera);
+			Point<void (*)(RE::NiCamera*)>(0x1C4, 0x1C4, "CalculateAndDrawShadowCasterLights")(a_camera);
 			if (skipped && !skippedHidden)
 				Flags(skipped) &= ~kHidden;
-			if (b.firstPerson)
-				ShiftFirstPerson(*player, false);
-			// +0x2EC, the shadow maps.
-			Point<void (*)()>(0x2EC, 0x2EC, "RenderShadowMaps")();
-			// +0x395, +0x39C, +0x3A1: the depth pass, the masks, the precipitation.
-			Point<void (*)(bool, bool)>(0x395, 0x395, "RenderDepth")(b.firstPerson, b.controlDriven);
-			Point<void (*)(bool)>(0x39C, 0x39C, "RenderShadowMasks")(true);
-			Point<void (*)()>(0x3A1, 0x3A1, "RenderPrecipitation")();
+			// The first-person depth epoch takes the camera the shift placed, before the port below (as RenderDepth saw it).
+			if (b.firstPerson) {
+				ShiftFirstPerson(a_player, false);
+				p.firstPersonCamera = TakeFirstPersonCamera();
+			}
 			CopySkyColours();
 			// The first-person camera's port, when 411491 is set (SE 525010; the constant SE 259744, AE 207173).
 			if (Global<const bool>(525010, 411491))
 				Field<std::array<float, 4>>(Global<RE::NiCamera*>(528062, 415007), 0x174) = Global<const std::array<float, 4>>(259744, 207173);
-			ClearWorldTargets();
-			// +0x841, RenderWorld.
-			Point<void (*)(bool)>(0x831, 0x841, "RenderWorld")(b.menuMode);
+			p.normalsClear = Global<const float>(230690, 187405);
+			p.mainClear = Global<const std::array<float, 3>>(527696, 414618);
+			p.snowClear = Global<const bool>(513332, 391105);
 			if (b.firstPerson) {
 				Flags(b.firstPersonRoot) &= ~kHidden;
-				// +0x8CE, Main::ClearMasks: DCLF's sun mask hook and the first-person hook (which makes no engine call in native).
-				Point<void (*)()>(0x8BE, 0x8CE, "ClearMasks")();
-				// +0x954, the first-person view.
-				Point<void (*)(bool, bool)>(0x944, 0x954, "RenderFirstPersonView")(b.menuMode, b.controlDriven);
-				ShiftFirstPerson(*player, true);
+				ShiftFirstPerson(a_player, true);
 			}
 			// The end-of-frame ImageSpace (SE 527654 / AE 414573 and gEnableEOFImageSpace SE 513299 / AE 391055).
-			if (Global<const bool>(527654, 414573) && Global<const bool>(513299, 391055)) {
-				// +0xA4C, the compute SAO when its helper's flag is set: the engine's function, whose dispatches ImageSpace takes as steps.
-				auto* sao = Field<std::byte*>(Global<std::byte*>(527731, 414660), 0x1D0);
-				if (sao && Field<bool>(sao, 0x20))
-					Point<void (*)(void*, RE::NiCamera*)>(0xA3E, 0xA4C, "RenderSaoCs")(sao, camera);
-				// +0xA54, RenderWorldPostProcess: the post chain's detour runs CS's native body.
-				using PostProcess = void (*)(std::uint32_t);
-				static REL::Relocation<PostProcess> postProcess{ REL::RelocationID(100430, 107148) };
-				postProcess(a_target);
-				// +0xA73, the screen splatter, when ScreenSplatter's root has children.
-				auto* splatter = RE::ScreenSplatter::GetSingleton();
-				auto* splatterRoot = splatter ? Field<std::byte*>(splatter, 0x8) : nullptr;
-				if (splatterRoot && Field<std::uint16_t>(splatterRoot, 0x124) != 0)
-					Point<void (*)()>(0xA6A, 0xA73, "RenderScreenSplatter")();
+			p.endOfFrame = Global<const bool>(527654, 414573) && Global<const bool>(513299, 391055);
+			// The compute SAO when its helper's flag is set; the screen splatter when ScreenSplatter's root has children.
+			auto* sao = Field<std::byte*>(Global<std::byte*>(527731, 414660), 0x1D0);
+			p.saoHelper = sao;
+			p.saoCompute = sao && Field<bool>(sao, 0x20);
+			auto* splatter = RE::ScreenSplatter::GetSingleton();
+			auto* splatterRoot = splatter ? Field<std::byte*>(splatter, 0x8) : nullptr;
+			p.splatter = splatterRoot && Field<std::uint16_t>(splatterRoot, 0x124) != 0;
+			if (auto* dofCamera = Global<RE::NiCamera*>(528062, 415007)) {
+				const auto& frustum = dofCamera->GetRuntimeData2().viewFrustum;
+				p.dofCamera = true;
+				p.dofNear = frustum.fNear;
+				p.dofFar = frustum.fFar;
 			}
 			// +0xA78, Main::Draw's tail (SE 100425, AE 107143): the sun's occlusion query flag, the engine's per-frame releases (an
 			// accumulator's pass list, a frozen ImageSpace texture, the batch renderer's last state), and the fade enable count (S5, CS's).
+			// Nothing in a native world frame fills what it releases, so it ends the game half.
 			using Tail = void (*)();
 			static REL::Relocation<Tail> tail{ REL::RelocationID(100425, 107143) };
 			tail();
+			return p;
+		}
+
+		/**
+		* @brief The driver's render half: CS's points from the shadow maps on, through their call sites' hook chains, with the game half's
+		* values. a_camera only goes to the engine's RenderSaoCs, whose dispatches ImageSpace takes as steps.
+		*/
+		void RecordFrame(const Prepared& a_frame, RE::NiCamera* a_camera, std::uint32_t a_target)
+		{
+			ZoneScopedN("CS.Native.RenderScene.Render");
+			// +0x2EC, the shadow maps.
+			Point<void (*)()>(0x2EC, 0x2EC, "RenderShadowMaps")();
+			// +0x395, +0x39C, +0x3A1: the depth pass, the masks, the precipitation.
+			Point<void (*)(bool, bool)>(0x395, 0x395, "RenderDepth")(a_frame.firstPerson, a_frame.controlDriven);
+			Point<void (*)(bool)>(0x39C, 0x39C, "RenderShadowMasks")(true);
+			Point<void (*)()>(0x3A1, 0x3A1, "RenderPrecipitation")();
+			ClearWorldTargets(a_frame);
+			// +0x841, RenderWorld.
+			Point<void (*)(bool)>(0x831, 0x841, "RenderWorld")(a_frame.menuMode);
+			if (a_frame.firstPerson) {
+				// +0x8CE, Main::ClearMasks: DCLF's sun mask hook and the first-person hook (which makes no engine call in native).
+				Point<void (*)()>(0x8BE, 0x8CE, "ClearMasks")();
+				// +0x954, the first-person view.
+				Point<void (*)(bool, bool)>(0x944, 0x954, "RenderFirstPersonView")(a_frame.menuMode, a_frame.controlDriven);
+			}
+			if (!a_frame.endOfFrame)
+				return;
+			// +0xA4C, the compute SAO: the engine's function, whose dispatches ImageSpace takes as steps.
+			if (a_frame.saoCompute)
+				Point<void (*)(void*, RE::NiCamera*)>(0xA3E, 0xA4C, "RenderSaoCs")(a_frame.saoHelper, a_camera);
+			// +0xA54, RenderWorldPostProcess: the post chain's detour runs CS's native body.
+			using PostProcess = void (*)(std::uint32_t);
+			static REL::Relocation<PostProcess> postProcess{ REL::RelocationID(100430, 107148) };
+			postProcess(a_target);
+			// +0xA73, the screen splatter.
+			if (a_frame.splatter)
+				Point<void (*)()>(0xA6A, 0xA73, "RenderScreenSplatter")();
+		}
+
+		/** @brief Main::RenderScene and Main::RenderPlayerView in native: see RenderScene.h. Main thread, inside Main::DrawFrame. */
+		void RenderScene(RE::Main* a_main, std::uint32_t a_target)
+		{
+			auto* player = RE::PlayerCharacter::GetSingleton();
+			auto* camera = RE::Main::WorldRootCamera();
+			if (!player || !camera)
+				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran without the player or the world camera");
+			const auto& snapshot = Snapshot::Current();
+			if (!snapshot)
+				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran before any snapshot was adopted");
+			ZoneScopedN("CS.Native.RenderScene");
+			globals::state->BeginPerfEvent("Player View");
+			g_current = PrepareFrame(a_main, *player, camera, *snapshot);
+			RecordFrame(g_current, camera, a_target);
+			g_current = {};
 			globals::state->EndPerfEvent();
 		}
 
@@ -326,5 +394,10 @@ namespace RenderGraph::Engine::Native::Scene
 	bool Owns()
 	{
 		return installed;
+	}
+
+	const Prepared& Current()
+	{
+		return g_current;
 	}
 }
