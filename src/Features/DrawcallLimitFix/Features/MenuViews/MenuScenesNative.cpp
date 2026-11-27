@@ -7,6 +7,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Core/Engine/SkinPalettes.h"
+#include "Features/DrawcallLimitFix/Core/Engine/SkinPartitions.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
@@ -932,7 +933,30 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (a_geometry.GetType().get() != RE::BSGeometry::Type::kTriShape)
 				return "not a BSTriShape";
 			const auto* shape = reinterpret_cast<const Family::TriShape*>(a_geometry.GetGeometryRuntimeData().rendererData);
-			const auto triangles = static_cast<const RE::BSTriShape&>(a_geometry).GetTrishapeRuntimeData().triangleCount;
+			auto triangles = static_cast<std::uint32_t>(static_cast<const RE::BSTriShape&>(a_geometry).GetTrishapeRuntimeData().triangleCount);
+			// A skinned shape without renderer data of its own, such as the book's pages, draws its skin partitions' buffers, as the engine's
+			// skinned draw does: the partition row 3 draws (DCLF's world rule). One drawn partition is supported; a shape that draws several
+			// stays left out as before (counted, logged once), as does a skin whose palette update makes no matrices (a first-person hand on
+			// a loading model).
+			if (!shape)
+				if (auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get(); skin && skin->skinPartition) {
+					SkinPalettes::Update(skin, a_geometry.world);
+					if (!skin->numMatrices || !skin->boneMatrices)
+						return kNoBuffers;
+					const auto mask = SkinPartitions::Mask(*skin, 3);
+					if (std::popcount(mask) > 1) {
+						static std::atomic<std::uint64_t> s_several{ 0 };
+						if (s_several.fetch_add(1, std::memory_order_relaxed) == 0)
+							logger::info("[DCLF] menu scenes: {} draws {} skin partitions and has no renderer data of its own; it is left out (counted, logged once)",
+								a_geometry.name.c_str() ? a_geometry.name.c_str() : "?", std::popcount(mask));
+						return kNoBuffers;
+					}
+					if (mask) {
+						const auto& partition = skin->skinPartition->partitions[std::countr_zero(mask)];
+						shape = reinterpret_cast<const Family::TriShape*>(partition.buffData);
+						triangles = partition.triangles;
+					}
+				}
 			Family::Geometry geometry;
 			const auto result = Family::LatchGeometry(shape, 0, triangles, a_vertexDesc, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, geometry, a_run.owners, &a_detail);
 			if (result == Family::GeometryResult::Missing)
@@ -985,11 +1009,16 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 
 		/** @brief A skinned draw's palettes, appended to the run's latch. */
-		const char* AddBones(const RE::BSGeometry& a_geometry, Run& a_run, Draw& a_draw)
+		const char* AddBones(const RE::BSGeometry& a_geometry, Run& a_run, Draw& a_draw, std::string& a_detail)
 		{
 			std::array<std::byte, kBonesBytes> bones;
-			if (!BoneRows(a_geometry, bones))
+			if (!BoneRows(a_geometry, bones)) {
+				const auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get();
+				a_detail = skin ? std::format("{} matrices ({} rows fit), palettes {} and {}", skin->numMatrices, kPaletteRows, skin->boneMatrices != nullptr,
+									  skin->prevBoneMatrices != nullptr) :
+				                  std::string("no skin instance");
 				return "a skinned draw whose palettes could not be computed";
+			}
 			a_draw.bonesOffset = a_run.Append(bones);
 			return a_draw.bonesOffset == ~0u ? "more palettes than the batch's latch holds" : nullptr;
 		}
@@ -1060,7 +1089,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (!draw.program)
 				return building ? kBuilding : "its ORG program cannot be built";
 			if (r.vertex & static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::Skinned))
-				if (const char* why = AddBones(a_geometry, a_run, draw))
+				if (const char* why = AddBones(a_geometry, a_run, draw, a_detail))
 					return why;
 			draw.frameOffset = FrameOffset(a_in, a_run, a_frame);
 			draw.latchOffset = a_run.Append(std::as_bytes(std::span<const LightingSceneConstants, 1>(&c, 1)));
@@ -1174,7 +1203,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (!draw.program)
 				return building ? kBuilding : "its ORG program cannot be built";
 			if (a_result.vertex & Effects::EffectFlag::Skinned)
-				if (const char* why = AddBones(a_geometry, a_run, draw))
+				if (const char* why = AddBones(a_geometry, a_run, draw, a_detail))
 					return why;
 			draw.frameOffset = FrameOffset(a_in, a_run, a_frame);
 			if (particles) {
@@ -1268,6 +1297,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		{
 			PreviousCamera previous;
 			std::uint64_t renders = 0;
+			std::array<bool, 8> schemesLogged{};  // a scheme's first native render with passes is logged
+			std::array<std::uint64_t, 8> schemeRenders{};
 			std::uint64_t building = 0;   // draws left out while their programs build
 			std::uint64_t streaming = 0;  // draws left out while a texture streams in
 		};
@@ -1322,7 +1353,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		if (!draw.program)
 			return building ? kBuilding : "its ORG program cannot be built";
 		if (r.vertex & 0x4u)
-			if (const char* why = AddBones(a_geometry, a_run, draw))
+			if (const char* why = AddBones(a_geometry, a_run, draw, a_detail))
 				return why;
 		draw.frameOffset = a_run.Append(std::as_bytes(std::span<const float[4]>(a_view.frame, kFrameRows)));
 		draw.latchOffset = a_run.Append(std::as_bytes(std::span<const UtilitySceneConstants, 1>(&c, 1)));
@@ -1419,11 +1450,12 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		if (!native)
 			return false;
 		// The schemes whose draws CS computes as the engine does (observe parity, draw order included): the inventory's item (1, 2) with its
-		// enchantment membranes, MistMenu (4: the main menu, a loading screen, and a loading model with its shadow maps, depth pass and
-		// masks), the stats menu's constellations and the lockpicking menu's lock (7).
+		// enchantment membranes, the book (3, its pages sample the kBOOK_TEXT targets), MistMenu (4: the main menu, a loading screen, and a
+		// loading model with its shadow maps, depth pass and masks), the stats menu's constellations and the lockpicking menu's lock (7).
 		switch (a_scheme) {
 		case 1:
 		case 2:
+		case 3:
 		case 4:
 		case 6:
 		case 7:
@@ -1498,6 +1530,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		auto run = std::make_shared<Run>();
 		run->view = View::MenuColour;
 		std::uint32_t frame = ~0u;
+		std::string leftOut;  // the last draw left out of this render, for the log
 		for (const auto& [geometry, membrane] : passes) {
 			const auto* property = geometry->GetGeometryRuntimeData().shaderProperty.get();
 			if (!property)
@@ -1518,6 +1551,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				why = "a shader the native menu scene has no program for";
 			// A draw whose program is still building is left out until it is built, as the engine draw families do (the manifest
 			// prebuilds it next session).
+			if (why == kNoBuffers || why == kStreaming || why == kBuilding)
+				leftOut = std::format("{}: {} ({})", geometry->name.c_str() ? geometry->name.c_str() : "?", why, detail);
 			if (why == kNoBuffers)
 				continue;
 			// A texture still streaming in leaves its draw out of this render, as the engine draw families leave the batch for a later one.
@@ -1535,7 +1570,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (why)
 				::RenderGraph::Fatal("menu scenes", std::format("scheme {} draw {}: {} ({})", scheme, geometry->name.c_str() ? geometry->name.c_str() : "?", why, detail));
 		}
-		if (SceneDraws::Available() && SceneDraws::CanTake(View::MenuColour))
+		const auto draws = run->draws.size();
+		const bool taken = SceneDraws::Available() && SceneDraws::CanTake(View::MenuColour);
+		if (taken)
 			SceneDraws::Submit(std::move(run));
 		else
 			SceneDraws::Keep(std::move(run->owners));
@@ -1546,8 +1583,16 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			!::RenderGraph::Engine::ImageSpace::MenuSceneHdr(kMainTarget, kFramebufferTarget))
 			::RenderGraph::Fatal("menu scenes", std::format("scheme {}: the menu scene's HDR effect could not be staged", scheme));
 		native.previous = { true, { in.camera.viewProj, in.eye } };
-		if (native.renders++ == 0)
-			logger::info("[DCLF] menu scenes: the first native menu scene render (scheme {}, keep depth {}): {} passes", scheme, a_keepDepth, passes.size());
+		++native.renders;
+		if (static_cast<std::uint32_t>(scheme) < native.schemesLogged.size()) {
+			auto& count = native.schemeRenders[scheme];
+			++count;
+			if (draws && !std::exchange(native.schemesLogged[scheme], true))
+				logger::info("[DCLF] menu scenes: the first native render of scheme {} with draws (keep depth {}, render {}): {} passes, {} colour draws{}", scheme, a_keepDepth,
+					count, passes.size(), draws, taken ? "" : " (its client cannot take them; nothing drawn)");
+			if (count == 300 && !native.schemesLogged[scheme])
+				logger::warn("[DCLF] menu scenes: scheme {} drew nothing in 300 renders ({} passes; last left out: {})", scheme, passes.size(), leftOut.empty() ? "none" : leftOut);
+		}
 		return 0;
 	}
 }
