@@ -537,7 +537,7 @@ void Effects11::Capture(Snapshot::Builder& a_builder)
 		if (caster != SkySync::Caster::Zenith) {
 			const bool masser = caster == SkySync::Caster::Masser;
 			block.moonColor = Util::Moon::GetLightColor(masser ? sky->masser : sky->secunda, masser ? Util::Moon::MasserBaseColor : Util::Moon::SecundaBaseColor,
-				skySync.settings.NewMoonIntensity, skySync.settings.CrescentMoonIntensity, skySync.settings.FullMoonIntensity)
+				skySync.settings.NewMoonIntensity.Adopted(), skySync.settings.CrescentMoonIntensity.Adopted(), skySync.settings.FullMoonIntensity.Adopted())
 			                      .GetColor();
 			block.moonDirection = toFloat3(skySync.GetCelestialDirection(sky, caster));
 		}

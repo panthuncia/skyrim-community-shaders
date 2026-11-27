@@ -383,7 +383,7 @@ void WeatherWidget::DrawWidget()
 			drawSingleRecordSection(T(TKEY("record_visual_effect"), "Visual Effect"), WeatherRecord::kVisualEffect, "ReferenceEffect", T(TKEY("record_visual_effect"), "Visual Effect"), "##ReferenceEffect", settings.referenceEffect, parentReferenceEffect, editorWindow->referenceEffectWidgets, std::format("{}##RefEffect", T(TKEY("open"), "Open")), T(TKEY("open_visual_effect_edit"), "Open this Visual Effect for editing"));
 
 			if (pendingReinit) {
-				ApplyChanges();
+				RequestApply();
 			}
 
 			EndScrollableContent();
@@ -474,7 +474,7 @@ void WeatherWidget::LoadSettings()
 	InitializeInheritFlags();
 	originalSettings = settings;
 	pendingReinit = true;
-	ApplyChanges();
+	RequestApply();
 }
 
 void WeatherWidget::SaveSettings()
@@ -1146,7 +1146,7 @@ void WeatherWidget::DrawCloudSettings()
 	if (enableChanged) {
 		// Apply enable/disable immediately for instant feedback, regardless of autoApplyChanges.
 		pendingReinit = true;
-		ApplyChanges();
+		RequestApply();
 	} else {
 		AutoApply(changed);
 	}
@@ -1381,7 +1381,7 @@ void WeatherWidget::SyncInheritedValuesFromParent()
 	syncRecord("Precipitation", settings.precipitationData, parentWidget->settings.precipitationData);
 	syncRecord("ReferenceEffect", settings.referenceEffect, parentWidget->settings.referenceEffect);
 
-	ApplyChanges();
+	RequestApply();
 }
 
 void WeatherWidget::PropagateToChildren()

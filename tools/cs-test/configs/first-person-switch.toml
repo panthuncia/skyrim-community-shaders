@@ -1,6 +1,12 @@
 # The first-person view after pov switches, back and forth twice, then in an interior after a coc. Each first-person shot should
-# match the others and a load into first person. Compose it: guest+first-person-switch, native-vulkan+first-person-switch.
+# match the others and a load into first person. The shadow shots look down in sunlight and in Dragonsreach: the player casts
+# no body shadow in first person (the engine hides the third-person root). Compose it: guest+first-person-switch, native-vulkan+first-person-switch.
 extends = ["base"]
+
+[game]
+# Improved Camera SE shows the third-person body in first person (its SetFirstPerson detour patches the hide). Native runs
+# turn it off (native-vulkan), so guest turns it off here too: both modes then draw the same player.
+mods_off = ["Skyrim Engine Telemetry", "ImprovedCameraSE"]
 
 [run]
 timeout_s = 420
@@ -67,6 +73,24 @@ arg = "first-3"
 
 [[steps]]
 at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle x 70"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "first-shadow"
+
+[[steps]]
+at = "previous"
 frames = 10
 do = "console"
 arg = "coc WhiterunDragonsreach"
@@ -85,9 +109,21 @@ arg = "interior-first"
 
 [[steps]]
 at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle x 70"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "interior-shadow"
+
+[[steps]]
+at = "previous"
 frames = 10
 do = "exit"
 
 [expect]
 reach = "world-ready"
-shots = ["first-1", "third-1", "first-2", "first-3", "interior-first"]
+shots = ["first-1", "third-1", "first-2", "first-3", "first-shadow", "interior-first", "interior-shadow"]

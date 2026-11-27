@@ -2,6 +2,11 @@
 # native-vulkan+first-person.
 extends = ["base"]
 
+[game]
+# Improved Camera SE shows the third-person body in first person (its SetFirstPerson detour patches the hide). Native runs
+# turn it off (native-vulkan), so guest turns it off here too: both modes then draw the same player.
+mods_off = ["Skyrim Engine Telemetry", "ImprovedCameraSE"]
+
 [run]
 timeout_s = 300
 

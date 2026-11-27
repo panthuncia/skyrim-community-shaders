@@ -9,6 +9,7 @@
 #include "Globals.h"
 #include "RenderGraph/Frame/Variables.h"
 #include "State.h"
+#include "Utils/GameThread.h"
 
 namespace
 {
@@ -55,6 +56,7 @@ namespace Util
 	{
 		if (!a_sky)
 			return;
+		GameThread::NoteEngineWrite("ForceWeather");
 
 		a_sky->ForceWeather(a_weather, a_override);
 		if (a_sky->auroraRoot) {

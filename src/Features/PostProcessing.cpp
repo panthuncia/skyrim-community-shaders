@@ -24,9 +24,10 @@
 #include "Features/HDRDisplay.h"
 #include "Features/LinearLighting.h"
 #include "Features/Upscaling.h"
-#include "Utils/ColorSpace.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "Utils/ColorSpace.h"
+#include "Utils/GameThread.h"
 #include "Vram/DxvkMemory.h"
 
 #include <algorithm>
@@ -58,7 +59,8 @@ namespace
 
 	bool skipVanillaDoF = false;
 	bool skipVanillaBloom = false;
-	std::optional<bool> savedVanillaLensFlare;
+	std::optional<bool> savedVanillaLensFlare;  // game thread
+	bool lensFlareReplaced = false;             // the choice last handed to the game thread
 
 	struct VanillaDoF_IsActive
 	{
@@ -178,7 +180,7 @@ void PostProcessing::DrawSettings()
 		Util::SeparatorTextWithFont(T("feature.post_processing.section_camera", "Camera"), Menu::FontRole::Subheading);
 		{
 			auto& cam = cinematicCamera;
-			ImGui::Checkbox(T("feature.post_processing.cinematic_camera.name", "Cinematic Camera"), &cinematicCamera.settings.Enabled);
+			Util::Checkbox(T("feature.post_processing.cinematic_camera.name", "Cinematic Camera"), cinematicCamera.settings.Enabled);
 			if (auto _tt = Util::HoverTooltipWrapper())
 				ImGui::Text("%s", T("feature.post_processing.cinematic_camera.description",
 									  "Controls lens, focus, exposure and FOV. Exposure processing runs automatically while the camera is active; other effects must be enabled separately."));
@@ -196,7 +198,7 @@ void PostProcessing::DrawSettings()
 					cam.GetFilmbackPresetName(),
 					state->FocalLengthMM,
 					state->FNumber,
-					cam.settings.Exposure.ShutterAngleDeg,
+					cam.settings.Exposure.Get().ShutterAngleDeg,
 					isoText.c_str(),
 					state->HorizontalFOVDeg,
 					cam.GetFovStateText());
@@ -308,7 +310,7 @@ void PostProcessing::DrawSettings()
 			T("feature.post_processing.cinematic_camera.description",
 				"Controls lens, focus, exposure and FOV. Exposure processing runs automatically while the camera is active; other effects must be enabled separately."));
 
-		ImGui::Checkbox(T("feature.post_processing.cinematic_camera.name", "Cinematic Camera"), &cinematicCamera.settings.Enabled);
+		Util::Checkbox(T("feature.post_processing.cinematic_camera.name", "Cinematic Camera"), cinematicCamera.settings.Enabled);
 		ImGui::Spacing();
 		if (!cinematicCamera.settings.Enabled)
 			Util::SettingHint(T("feature.post_processing.enable_the_feature_to_see_its_settings", "Enable the feature to see its settings."), false);
@@ -1072,19 +1074,23 @@ void PostProcessing::UpdateVanillaEffects(bool active)
 		                   globals::shaderCache->HasPixelShaders(RE::BSShader::Type::ImageSpace, tonemapShaders);
 	}
 
-	// A settings change writes the vanilla lens flare's INI value: game state, not a frame read.
-	static auto* lensFlare = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bLensFlare:ImageSpace"));
-	if (lensFlare) {
-		if (replaces(FeaturePipelineIndex::LensFlare)) {
-			if (!savedVanillaLensFlare) {
-				savedVanillaLensFlare = lensFlare->data.b;
-				lensFlare->data.b = false;
+	// A settings change writes the vanilla lens flare's INI value: game state, written on the game thread when the choice changes.
+	const bool replaceLensFlare = replaces(FeaturePipelineIndex::LensFlare);
+	if (std::exchange(lensFlareReplaced, replaceLensFlare) != replaceLensFlare)
+		GameThread::Run("Post Processing: bLensFlare", [replaceLensFlare] {
+			static auto* lensFlare = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bLensFlare:ImageSpace"));
+			if (!lensFlare)
+				return;
+			if (replaceLensFlare) {
+				if (!savedVanillaLensFlare) {
+					savedVanillaLensFlare = lensFlare->data.b;
+					lensFlare->data.b = false;
+				}
+			} else if (savedVanillaLensFlare) {
+				lensFlare->data.b = *savedVanillaLensFlare;
+				savedVanillaLensFlare.reset();
 			}
-		} else if (savedVanillaLensFlare) {
-			lensFlare->data.b = *savedVanillaLensFlare;
-			savedVanillaLensFlare.reset();
-		}
-	}
+		});
 }
 
 void PostProcessing::Prepass()
@@ -1143,7 +1149,7 @@ void PostProcessing::Capture(Snapshot::Builder& a_builder)
 
 	// The focus targets, by the DoF console-selection preference (on without DoF).
 	auto* dof = self.GetPipelineFeature<DoF>(FeaturePipelineIndex::DoF);
-	const bool console = !dof || dof->settings.consoleSelection;
+	const bool console = !dof || dof->settings.consoleSelection.Adopted();
 	auto& resolver = self.cinematicCamera.focusResolver;
 	const auto resolve = [&](RE::TESObjectREFR* a_ref) {
 		Block::Target target{ .found = true, .distance = resolver.GetDistanceToReference(a_ref) };
@@ -1153,7 +1159,7 @@ void PostProcessing::Capture(Snapshot::Builder& a_builder)
 	block.consoleRefSet = console;
 	if (block.cameraValid && block.camera.Mode == CinematicCamera::FocusMode::Target)
 		block.cameraTarget = resolver.ResolveTarget(console, block.consoleRef);
-	else if (dof && dof->settings.targetFocus) {
+	else if (dof && dof->settings.targetFocus.Adopted()) {
 		if (auto* target = resolver.FindTarget(console, block.consoleRef))
 			block.dofTarget = resolve(target);
 	}

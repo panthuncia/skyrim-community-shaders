@@ -127,10 +127,17 @@ public:
 
 	/** @brief Whether the main menu is open. */
 	bool IsOpen() const { return open; }
-	/** @brief Opens the main menu. */
+	/** @brief The ImGui frame's thread. Opens the main menu. Code outside the ImGui frame calls RequestOpen. */
 	void Open();
-	/** @brief Closes the main menu and saves the State::SELF_SAVING_SETTINGS that changed. */
+	/** @brief The ImGui frame's thread. Closes the main menu and saves the State::SELF_SAVING_SETTINGS that changed. */
 	void Close();
+	/** @brief Any thread. Opens (a_open) or closes the main menu at the start of the next ImGui frame. */
+	void RequestOpen(bool a_open);
+	/**
+	 * @brief Any thread. Runs a_task at the start of the next ImGui frame, on its thread, before the frame takes input.
+	 * For code outside the ImGui frame (test commands, the game's own menus) that changes UI state.
+	 */
+	void PostUiTask(std::function<void()> a_task);
 	float openFade = 0.0f;  // 0 = closed, 1 = fully open; eased toward IsOpen() each frame
 
 	/** @brief Eases openFade toward IsOpen(), or snaps to it when the menu fade setting is off. */
@@ -602,6 +609,7 @@ private:
 
 	// Input event handling
 	std::vector<KeyEvent> _keyEventQueue;
+	std::vector<std::function<void()>> _uiTasks;  // PostUiTask's, under _inputEventMutex
 	mutable std::shared_mutex _inputEventMutex;
 	std::atomic<int64_t> _directInputWheelDelta = 0;
 

@@ -593,11 +593,9 @@ namespace TOD
 
 	float GetCurrentGameTime()
 	{
-		auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
-		if (sky) {
-			return std::clamp(sky->currentGameHour, 0.0f, 24.0f);
-		}
-		return 12.0f;  // Default to noon
+		// The menu reads the game view the game thread published.
+		const auto view = EditorWindow::PublishedGameView();
+		return view.hasSky ? std::clamp(view.skyGameHour, 0.0f, 24.0f) : 12.0f;  // Default to noon
 	}
 
 	void GetTimeOfDayFactors(float outFactors[4])
@@ -605,10 +603,10 @@ namespace TOD
 		using ColorTime = RE::TESWeather::ColorTime;
 		static_assert(Sunrise == static_cast<int>(ColorTime::kSunrise) && Day == static_cast<int>(ColorTime::kDay) &&
 					  Sunset == static_cast<int>(ColorTime::kSunset) && Night == static_cast<int>(ColorTime::kNight));
-		const auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
+		const auto view = EditorWindow::PublishedGameView();
 		Util::Climate::ColorTimeWeights weights{};
-		if (sky && sky->currentClimate)
-			weights = Util::Climate::GetColorTimeWeights(*sky->currentClimate, GetCurrentGameTime());
+		if (view.climate)
+			weights = Util::Climate::GetColorTimeWeights(*view.climate, GetCurrentGameTime());
 		else
 			weights[Day] = 1.0f;
 		std::ranges::copy(weights, outFactors);

@@ -1,25 +1,27 @@
 #include "Hooks.h"
 #include "Snapshot/EngineReads.h"
 
+#include "CSEditor/EditorWindow.h"
 #include "GpuEventTimers.h"
 #include "HangWatchdog.h"
-#include "Testing/Testing.h"
-#include <intrin.h>
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
-#include "RenderGraph/Engine/Skeleton/Skeleton.h"
-#include "RenderGraph/Engine/Textures/EngineTextures.h"
-#include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Pipeline/EngineHooks.h"
+#include "RenderGraph/Engine/Skeleton/Skeleton.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Textures/EngineTextures.h"
+#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
-#include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "ShaderTools/BSShaderHooks.h"
 #include "ShaderTools/LegacyGraphicsCompatibility.h"
+#include "Testing/Testing.h"
 #include "Utils/ExternalEmittance.h"
+#include "Utils/GameThread.h"
 #include "Utils/VersionedRelocation.h"
+#include <intrin.h>
 
 #include "Aftermath.h"
 #include "D3DX9MathUpgrade.h"
@@ -1652,6 +1654,10 @@ namespace Hooks
 
 		// The frame snapshot's publication point (and the cadence test mode): Main::Update's call of Main::DrawFrame.
 		Snapshot::InstallHooks();
+		// The queue the UI's engine and game writes go through, then the game view the menus read (scene settings use it without
+		// the CS Editor too).
+		GameThread::Install();
+		EditorWindow::InstallGameTick();
 
 		logger::info("Hooking BSImagespaceShader");
 		stl::detour_thunk<CSShadersSupport::BSImagespaceShader_DispatchComputeShader>(REL::RelocationID(100952, 107734));

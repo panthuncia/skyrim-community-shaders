@@ -743,7 +743,10 @@ void Menu::Init()
 	}
 
 	auto& imgui_io = ImGui::GetIO();
-	imgui_io.ConfigFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_DockingEnable;
+	// The menu draws its own cursor (MouseDrawCursor), so the Win32 backend never calls SetCursor: that call acts only on the calling
+	// thread's input queue, and the ImGui frame need not run on the window's thread.
+	imgui_io.ConfigFlags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_DockingEnable |
+	                       ImGuiConfigFlags_NoMouseCursorChange;
 	// Skyrim delivers input as a frame-sized batch. ImGui's default trickle mode may consume only
 	// part of such a batch to spread rapid transitions over subsequent frames. High-rate wheel input
 	// can therefore grow InputEventsQueue without bound and replay stale cursor/input state seconds
@@ -1165,6 +1168,15 @@ static std::vector<InputCombo> DeriveCSEditorKey(const std::vector<InputCombo>& 
  */
 void Menu::ProcessInputEventQueue()
 {
+	// Posted UI tasks first, outside the lock: a task may post again (for the next frame).
+	std::vector<std::function<void()>> tasks;
+	{
+		std::unique_lock<std::shared_mutex> mutex(_inputEventMutex);
+		tasks.swap(_uiTasks);
+	}
+	for (auto& task : tasks)
+		task();
+
 	std::unique_lock<std::shared_mutex> mutex(_inputEventMutex);
 	ImGuiIO& io = ImGui::GetIO();
 	for (auto& event : _keyEventQueue) {
@@ -1530,6 +1542,22 @@ void Menu::RecordRecentFeature(const std::string& shortName)
 void Menu::Open()
 {
 	open = true;
+}
+
+void Menu::RequestOpen(bool a_open)
+{
+	PostUiTask([this, a_open] {
+		if (a_open)
+			Open();
+		else
+			Close();
+	});
+}
+
+void Menu::PostUiTask(std::function<void()> a_task)
+{
+	std::unique_lock<std::shared_mutex> mutex(_inputEventMutex);
+	_uiTasks.push_back(std::move(a_task));
 }
 
 void Menu::Close()
