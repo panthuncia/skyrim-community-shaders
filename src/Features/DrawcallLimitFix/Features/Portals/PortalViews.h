@@ -51,6 +51,11 @@ namespace DCLF
 
 		/** @brief Builds this frame's programs. Render thread, after Main::Update's walk. */
 		void Build();
+		/**
+		 * @brief Native's game half, when it takes its scene step: the main walk and its context carry that step. Build ran in
+		 * Main::Update before the step existed, and the light walks and the light context atlas compare against it.
+		 */
+		void StampMainStep(std::uint32_t a_step);
 		const Frame& Current() const { return frame; }
 		/** @brief Whether this frame's walk reached unbound space. A frame with no graph keeps the last answer, as the engine does. */
 		bool VisibleUnbound() const { return visibleUnbound.load(std::memory_order_acquire); }
