@@ -3,6 +3,7 @@
 #include "RenderGraph/BufferRef.h"
 
 #include "Features/DrawcallLimitFix/Api/FrameValues.h"
+#include "Features/DrawcallLimitFix/Core/Runtime/KeptState.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include <array>
 #include <atomic>
@@ -25,6 +26,7 @@ namespace org::services
 {
 	struct Backing;
 }
+
 
 namespace RenderGraph
 {
@@ -183,12 +185,16 @@ namespace DCLF
 		/** @brief A pool's sample counts its refused engine-read lease here. */
 		void NoteRefused();
 
-		/** @brief Diagnostics, render thread. The rows the producer left, or null while it runs. Valid until the next Kick. */
-		const std::vector<BindlessPlacement>* RowsIfDone(bool a_wait = false) const;
+		/**
+		 * @brief Render thread. The rows the render's upload job left, or null while it runs: a copy-on-write view the job took, so a
+		 * later sampling job never writes what the render reads (it copies the kept array first while a view holds it). Valid until
+		 * the next Kick; EndFrame lets it go.
+		 */
+		const org::async::KeptChunks<BindlessPlacement>* RowsIfDone(bool a_wait = false) const;
 		/** @brief Render thread. The palette rows, likewise. */
-		const std::vector<PaletteRow>* PalettesIfDone(bool a_wait = false) const;
+		const org::async::KeptChunks<PaletteRow>* PalettesIfDone(bool a_wait = false) const;
 		/** @brief Render thread. The shading rows, likewise. */
-		const std::vector<BindlessShading>* ShadingIfDone(bool a_wait = false) const;
+		const org::async::KeptChunks<BindlessShading>* ShadingIfDone(bool a_wait = false) const;
 		/** @brief The producer's counters since the last take. */
 		struct Counters
 		{

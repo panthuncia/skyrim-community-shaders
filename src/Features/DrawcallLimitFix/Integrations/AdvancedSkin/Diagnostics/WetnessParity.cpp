@@ -1,6 +1,7 @@
 // Advanced Skin's wetness parity under CS_DCLF_CAPTURE_PARITY. Render thread.
 
 #include "Features/DrawcallLimitFix/Integrations/AdvancedSkin/Diagnostics/WetnessParity.h"
+#include "Features/DrawcallLimitFix/Core/Runtime/KeptState.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 
@@ -20,7 +21,7 @@ namespace DCLF::Integrations::AdvancedSkin
 	}
 
 	void DrawWetnessParity::Compare(const RE::BSGeometry* a_geometry, std::uint32_t a_objectIndex, const SceneTables& a_tables,
-		const std::vector<BindlessShading>* a_rows, NoteFn a_note, void* a_owner)
+		const org::async::KeptChunks<BindlessShading>* a_rows, NoteFn a_note, void* a_owner)
 	{
 		// b7, the SetupGeometry hook's upload, bound only while enabled.
 		auto& skin = globals::features::skin;
