@@ -110,7 +110,20 @@ Not changed by this item: local map frames still read about 35 engine render cal
 | d3d11, guest +map-local, light debug | s7-localmap-d2-*-light | passed; ENABLE_LL found |
 | guest+map-local, the fix | s7-localmap-f1-guest-local | passed; matches D3D11 |
 
-Final runs: see the report (`s7-localmap-fin-*`).
+Final runs (`s7-localmap-fin-*`, on 6b121ace5's code):
+
+| Config | Label | Result |
+|---|---|---|
+| native-vulkan+map-local (detector) | s7-localmap-fin-nvk-local | passed; the D3D11 look, map visible through the panel; world 1.0, frozen_world (local map) 35.0 per frame (max 43), as before |
+| guest+map-local | s7-localmap-fin-guest-local, -local2 | the first never loaded (lab, at plugin load); the rerun passed, the D3D11 look |
+| native-vulkan+quick | s7-localmap-fin-nvk-quick | passed |
+
+Skipped under the test scope rule: guest+quick (the change is the local map's Lighting variant only; guest+map-local covers it),
+native-d3d12-quick (no ORG, BasicRHI or device change), native-vulkan+map (the world map's draws are unchanged), the cadence config
+(nothing stepped by game delta changed). Reference `d3d11+map-local` is `s7-map-a7-d3d11-local` (and the four `-x*`/`-d*` D3D11 runs
+here agree).
+
+Shot references to accept: `s7-localmap-fin-nvk-local` and `s7-localmap-fin-guest-local2` (localmap, localmap-b, map).
 
 ## Decided by the agent, to confirm
 
