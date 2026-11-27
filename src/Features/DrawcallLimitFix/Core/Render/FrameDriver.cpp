@@ -1,6 +1,7 @@
 // FrameDriver: the render thread's DCLF work at each engine point of the frame.
 
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameTicket.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/WholeCull.h"
@@ -48,6 +49,11 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
+#include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
+#include "Snapshot/Retire.h"
+#include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
+#include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "State.h"
 
 namespace DCLF
@@ -126,7 +132,12 @@ namespace DCLF
 			return ran && !Scene::FrameView::Get().NotDrawingYet();
 		};
 		// A revision left DCLF's scene on old versions. DCLF stops drawing here, at the adoption point, until its next scene covers a frame.
-		source.left = [](std::uint64_t) { Scene::FrameView::Get().StopDrawing(); };
+		source.left = [](std::uint64_t) {
+			Scene::FrameView::Get().StopDrawing();
+			FrameDriver::Get().NoteStoppedDrawing();
+		};
+		// A repeated render keeps the scene its ticket installed (FrameDriver::HoldsScene).
+		source.takes = [] { return !FrameDriver::Get().HoldsScene(); };
 		// The graph conditions for the adopted variables, after the adoption point's revision work.
 		source.afterAdoption = [] {
 			TracyCZoneN(afterScene, "CS.DCLF.AfterSceneStep", true);
@@ -141,6 +152,12 @@ namespace DCLF
 		source.drawsWorld = [] { return DrawsWorld(); };
 		source.epochFailed = [](std::string_view a_label, std::string_view a_error) { DrawcallLimitFix::OnGraphEpochFailed(a_label, std::string(a_error)); };
 		s_sceneSource = Revision::RegisterFragmentSource(std::move(source));
+	}
+
+	bool TicketUtilityShader()
+	{
+		const auto* ticket = FrameDriver::Get().Ticket();
+		return ticket && ticket->utilityShader;
 	}
 
 	RenderGraph::Frame::Revision::FragmentSourceId SceneSource()
@@ -160,22 +177,98 @@ namespace DCLF
 		return driver;
 	}
 
-	void FrameDriver::BeginFrame()
+	namespace
 	{
+		/** @brief The sequence of the publication the frame revision adopted last, 0 for none. Render owner. */
+		std::uint64_t AdoptedSequence()
+		{
+			const auto adopted = std::static_pointer_cast<const ScenePublication>(IndirectDraws::Get().AdoptedPublication());
+			return adopted ? adopted->sequence : 0;
+		}
+
+		/** @brief Puts a_from's items before a_to's own: a_from is older. */
+		template <class T>
+		void Prepend(std::vector<T>& a_to, std::vector<T>&& a_from)
+		{
+			a_from.insert(a_from.end(), std::make_move_iterator(a_to.begin()), std::make_move_iterator(a_to.end()));
+			a_to = std::move(a_from);
+		}
+	}
+
+	bool FrameDriver::HoldsScene() const
+	{
+		return ticket && Snapshot::Render().repeat && ticket->snapshot == Snapshot::CurrentId();
+	}
+
+	void FrameDriver::NoteStoppedDrawing()
+	{
+		coveredLast = false;
+	}
+
+	void FrameDriver::SceneFrameStart()
+	{
+		// The posts below wake the coordinator once, when this scope ends.
+		ScenePassWakeBatch wakes;
+		// A repeated render of a snapshot renders its ticket again. The scene source takes no new scene meanwhile (HoldsScene), so the
+		// publication stays the ticket's. A frame revision adopted with a held scene can still bring a newer one: the ticket is made again.
+		if (!HoldsScene())
+			MakeTicket(Snapshot::CurrentId());
+		else if (AdoptedSequence() > ticket->publication) {
+			++ticketsRemade;
+			MakeTicket(Snapshot::CurrentId());
+		}
+		BeginFrame();
+	}
+
+	void FrameDriver::UnrenderedUpdate(std::uint64_t a_snapshot)
+	{
+		ScenePassWakeBatch wakes;
+		MakeTicket(a_snapshot);
+	}
+
+	void FrameDriver::MakeTicket(std::uint64_t a_snapshot)
+	{
+		auto previous = std::move(ticket);
+		ticket = GameFrameStart(a_snapshot);
+		++ticketsMade;
+		if (!previous)
+			return;
+		// A ticket no render took retires unused. Its one-shot inputs are the next ticket's, oldest first.
+		if (auto left = previous->TakeOneShot()) {
+			++ticketsUnrendered;
+			auto next = ticket->TakeOneShot();
+			if (!next)
+				next = std::make_unique<FrameTicket::OneShot>();
+			Prepend(next->plans, std::move(left->plans));
+			Prepend(next->shading, std::move(left->shading));
+			Prepend(next->fields, std::move(left->fields));
+			if (left->rootViews && next->rootViews)
+				FrameValues::PrependRootViews(*next->rootViews, std::move(*left->rootViews));
+			else if (left->rootViews)
+				next->rootViews = std::move(left->rootViews);
+			ticket->oneShot.store(next.release(), std::memory_order_release);
+		}
+		// It may hold engine references (plans), so it goes to the engine lane, after the newest frame that may have rendered it.
+		if (std::exchange(ticketRendered, false))
+			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::move(previous));
+		else
+			Snapshot::Retire::Push(Snapshot::Retire::Lane::Engine, std::move(previous), 0);
+	}
+
+	std::shared_ptr<const FrameTicket> FrameDriver::GameFrameStart(std::uint64_t a_snapshot)
+	{
+		// The game half reads and writes the engine once per game update: its reads are the update's capture.
+		const Snapshot::EngineReads::CaptureScope capture;
+		auto t = std::make_shared<FrameTicket>();
+		t->snapshot = a_snapshot;
 		// Start a load's hold before anything checks whether a load screen is up.
 		LoadHold::OnFrameStart();
 		Diagnostics::Notify(Diagnostics::FrameBegin{});
-		occlusionWanted = occlusionDrawn = occlusionTaken = 0;
-		// An extension added or removed last frame is built here, before anything decides what the frame's recordings cover.
-		// In native mode with segments this already ran at Renderer::Begin, and no build may attach after that.
-		if (s_buildPointFrame != RenderGraph::Frame::Driver::Current().frame)
-			IndirectDraws::Get().BuildPoint();
 		auto& scene = Scene::Coordinator::Get();
 		auto& view = Scene::FrameView::Get();
+		auto& draws = IndirectDraws::Get();
 		// The engine only reads its scene graph from here to Present, so workers may read it in the capture window.
 		EngineReadWindow::ReleaseRenderHalf();
-		// The posts below wake the coordinator once, when this scope ends.
-		ScenePassWakeBatch wakes;
 		scene.SetScenePassMode(true);
 		// A classify input change drops the cached verdicts, because the caches witness the objects, not the inputs.
 		static Extensions::ClassifyInputSet inputsSeen = Extensions::SampleClassifyInputs();
@@ -187,98 +280,44 @@ namespace DCLF
 			RenderThreadBudget::Part captures(RenderThreadBudget::Bucket::SceneCaptures);
 			view.BeginFrame();
 		}
+		t->globals = view.FrameGlobalsOfFrame();
+		t->sceneStep = view.SceneStep();
+		// The game half's readers see the update's globals.
+		const FrameGlobals::Scope globals(t->globals);
 		TracyCZoneN(bfCamera, "CS.DCLF.BF.Camera", true);
 		PrimaryCull::Get().BeginFrameCamera();
 		if (PrimaryCull::Get().Installed())
 			Extensions::RootStatesFrameStart();
 		Extensions::PaletteRowsFrameStart();
 		TracyCZoneEnd(bfCamera);
-		TracyCZoneN(bfAdopt, "CS.DCLF.BF.Adopt", true);
-		auto& draws = IndirectDraws::Get();
 		// Load screen frames have no claims, so they are never waited for or required to be covered.
-		const bool loading = Scene::FrameView::IsLoadingScreenUp();
+		t->loading = Scene::FrameView::IsLoadingScreenUp();
+		t->utilityShader = CS_ENGINE_READ(Shaders, CapturePoint, globals::game::utilityShader) != nullptr;
 		{
-			// The frame revision adopted the snapshot at this frame's Begin (plan step 10b), with the staged builds it was recorded on.
+			// The publication the frame revision adopted at this frame's Begin (plan step 10b), with the staged builds it was recorded on.
 			// Nothing waits here: a newer snapshot not ready yet leaves the adopted one, recorded on the graphs that run.
+			DCLF_ZONE("CS.DCLF.BF.Adopt");
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
 			view.HandOverAtFrameStart(draws.AdoptedPublication());
-			{
-				DCLF_ZONE("CS.DCLF.BF.SyncFrameTables");
-				view.SyncFrameTables();
-			}
 		}
-		TracyCZoneEnd(bfAdopt);
-		TracyCZoneN(bfViewsStart, "CS.DCLF.BF.ViewsStartAndLookups", true);
-		// Views start before the coverage decision that withholds their members.
+		t->publication = view.InstalledSequence();
+		// Views start before the claims that withhold their members.
 		RunViewWork(Api::ViewPoint::FrameStartBeforeCoverage);
 		// Entries changed since the sun exclusion's snapshot leave it, and the engine culls them.
 		Extensions::ShadowExclusionFrameStart();
-		draws.PostLookupInputs();
-		TracyCZoneEnd(bfViewsStart);
 		{
 			DCLF_ZONE("CS.DCLF.BF.Claims");
-			// While DCLF does not draw (before its first covered frame, or after an adoption stopped it) the engine draws everything. While
-			// it draws, an uncovered frame is a tap error, because the adopted snapshot stays current until a Begin adopts a newer one with
-			// its builds. Load screen frames are the engine's (EngineState::LoadScreen).
+			// While DCLF draws, the installed publication's claims install. The first installation, and the first after a stop, waits for a
+			// render whose coverage of DCLF's claims epochs passed: until then the engine draws everything. The render half checks coverage.
 			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
-			const bool covered = draws.DecideCoverage();
-			// Native mode bring-up: log why claims are not installed, once every 300 such frames.
-			if (!(covered && view.HasInstalled()) && RenderGraph::Engine::Native::Active()) {
-				static std::uint32_t s_uncovered = 0;
-				if (s_uncovered++ % 300 == 0)
-					logger::info("[DCLF] native: frame {} has no claims (covered {}, a publication installed {}, loading {}): {}", view.SceneStep(), covered,
-						view.HasInstalled(), loading, draws.CoverageState());
-			}
-			if (covered && view.HasInstalled())
+			if (view.HasInstalled() && (!view.NotDrawingYet() || coveredLast))
 				view.InstallClaims();
-			else if (!view.NotDrawingYet() && !loading) {
-				// The graph itself stopped, so no snapshot can cover a frame again and that reason is the defect.
-				// "GPU completion timeline failed" means a timeline read UINT64_MAX, which Windows sets on a removed device's fences.
-				// A lost device ends the game here with its reason logged. A fatal message box would hide behind the full-screen window.
-				const HRESULT removed = globals::d3d::device ? globals::d3d::device->GetDeviceRemovedReason() : S_OK;
-				if (removed != S_OK || Testing::DeviceLossSeen()) {
-					const auto reason = fmt::format("Drawcall Limit Fix: the GPU device was lost (D3D11's removed reason {:#x}, BasicRHI saw it {}) before frame {}; "
-													"the game ends. The GPU work it was running is in the log above (crash markers with DXVK_DEBUG=hang, or the hang "
-													"report's stream order)",
-						static_cast<std::uint32_t>(removed), Testing::DeviceLossSeen(), view.SceneStep());
-					logger::critical("{}", reason);
-					Testing::ReportDeviceLost("D3D11 device removed at DCLF's frame start", 0, "", "");
-					spdlog::default_logger()->flush();
-					::TerminateProcess(::GetCurrentProcess(), 0xDEAD0007u);
-				}
-				if (auto& runtime = RenderGraphRuntime::Get(); !runtime.IsActive())
-					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the render graph stopped before frame {} ({}), and DCLF draws only through it once it "
-													 "draws. D3D11's device removed reason: {:#x}",
-						view.SceneStep(), runtime.GetDisabledReason(), static_cast<std::uint32_t>(globals::d3d::device->GetDeviceRemovedReason())));
-				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::Uncovered, RenderGraph::Frame::SegmentId::Count,
-					fmt::format("DCLF: frame {} is not covered by the scene it adopted at its Begin: {}", view.SceneStep(), draws.CoverageState()));
-			}
 			Reports::GateReleases(view.SceneStep());
 			// Release the LOD gates the installed publications flipped, before the culls.
 			Extensions::ComponentsAdopt(view.SceneStep(), view.AdoptedClaims(), view.AdoptedDeltas());
 			view.ClearAdoptedDeltas();
 		}
-		TracyCZoneN(bfKicks, "CS.DCLF.BF.AheadAndKicks", true);
-		// First person's rows and palettes must be taken before Main::Draw moves the skeleton into its root's space.
-		bool rootViewsCovered = false;
-		for (std::uint32_t i = 0; i < Extensions::Views().rootCount; ++i)
-			rootViewsCovered = rootViewsCovered || draws.ViewCovered(Extensions::Views().rootViews[i]);
-		FrameValues::Get().SetRootViewClaims(rootViewsCovered ? view.FrameClaims() : nullptr);
-		{
-			DCLF_ZONE("CS.DCLF.BF.PostAheadContext");
-			draws.PostAheadContext();
-		}
-		// Tasks on DCLF's executor that are never joined.
-		{
-			DCLF_ZONE("CS.DCLF.BF.RootStatesKick");
-			Extensions::RootStatesKick();
-		}
-		{
-			DCLF_ZONE("CS.DCLF.BF.KickVisibilityReadback");
-			draws.KickVisibilityReadback();
-		}
-		TracyCZoneEnd(bfKicks);
-		// Serve what the coordinator asked of the render thread, outside load screens. Switch catch-ups write engine memory, so they go before the culls.
+		// Serve what the coordinator asked of the frame start, outside load screens. Switch catch-ups write engine memory, so they go before the culls.
 		{
 			const auto eventsStart = std::chrono::steady_clock::now();
 			if (!view.NoteLoadingScreen())
@@ -300,24 +339,119 @@ namespace DCLF
 			draws.DecideDrawFamilies(view.SceneStep());
 		}
 		{
-			DCLF_ZONE("CS.DCLF.BF.ViewWorkAfterTreeLod");
-			RunViewWork(Api::ViewPoint::FrameStartAfterTreeLod);
-		}
-		{
 			DCLF_ZONE("CS.DCLF.BF.PublishListFilter");
 			PrimaryCull::Get().PublishListFilter();
 		}
 		TracyCZoneEnd(bfFamilies);
-		// The capture reads the shading changes the take empties.
+		{
+			DCLF_ZONE("CS.DCLF.BF.TakeFrameValueInputs");
+			// The capture reads the shading changes the take empties.
+			auto oneShot = std::make_unique<FrameTicket::OneShot>();
+			oneShot->fields = Extensions::CaptureShadingFields(view);
+			t->latePlan = LatePoses::PrepareFrame();
+			oneShot->plans = view.TakePlacementPlans();
+			oneShot->shading = view.TakeShadingItems();
+			// First person's rows and palettes must be taken before Main::Draw moves the skeleton into its root's space. Sampled whether
+			// or not this frame's render covers the root views: a render that draws them must find them.
+			bool rootViews = false;
+			for (std::uint32_t i = 0; i < Extensions::Views().rootCount; ++i)
+				rootViews = rootViews || Extensions::ViewRegistered(Extensions::Views().rootViews[i]);
+			const auto claims = rootViews ? view.FrameClaims() : nullptr;
+			oneShot->rootViews = FrameValues::Get().TakeRootViews(oneShot->plans, claims.get());
+			t->oneShot.store(oneShot.release(), std::memory_order_release);
+		}
+		return t;
+	}
+
+	void FrameDriver::BeginFrame()
+	{
+		// The render half reads the ticket, the snapshot and CS's frame. The live-read detector counts any engine read here.
+		const Snapshot::EngineReads::FrameStartScope frameStartReads;
+		const auto& t = *ticket;
+		const bool first = !std::exchange(ticketRendered, true);
+		occlusionWanted = occlusionDrawn = occlusionTaken = 0;
+		// An extension added or removed last frame is built here, before anything decides what the frame's recordings cover.
+		// In native mode with segments this already ran at Renderer::Begin, and no build may attach after that.
+		if (s_buildPointFrame != RenderGraph::Frame::Driver::Current().frame)
+			IndirectDraws::Get().BuildPoint();
+		auto& view = Scene::FrameView::Get();
+		auto& draws = IndirectDraws::Get();
+		// Each render has its own scene step: the epochs' once-a-frame guards and commits are keyed by it.
+		if (!first)
+			view.StepRepeat();
+		FrameGlobals::Adopt(t.globals);
+		{
+			DCLF_ZONE("CS.DCLF.BF.SyncFrameTables");
+			view.SyncFrameTables();
+		}
+		draws.PostLookupInputs();
+		{
+			DCLF_ZONE("CS.DCLF.BF.Coverage");
+			// While DCLF does not draw (before its first covered frame, or after an adoption stopped it) the engine draws everything. While
+			// it draws, an uncovered frame is a tap error, because the adopted snapshot stays current until a Begin adopts a newer one with
+			// its builds. Load screen frames are the engine's (EngineState::LoadScreen).
+			RenderThreadBudget::Part exchange(RenderThreadBudget::Bucket::Exchange);
+			const bool covered = draws.DecideCoverage();
+			coveredLast = covered;
+			// Native mode bring-up: log why claims are not installed, once every 300 such frames.
+			if (!(covered && view.HasInstalled()) && RenderGraph::Engine::Native::Active()) {
+				static std::uint32_t s_uncovered = 0;
+				if (s_uncovered++ % 300 == 0)
+					logger::info("[DCLF] native: frame {} has no claims (covered {}, a publication installed {}, loading {}): {}", view.SceneStep(), covered,
+						view.HasInstalled(), t.loading, draws.CoverageState());
+			}
+			if (!(covered && view.HasInstalled()) && !view.NotDrawingYet() && !t.loading) {
+				// The graph itself stopped, so no snapshot can cover a frame again and that reason is the defect.
+				// "GPU completion timeline failed" means a timeline read UINT64_MAX, which Windows sets on a removed device's fences.
+				// A lost device ends the game here with its reason logged. A fatal message box would hide behind the full-screen window.
+				const HRESULT removed = globals::d3d::device ? globals::d3d::device->GetDeviceRemovedReason() : S_OK;
+				if (removed != S_OK || Testing::DeviceLossSeen()) {
+					const auto reason = fmt::format("Drawcall Limit Fix: the GPU device was lost (D3D11's removed reason {:#x}, BasicRHI saw it {}) before frame {}; "
+													"the game ends. The GPU work it was running is in the log above (crash markers with DXVK_DEBUG=hang, or the hang "
+													"report's stream order)",
+						static_cast<std::uint32_t>(removed), Testing::DeviceLossSeen(), view.SceneStep());
+					logger::critical("{}", reason);
+					Testing::ReportDeviceLost("D3D11 device removed at DCLF's frame start", 0, "", "");
+					spdlog::default_logger()->flush();
+					::TerminateProcess(::GetCurrentProcess(), 0xDEAD0007u);
+				}
+				if (auto& runtime = RenderGraphRuntime::Get(); !runtime.IsActive())
+					::RenderGraph::Fatal("Drawcall Limit Fix", fmt::format("the render graph stopped before frame {} ({}), and DCLF draws only through it once it "
+													 "draws. D3D11's device removed reason: {:#x}",
+						view.SceneStep(), runtime.GetDisabledReason(), static_cast<std::uint32_t>(globals::d3d::device->GetDeviceRemovedReason())));
+				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::Uncovered, RenderGraph::Frame::SegmentId::Count,
+					fmt::format("DCLF: frame {} is not covered by the scene it adopted at its Begin: {}", view.SceneStep(), draws.CoverageState()));
+			}
+		}
+		TracyCZoneN(bfKicks, "CS.DCLF.BF.AheadAndKicks", true);
+		{
+			DCLF_ZONE("CS.DCLF.BF.PostAheadContext");
+			draws.PostAheadContext();
+		}
+		// Tasks on DCLF's executor that are never joined.
+		{
+			DCLF_ZONE("CS.DCLF.BF.RootStatesKick");
+			Extensions::RootStatesKick();
+		}
+		{
+			DCLF_ZONE("CS.DCLF.BF.KickVisibilityReadback");
+			draws.KickVisibilityReadback();
+		}
+		TracyCZoneEnd(bfKicks);
+		{
+			DCLF_ZONE("CS.DCLF.BF.ViewWorkAfterTreeLod");
+			RunViewWork(Api::ViewPoint::FrameStartAfterTreeLod);
+		}
 		{
 			DCLF_ZONE("CS.DCLF.BF.FrameValuesKick");
-			TracyCZoneN(bfFields, "CS.DCLF.BF.CaptureShadingFields", true);
-			auto fields = Extensions::CaptureShadingFields(view);
-			TracyCZoneEnd(bfFields);
 			// Producers' uploads may only wait for CPU frames signalled before the last present.
 			::RenderGraph::Frame::Retirement::SealCpuFrames();
-			FrameValues::Get().SetLatePoses(LatePoses::PrepareFrame());
-			(void)FrameValues::Get().Kick(view.TakePlacementPlans(), view.TakeShadingItems(), std::move(fields), view.FrameGlobalsOfFrame());
+			FrameValues::Get().SetLatePoses(t.latePlan);
+			// The ticket's one-shot inputs go to its first render's producer. A repeated render's producer has none.
+			auto oneShot = first ? t.TakeOneShot() : nullptr;
+			if (!oneShot)
+				oneShot = std::make_unique<FrameTicket::OneShot>();
+			(void)FrameValues::Get().Kick(std::move(oneShot->plans), std::move(oneShot->shading), std::move(oneShot->fields), t.globals, std::move(oneShot->rootViews));
 		}
 		{
 			DCLF_ZONE("CS.DCLF.BF.MakeFramePayload");

@@ -1,9 +1,10 @@
 // The particle systems' palette rows class: five rows per particle of the capacity bucket, expanded from the snapshots each frame,
 // plus placement rows, the quads' geometry slot and the frame's cameras.
 
-#include "Features/DrawcallLimitFix/Features/Particles/Particles.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PaletteRows.h"
+#include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
+#include "Features/DrawcallLimitFix/Features/Particles/Particles.h"
 
 #include <cmath>
 #include <cstring>
@@ -17,6 +18,19 @@ namespace DCLF::Features::Particles
 		{
 			ParticleSnapshots::Camera main, firstPerson;
 		};
+
+		// The first-person eye in the frame's globals: x, y, z, and 1 when it was there.
+		constexpr std::uint32_t kEyeGlobals = 4;
+		Api::FrameGlobalsSlot eyeSlot;  // install
+
+		// The first-person eye, filled by FUN_1406452c0 before DCLF's frame start. Taken with the frame's globals on the game side.
+		void CaptureEye(float* a_out)
+		{
+			if (const auto* eye = REL::Relocation<const float*>{ REL::Offset(Engine::Address::kDrawWorldEye) }.get()) {
+				std::memcpy(a_out, eye, 3 * sizeof(float));
+				a_out[3] = 1.0f;
+			}
+		}
 
 		// A particle system draws the renderer's own quads (FUN_1414f2ad0 type 1), vertices pulled from its palette block. One slot per capacity bucket.
 		bool GeometrySource(Api::PaletteGeometrySource& a_source)
@@ -43,10 +57,11 @@ namespace DCLF::Features::Particles
 		{
 			auto& cameras = a_kick.input.As<FrameCameras>();
 			cameras.main = ParticleSnapshots::Get().FrameCamera();
-			// The first-person eye, filled by FUN_1406452c0 before FrameDriver::BeginFrame.
+			// The first-person eye the frame's ticket took.
 			cameras.firstPerson = cameras.main;
-			if (const auto* eye = REL::Relocation<const float*>{ REL::Offset(Engine::Address::kDrawWorldEye) }.get(); eye && cameras.main.valid)
-				std::memcpy(cameras.firstPerson.eye, eye, sizeof(cameras.firstPerson.eye));
+			const auto& globals = FrameGlobals::Current().features;
+			if (eyeSlot && globals[eyeSlot.first + 3] != 0.0f && cameras.main.valid)
+				std::memcpy(cameras.firstPerson.eye, &globals[eyeSlot.first], sizeof(cameras.firstPerson.eye));
 		}
 
 		// Follow is the producer's alone.
@@ -87,6 +102,7 @@ namespace DCLF::Features::Particles
 
 	void RegisterRows(Api::InstallContext& a_context)
 	{
+		eyeSlot = a_context.RegisterFrameGlobals({ .name = "first-person-eye", .floats = kEyeGlobals, .capture = &CaptureEye });
 		a_context.RegisterPaletteRows({ .name = "particles",
 			.itemClass = Api::FrameValueItemClass::ParticleSystem,
 			.rule = ParticleSnapshots::kBlockRule,

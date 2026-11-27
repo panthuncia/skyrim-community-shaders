@@ -1632,7 +1632,8 @@ namespace RenderGraph::Frame::Revision
 			auto& state = *coordinator.sources[s];
 			if (state.source.mainThreadOnly && !mainThread)
 				continue;
-			taken[s] = TakePosted(coordinator, s);
+			if (!state.source.takes || state.source.takes())
+				taken[s] = TakePosted(coordinator, s);
 			// Whether its epochs ran in the last frame, so a revision with its epochs knows whether to wait for its fragment.
 			state.drawing = !state.source.drawing || state.source.drawing();
 		}

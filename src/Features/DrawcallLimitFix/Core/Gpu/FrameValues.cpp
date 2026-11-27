@@ -725,7 +725,7 @@ namespace DCLF
 			org::services::BackingLease& a_jobLease, std::optional<std::uint64_t>& a_oldestContentEpoch, bool a_fresh = false);
 		void MakeRegistered();
 		void KickRegistered(Job& a_job, const FrameGlobals* a_globals);
-		void SampleRootViews(Job& a_job, const SetSnapshot& a_claims);
+		void SampleRootViews(const std::vector<std::shared_ptr<const Plan>>& a_plans, const SetSnapshot& a_claims, std::vector<RootViewSample>& a_out);
 		void Run(const Job& a_job);
 		void Sample(const Job& a_job);
 		void ApplyPlans(const Job& a_job);
@@ -2376,7 +2376,7 @@ namespace DCLF
 		}
 	}
 
-	void FrameValues::Impl::SampleRootViews(Job& a_job, const SetSnapshot& a_claims)
+	void FrameValues::Impl::SampleRootViews(const std::vector<std::shared_ptr<const Plan>>& a_plans, const SetSnapshot& a_claims, std::vector<RootViewSample>& a_out)
 	{
 		std::vector<std::uint8_t> taken;
 		const std::uint8_t rootPhases = Extensions::Views().rootPhases;
@@ -2387,7 +2387,7 @@ namespace DCLF
 				taken.resize(a_item.slot + 1, 0);
 			if (std::exchange(taken[a_item.slot], 1))
 				return;
-			auto& sample = a_job.rootViewSamples.emplace_back();
+			auto& sample = a_out.emplace_back();
 			sample.slot = a_item.slot;
 			sample.layerSlot = a_item.layerSlot;
 			SampleItem(a_item, sample.row, sample.layer);
@@ -2408,13 +2408,36 @@ namespace DCLF
 		};
 		for (const auto& [geometry, item] : rootViewMovers)
 			take(item);
-		for (auto it = a_job.written.rbegin(); it != a_job.written.rend(); ++it)
-			for (const auto& item : (*it)->written)
-				take(item);
+		for (auto it = a_plans.rbegin(); it != a_plans.rend(); ++it)
+			if (*it)
+				for (const auto& item : (*it)->written)
+					take(item);
+	}
+
+	struct FrameValues::RootViews
+	{
+		std::vector<Impl::RootViewSample> samples;
+	};
+
+	std::shared_ptr<FrameValues::RootViews> FrameValues::TakeRootViews(const std::vector<std::shared_ptr<const PlacementPlan>>& a_plans,
+		const SetSnapshot* a_claims)
+	{
+		auto& s = *impl;
+		s.ApplyRootViewPlans(a_plans);
+		auto views = std::make_shared<RootViews>();
+		if (a_claims)
+			s.SampleRootViews(a_plans, *a_claims, views->samples);
+		return views;
+	}
+
+	void FrameValues::PrependRootViews(RootViews& a_to, RootViews&& a_older)
+	{
+		a_older.samples.insert(a_older.samples.end(), std::make_move_iterator(a_to.samples.begin()), std::make_move_iterator(a_to.samples.end()));
+		a_to.samples = std::move(a_older.samples);
 	}
 
 	bool FrameValues::Kick(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
-		std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals)
+		std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals, std::shared_ptr<RootViews> a_rootViews)
 	{
 		auto& s = *impl;
 		s.kicked = false;
@@ -2434,7 +2457,6 @@ namespace DCLF
 			s.unsampledShading.insert(s.unsampledShading.begin(), std::make_move_iterator(refused.begin()), std::make_move_iterator(refused.end()));
 		s.unsampledShading.insert(s.unsampledShading.end(), std::make_move_iterator(a_shading.begin()), std::make_move_iterator(a_shading.end()));
 		s.unsampledFieldValues.insert(s.unsampledFieldValues.end(), a_fieldValues.begin(), a_fieldValues.end());
-		s.ApplyRootViewPlans(a_plans);
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto timeline = RenderGraphRuntime::Get().FrameWaitTimeline();
 		auto uploads = host ? host->RetainUploads() : nullptr;
@@ -2502,9 +2524,9 @@ namespace DCLF
 		for (std::size_t c = 0; c < job.paletteInputs.size(); ++c)
 			if (const auto* entry = Extensions::PaletteRows(static_cast<Api::FrameValueItemClass>(c + 1)); entry && entry->contribution.kick)
 				entry->contribution.kick({ seq, job.paletteInputs[c] });
-		// Sample first-person members before Main::Draw's first-person shift (FUN_1414cb020), so no read sees a world-space palette.
-		if (const auto claims = std::exchange(rootViewClaims, nullptr))
-			s.SampleRootViews(job, *claims);
+		// The first-person members the game half sampled before Main::Draw's first-person shift (FUN_1414cb020).
+		if (a_rootViews)
+			job.rootViewSamples = std::move(a_rootViews->samples);
 		TracyCZoneEnd(kRoot);
 		if (s.plan)
 			s.plans.emplace_back(seq, s.plan);

@@ -69,6 +69,9 @@ namespace DCLF
 
 		static FrameValues& Get();
 
+		/** @brief The first-person members' rows and palettes, sampled by the game half. Kick hands them to its producer. */
+		struct RootViews;
+
 		/** @brief An object's placement row read from the engine now. Without a listed root the bound is unbounded. */
 		static void SampleRow(const RE::BSGeometry& a_geometry, const RE::NiAVObject* a_listedRoot, const RE::BSShaderProperty* a_fadeProperty,
 			BindlessPlacement& a_out);
@@ -80,16 +83,18 @@ namespace DCLF
 		 * Returns false when there is no graph or dedicated upload queue. The frame then waits for nothing and its inputs wait for the first producer.
 		 */
 		bool Kick(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
-			std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals);
+			std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals, std::shared_ptr<RootViews> a_rootViews);
 		/** @brief Render thread, before Kick. Kick also leases late-pose placement and palette backings, filled by the same producer. */
 		void SetLatePoses(std::shared_ptr<const LatePoses::FramePlan> a_plan);
 		/** @brief Render thread, at the depth commit. Draws from here read the late backings. The shadow epoch keeps the first ones. */
 		void UseLatePoses();
 		/**
-		 * @brief Render thread, before Kick. Kick samples these first-person members itself, before Main::Draw moves the skeleton into its
-		 * root's space (FUN_1414cb020). The producer never samples them.
+		 * @brief Game half of the frame start, before Main::Draw moves the skeleton into its root's space (FUN_1414cb020). Applies
+		 * a_plans to the first-person members and samples those a_claims holds (none when null). The producer never samples them.
 		 */
-		void SetRootViewClaims(std::shared_ptr<const SetSnapshot> a_claims) { rootViewClaims = std::move(a_claims); }
+		std::shared_ptr<RootViews> TakeRootViews(const std::vector<std::shared_ptr<const PlacementPlan>>& a_plans, const SetSnapshot* a_claims);
+		/** @brief Puts a_older's samples before a_to's, so a slot both sampled takes a_to's. For a ticket no render took. */
+		static void PrependRootViews(RootViews& a_to, RootViews&& a_older);
 		/**
 		 * @brief Render thread, before Kick. The CPU pipeline's view batches, kept until replaced. Producers fill their live sphere column.
 		 * The next producer also fills a_forwardRows, the frame slot's forward sort rows, from the Forward and Refraction lists.
@@ -212,7 +217,6 @@ namespace DCLF
 		struct Impl;
 		std::unique_ptr<Impl> impl;
 		std::uint32_t frameIndex = 0, paletteIndex = 0, shadingIndex = 0;
-		std::shared_ptr<const SetSnapshot> rootViewClaims;
 		std::shared_ptr<const Direct::ViewBatchSet> viewBatches;
 		std::vector<Direct::ForwardSortRow>* forwardRows = nullptr;
 	};

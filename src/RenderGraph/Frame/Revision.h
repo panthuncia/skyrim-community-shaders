@@ -203,6 +203,9 @@ namespace RenderGraph::Frame::Revision
 		std::function<void(const std::shared_ptr<const void>& a_value)> adopt;
 		// Not adopted. The source keeps it to release it off the render thread, and makes a new one.
 		std::function<void(const std::shared_ptr<const void>& a_value, FragmentDrop a_why, std::string_view a_text, std::span<const std::uint32_t> a_epochs)> drop;
+		// Once per Begin, before taking: whether the source takes its newest posted fragment at this Begin. A fragment left stays posted
+		// for a later Begin. Empty: always.
+		std::function<bool()> takes;
 		// Once per Begin, before adoption: whether the source draws (it started at an adoption and has not stopped) and its epochs ran
 		// in the last frame. Only then does a revision with its epochs in the closure wait for its fragment. Empty: always.
 		std::function<bool()> drawing;

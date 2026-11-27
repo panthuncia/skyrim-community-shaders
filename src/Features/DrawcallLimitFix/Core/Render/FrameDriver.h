@@ -12,6 +12,7 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <utility>
 
 namespace RE
 {
@@ -21,12 +22,17 @@ namespace RE
 
 namespace DCLF
 {
+	struct FrameTicket;
+
 	/**
 	 * @brief Registers DCLF's scene as a fragment source of the frame revision (cleanup plan A5, step 4), like any other client.
 	 * Main thread, once, before the render graph initializes. The frame revision takes DCLF's newest snapshot at every main-thread
 	 * render-owner Begin, adopts it alone or with the revision it was recorded against, and BeginFrame hands its publication over.
 	 */
 	void RegisterSceneSource();
+
+	/** @brief Render thread. Whether the engine's utility shader existed at the frame's ticket. False before the first ticket. */
+	bool TicketUtilityShader();
 
 	/** @brief DCLF's scene source, from RegisterSceneSource. */
 	RenderGraph::Frame::Revision::FragmentSourceId SceneSource();
@@ -66,8 +72,25 @@ namespace DCLF
 		/** @brief Render thread. Returns and resets the occlusion map counts. */
 		OcclusionFrames TakeOcclusionFrames();
 
-		/** @brief Main::Draw's early point, every frame. */
-		void BeginFrame();
+		/**
+		 * @brief Main::Draw's early point (SetupSunAndSky), every world render. Makes the game update's ticket (GameFrameStart), or keeps
+		 * the snapshot's on a repeated render, then runs the render half (BeginFrame) from it.
+		 */
+		void SceneFrameStart();
+		/** @brief Native, main thread: a game update the cadence renders no frame for. Its ticket retires unused when the next is made. */
+		void UnrenderedUpdate(std::uint64_t a_snapshot);
+		/** @brief Render owner, at Begin. Whether this render repeats the snapshot whose ticket is made, so it keeps the ticket's scene. */
+		bool HoldsScene() const;
+		/** @brief Inside the adoption point: a revision left DCLF's scene, so no coverage counts until a render decides it again. */
+		void NoteStoppedDrawing();
+		/** @brief Render thread. The ticket the frame renders, null before the first. */
+		const FrameTicket* Ticket() const { return ticket.get(); }
+		/** @brief The tickets made, those no render took, and those a repeated render made again, since the last take. */
+		struct TicketCounts
+		{
+			std::uint64_t made = 0, unrendered = 0, remade = 0;
+		};
+		TicketCounts TakeTicketCounts() { return { std::exchange(ticketsMade, 0), std::exchange(ticketsUnrendered, 0), std::exchange(ticketsRemade, 0) }; }
 		/** @brief Before Present, in menus too. Queues the CPU pipeline's frame signal and the frame values' signal before DXVK presents. */
 		void BeforePresent();
 		/** @brief After Present, in menus too. Ends the frame and writes its report. */
@@ -103,6 +126,12 @@ namespace DCLF
 		void NativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags);
 
 	private:
+		/** @brief Makes the next ticket. The last one retires, unused when no render took it. */
+		void MakeTicket(std::uint64_t a_snapshot);
+		/** @brief The game half: everything the frame start reads or writes of the engine, once per game update. */
+		std::shared_ptr<const FrameTicket> GameFrameStart(std::uint64_t a_snapshot);
+		/** @brief The render half, once per render: reads only the ticket, the snapshot and CS's frame. */
+		void BeginFrame();
 		/** @brief Runs every view's work at a_point, in slot order. */
 		void RunViewWork(Api::ViewPoint a_point);
 
@@ -122,5 +151,9 @@ namespace DCLF
 		std::array<std::uint32_t, 32> occlusionNeedStreak{};
 		static constexpr std::uint32_t kOcclusionReentryFrames = 300;
 		std::uint32_t captureFrame = ~0u;
+		std::shared_ptr<const FrameTicket> ticket;
+		bool ticketRendered = false;  // a render took the ticket
+		bool coveredLast = false;     // the last render's coverage of DCLF's claims epochs
+		std::uint64_t ticketsMade = 0, ticketsUnrendered = 0, ticketsRemade = 0;
 	};
 }

@@ -1,10 +1,11 @@
 // Resolves the Lighting and shadow pipelines a publication's tables use from the pipeline lane's catalog.
 // The scene lane does this without reading the engine or any render-thread service.
 
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
-#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Snapshot/EngineReads.h"
 
 #include <algorithm>
@@ -277,7 +278,7 @@ namespace DCLF
 		engine.pipelineShadowFormat = DrawPipelines::Get().ShadowFormat();
 		auto& views = engine.lastShadow;
 		ShadowLookupInputs inputs;
-		inputs.enabled = views.known && CS_ENGINE_READ(Shaders, RecordTime, globals::game::utilityShader);
+		inputs.enabled = views.known && TicketUtilityShader();
 		if (inputs.enabled) {
 			inputs.modes = views.modes;
 			inputs.rasterStates = views.rasterStates;

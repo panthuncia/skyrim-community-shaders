@@ -344,7 +344,7 @@ void DrawcallLimitFix::BeginSceneFrame()
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::SceneFrame);
 	WatchScenePump();
-	DCLF::FrameDriver::Get().BeginFrame();
+	DCLF::FrameDriver::Get().SceneFrameStart();
 }
 
 void DrawcallLimitFix::OnGraphEpochFailed(std::string_view a_epoch, const std::string& a_error)
@@ -689,6 +689,11 @@ void DrawcallLimitFix::Hooks::Install()
 	Snapshot::RegisterCapture([](Snapshot::Builder&) { DCLF::SceneTracker::Get().PushHeldDetaches(); });
 	// Native: the water port's game values, after the water update the capture ran.
 	Snapshot::RegisterCapture(&DCLF::Features::Water::Port::CaptureGame);
+	// A world update the cadence renders no frame for still makes its frame-start ticket, which then retires unused.
+	Snapshot::RegisterUnrenderedUpdate([](const Snapshot::FrameSnapshot& a_snapshot) {
+		if (globals::features::drawcallLimitFix.installed && a_snapshot.kind == Snapshot::FrameKind::World)
+			DCLF::FrameDriver::Get().UnrenderedUpdate(a_snapshot.id);
+	});
 	logger::info("[DCLF] Native pass hooks installed");
 }
 

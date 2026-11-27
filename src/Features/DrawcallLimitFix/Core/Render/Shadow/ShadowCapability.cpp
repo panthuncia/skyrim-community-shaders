@@ -1,8 +1,9 @@
 // Shadow phase readiness on the render thread. It holds the rasterizer state catalog, the view placements and per-slot readiness.
 
+#include "EngineFixes/ShadowmapCascadeRasterizerFix.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowEpochs.h"
-#include "EngineFixes/ShadowmapCascadeRasterizerFix.h"
 #include "Snapshot/EngineReads.h"
 
 namespace DCLF
@@ -148,7 +149,7 @@ namespace DCLF
 		// Scene side only. The frame's shadow epochs read readyModes instead.
 		auto& i = *impl->shadowEngine;
 		std::uint8_t phases = 0;
-		if (DrawPipelines::Get().Enabled() && CS_ENGINE_READ(Shaders, RecordTime, globals::game::utilityShader) && i.SetupShadow()) {
+		if (DrawPipelines::Get().Enabled() && TicketUtilityShader() && i.SetupShadow()) {
 			if (!i.shadowCatalogBuilt) {
 				i.BuildShadowCatalog();
 				if (i.shadowCatalogBuilt) {
