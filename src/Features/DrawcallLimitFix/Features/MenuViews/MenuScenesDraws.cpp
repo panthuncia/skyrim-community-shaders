@@ -323,8 +323,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			// The book's pages: its model's page material samples the kBOOK_TEXT targets the page copies and Scaleform drew.
 			for (const auto page : { RE::RENDER_TARGET::kBOOK_TEXT_0, RE::RENDER_TARGET::kBOOK_TEXT_1, RE::RENDER_TARGET::kBOOK_TEXT_2, RE::RENDER_TARGET::kBOOK_TEXT_3 })
 				a_inputs.AddEngine(page);
-			// The local map's water with reflections and no static cube reads the global reflections cube (t3).
-			a_inputs.AddEngine(RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS);
 		}
 
 		/** @brief Makes the client of a_view. Null, logged, when a target cannot be imported. */

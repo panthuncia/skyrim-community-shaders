@@ -53,22 +53,89 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 {
 	namespace
 	{
-		/** @brief Packs one constant group into rows through a shader's constant table, and marks the floats it wrote in a_written. */
+		/** @brief A draw's lights as GetRenderPasses gives a menu pass: the scene node's sun, its shadow lights, then its point lights. */
+		struct Lights
+		{
+			std::array<RE::BSLight*, 16> lights{};
+			std::uint32_t count = 0;
+			std::uint32_t shadow = 0;
+		};
+
+		/** @brief A Lighting draw's constants, its descriptors and material record. */
+		struct LightingResult
+		{
+			LightingSceneConstants constants{};
+			std::uint32_t pass = 0, vertex = 0, pixel = 0, rawPixel = 0;
+			MaterialRecord record{};
+			Lights lights;
+		};
+
+		/** @brief An Effect draw's constants, descriptors and material record. */
+		struct EffectResult
+		{
+			EffectSceneConstants constants{};
+			std::uint32_t pass = 0, vertex = 0, pixel = 0, rawPixel = 0;
+			MaterialRecord record{};
+		};
+
+		/** @brief CS's permutation block for a draw: the extra shader descriptor and Linear Lighting's two words, as CS's hooks set them. */
+		struct Permutation
+		{
+			std::uint32_t extra = 0, baseTextureIsWorking = 0, renderToUI = 0;
+		};
+
+		/** @brief A Utility draw as BSUtilityShader's Setup functions would bind it: its rows, technique, states, t0. */
+		struct UtilityResult
+		{
+			UtilitySceneConstants constants{};
+			std::uint32_t technique = 0, vertex = 0;
+			DrawState state;
+			const RE::NiSourceTexture* texture = nullptr;  // t0, the diffuse an alpha-tested draw samples
+			std::uint32_t address = 0, filter = 0;
+		};
+
+		/** @brief The engine's Lighting shader object. Null before the engine makes it. */
+		RE::BSShader* LightingShader()
+		{
+			static const REL::Relocation<RE::BSShader**> shader{ REL::Offset(Engine::Address::kLightingShader) };
+			return *shader.get();
+		}
+
+		/** @brief The engine's Effect shader object. Null before the engine makes it. */
+		RE::BSShader* EffectShader()
+		{
+			static const REL::Relocation<RE::BSShader**> shader{ REL::Offset(Effects::Address::kEffectShader) };
+			return *shader.get();
+		}
+
+		/** @brief The FrameBuffer rows after the camera's: the frame's ratios, and row 42's inverse gamma. */
+		void FrameTailRows(float (*a_out)[4])
+		{
+			Snapshot::FrameCamera::WriteRatios({}, Snapshot::Core().drClampOffset, &a_out[0][0]);
+			const float params[4]{ Snapshot::Core().inverseGamma, 1.0f, 0.0f, 0.0f };
+			std::memcpy(a_out[42], params, sizeof(params));
+		}
+
+		/** @brief Packs one constant group into rows through a shader's constant table. */
 		void Pack(const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_group, std::uint32_t a_first,
-			float (*a_rows)[4], float (*a_written)[4], std::uint32_t a_count)
+			float (*a_rows)[4], std::uint32_t a_count)
 		{
 			std::array<std::byte, 1024> bytes{};
 			PackConstantGroup(a_block, a_layout, a_table, a_group, a_first, bytes);
 			std::memcpy(a_rows, bytes.data(), a_count * 16);
-			// The same group of a block that holds 1 where a_block is written.
+		}
+
+		/** @brief Pack, and marks the floats it wrote in a_written: the same group of a block that holds 1 where a_block is written. */
+		void PackWritten(const ConstantBlock& a_block, const StageLayout& a_layout, std::span<const std::uint8_t> a_table, std::uint64_t a_group, std::uint32_t a_first,
+			float (*a_rows)[4], float (*a_written)[4], std::uint32_t a_count)
+		{
+			Pack(a_block, a_layout, a_table, a_group, a_first, a_rows, a_count);
 			ConstantBlock mask;
 			mask.Reset();
 			for (std::uint32_t f = 0; f < kConstantBlockFloats; ++f)
 				if (a_block.Written(f))
 					mask.floats[f] = 1.0f;
-			bytes.fill(std::byte{ 0 });
-			PackConstantGroup(mask, a_layout, a_table, a_group, a_first, bytes);
-			std::memcpy(a_written, bytes.data(), a_count * 16);
+			Pack(mask, a_layout, a_table, a_group, a_first, a_written, a_count);
 		}
 
 		/**
@@ -97,6 +164,19 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return static_cast<float>(a_alpha.alphaThreshold) * std::bit_cast<float>(0x3B808081u);
 		}
 
+		/**
+		 * @brief The alpha test reference with the exe's bias: the threshold times 1/255 plus a bias just under it (the constants at
+		 * AE 0x141ad2810 and 0x141abfc44); a threshold of 4 adds 1/255 more.
+		 */
+		float BiasedAlphaRefOf(const RE::NiAlphaProperty& a_alpha)
+		{
+			constexpr float kStep = std::bit_cast<float>(0x3B808081u), kBias = std::bit_cast<float>(0x3B80802Cu);
+			float ref = static_cast<float>(a_alpha.alphaThreshold) * kStep + kBias;
+			if (a_alpha.alphaThreshold == 4)
+				ref += kStep;
+			return ref;
+		}
+
 		/** @brief Whether a_geometry is a particle system drawn as camera-facing quads (not strips). */
 		bool IsParticles(const RE::BSGeometry& a_geometry, std::uint32_t a_pass)
 		{
@@ -104,7 +184,6 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return (a_pass & EF::Particles) && !(a_pass & EF::StripParticles) && netimmerse_cast<const RE::NiParticleSystem*>(&a_geometry) != nullptr;
 		}
 
-		/** @brief The point light rows (c15, c22, c29.x) as the latch writes Light Limit Fix's strict lights for a pass outside the world. */
 		/** @brief A light's LOD dimmer: a shadow light's as MistMenu's shadow render sets it (Inputs::shadowDimmers), else the light's own. */
 		float DimmerOf(const Inputs& a_in, const RE::BSLight& a_light)
 		{
@@ -114,7 +193,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return a_light.lodDimmer;
 		}
 
-		void PointLightRows(const Inputs& a_in, const Lights& a_lights, const RE::NiPoint3& a_eye, LightingSceneConstants& a_out, LightingSceneConstants& a_written)
+		/** @brief The point light rows (c15, c22, c29.x) as the latch writes Light Limit Fix's strict lights for a pass outside the world. */
+		void PointLightRows(const Inputs& a_in, const Lights& a_lights, const RE::NiPoint3& a_eye, LightingSceneConstants& a_out)
 		{
 			auto& llf = globals::features::lightLimitFix;
 			if (!llf.loaded)
@@ -135,12 +215,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				const float row1[4]{ light.color.x * light.fade, light.color.y * light.fade, light.color.z * light.fade, 0.0f };
 				std::memcpy(a_out.psGeometry[kPositions + count], row0, 16);
 				std::memcpy(a_out.psGeometry[kColours + count], row1, 16);
-				for (std::uint32_t c = 0; c < 4; ++c)
-					a_written.psGeometry[kPositions + count][c] = a_written.psGeometry[kColours + count][c] = 1.0f;
 				++count;
 			}
 			a_out.psGeometry[kCount][0] = static_cast<float>(count);
-			a_written.psGeometry[kCount][0] = 1.0f;
 		}
 	}
 
@@ -210,11 +287,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		SampleFog(in.sceneNode, in.technique);
 		in.pipeline = GeometryPort::SamplePipelineFrame(in.sceneNode ? in.sceneNode->GetRuntimeData().sunLight : nullptr, true, a_hdrOverride);
 		// The material port reads the engine's Lighting shader object, which DCLF captures only in a world frame.
-		if (!EngineShaders::Lighting()) {
-			static const REL::Relocation<RE::BSShader**> lightingShader{ REL::Offset(Engine::Address::kLightingShader) };
-			if (auto* lighting = *lightingShader.get(); lighting && lighting->shaderType.get() == RE::BSShader::Type::Lighting)
+		if (!EngineShaders::Lighting())
+			if (auto* lighting = LightingShader(); lighting && lighting->shaderType.get() == RE::BSShader::Type::Lighting)
 				EngineShaders::SetLighting(lighting);
-		}
 		in.material = MaterialPort::SampleFrame();
 		Snapshot::FrameCamera::Capture(a_camera, in.camera);
 		// The previous camera is the menu scene's last one; the first render has none and takes its own, as the engine's first does not.
@@ -224,228 +299,233 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		return in;
 	}
 
-	void SelectLights(const Inputs& a_in, const RE::BSGeometry& a_geometry, Lights& a_out)
+	namespace
 	{
-		a_out = {};
-		if (!a_in.sceneNode)
-			return;
-		const auto& data = a_in.sceneNode->GetRuntimeData();
-		const auto push = [&](RE::BSLight* a_light) {
-			if (a_out.count < a_out.lights.size())
-				a_out.lights[a_out.count++] = a_light;
-		};
-		// A light reaches a geometry whose bound its radius touches.
-		const auto lights = [&](const RE::BSLight& a_light) {
-			const auto* niLight = a_light.light.get();
-			const auto d = niLight->world.translate - a_geometry.worldBound.center;
-			const float reach = niLight->GetLightRuntimeData().radius.x + a_geometry.worldBound.radius;
-			return d.x * d.x + d.y * d.y + d.z * d.z <= reach * reach;
-		};
-		push(data.sunLight);
-		// The local map's land passes take no other light (their point light rows stay empty).
-		if (a_in.localMap)
-			return;
-		for (const auto& light : data.activeShadowLights)
-			if (light && light->light && lights(*light)) {
-				push(light.get());
-				++a_out.shadow;
-			}
-		for (const auto& light : data.activeLights)
-			if (light && light->light && lights(*light))
-				push(light.get());
+		/** @brief A draw's lights as GetRenderPasses gives a menu pass: the scene node's sun, its shadow lights, then its point lights. */
+		void SelectLights(const Inputs& a_in, const RE::BSGeometry& a_geometry, Lights& a_out)
+		{
+			a_out = {};
+			if (!a_in.sceneNode)
+				return;
+			const auto& data = a_in.sceneNode->GetRuntimeData();
+			const auto push = [&](RE::BSLight* a_light) {
+				if (a_out.count < a_out.lights.size())
+					a_out.lights[a_out.count++] = a_light;
+			};
+			// A light reaches a geometry whose bound its radius touches.
+			const auto lights = [&](const RE::BSLight& a_light) {
+				const auto* niLight = a_light.light.get();
+				const auto d = niLight->world.translate - a_geometry.worldBound.center;
+				const float reach = niLight->GetLightRuntimeData().radius.x + a_geometry.worldBound.radius;
+				return d.x * d.x + d.y * d.y + d.z * d.z <= reach * reach;
+			};
+			push(data.sunLight);
+			// The local map's land passes take no other light (their point light rows stay empty).
+			if (a_in.localMap)
+				return;
+			for (const auto& light : data.activeShadowLights)
+				if (light && light->light && lights(*light)) {
+					push(light.get());
+					++a_out.shadow;
+				}
+			for (const auto& light : data.activeLights)
+				if (light && light->light && lights(*light))
+					push(light.get());
+		}
 	}
 
 	void FrameRows(const Inputs& a_in, float (*a_out)[4])
 	{
 		std::memset(a_out, 0, kFrameBytes);
 		Snapshot::FrameCamera::WriteCamera(a_in.camera.view, a_in.camera.proj, a_in.camera.viewProj, a_in.eye, { 0.0f, 0.0f }, a_in.localMap ? nullptr : &a_in.previous, &a_out[0][0]);
-		Snapshot::FrameCamera::WriteRatios({}, Snapshot::Core().drClampOffset, &a_out[0][0]);
-		const float params[4]{ Snapshot::Core().inverseGamma, 1.0f, 0.0f, 0.0f };
-		std::memcpy(a_out[42], params, sizeof(params));
-	}
-
-	bool ComputeLighting(const Inputs& a_in, const RE::BSGeometry& a_geometry, LightingResult& a_out, std::string& a_why)
-	{
-		a_out = {};
-		const auto* property = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
-		if (!property || !property->material) {
-			a_why = "not a Lighting property with a material";
-			return false;
-		}
-
-		// The pass descriptor: derived from the scene graph, with the shadow lights' bits GetRenderPasses adds from the pass's lights.
-		SelectLights(a_in, a_geometry, a_out.lights);
-		{
-			SceneCapture::LiveLeaf leaf(a_geometry);
-			LightingDescriptors derived{};
-			const auto reason = leaf.view.property ? DeriveLightingDescriptors(*leaf.view.property, leaf.view, nullptr, derived) : Ineligible::NotLightingShader;
-			if (derived.derivedPass == kNotDerived) {
-				a_why = std::format("no pass descriptor ({})", kIneligibleNames[static_cast<std::size_t>(reason)]);
-				return false;
-			}
-			a_out.pass = derived.derivedPass;
-			a_out.rawPixel = derived.rawPixel;
-			// Without shadow maps a shadow light is a plain light of the pass (GetRenderPasses reads the colour accumulator's +0x178). The raw
-			// pixel descriptor takes the same bits: DefShadow reaches the shader through CS's permutation block.
-			if (a_out.lights.shadow && a_in.shadowMaps) {
-				const std::uint32_t bits = (1u << 14) | ((a_out.lights.shadow & 7u) << 6);
-				a_out.pass |= bits;
-				a_out.rawPixel |= bits;
-			}
-		}
-		LightingShaderDescriptors(a_out.pass, false, a_out.vertex, a_out.pixel);
-		// The local map's land passes as the engine draws them: True PBR's glint bit from its material (its GetRenderPasses hook,
-		// TruePBR.cpp) and Landscape Seams' bit on a blended quad (LandscapeSeamsFix.cpp). The ORG Lighting build compiles both features
-		// out, so the bits only name the program.
-		if (a_in.localMap && property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kMultiTextureLandscape)) {
-			using LF = SIE::ShaderCache::LightingShaderFlags;
-			const auto seams = static_cast<std::uint32_t>(LF::LandscapeSeams), glint = static_cast<std::uint32_t>(LF::AnisoLighting);
-			const bool blended = LandscapeSeamsFix::GetInstance().IsBlended(const_cast<RE::BSGeometry*>(&a_geometry));
-			const bool glints = (a_out.pass & static_cast<std::uint32_t>(LF::TruePbr)) && static_cast<const BSLightingShaderMaterialPBRLandscape*>(property->material)->HasGlint();
-			for (auto* d : { &a_out.pass, &a_out.pixel, &a_out.rawPixel })
-				*d = (*d & ~(seams | glint)) | (blended ? seams : 0u) | (glints ? glint : 0u);
-		}
-
-		auto* shader = EngineShaders::Lighting();
-		auto* vs = shader ? globals::shaderCache->GetVertexShader(*shader, a_out.vertex) : nullptr;
-		auto* ps = shader ? globals::shaderCache->GetPixelShader(*shader, a_out.pixel) : nullptr;
-		if (!vs || !ps) {
-			a_why = std::format("no shader for vs {:#x} ps {:#x}", a_out.vertex, a_out.pixel);
-			return false;
-		}
-		const std::span<const std::uint8_t> vsTable(reinterpret_cast<const std::uint8_t*>(vs->constantTable.data()), vs->constantTable.size());
-		const std::span<const std::uint8_t> psTable(reinterpret_cast<const std::uint8_t*>(ps->constantTable.data()), ps->constantTable.size());
-		auto& c = a_out.constants;
-		auto& w = a_out.written;
-		const auto& vsLayout = LightingVSLayout();
-		const auto& psLayout = LightingPSLayout();
-
-		// PerTechnique (SetupTechnique).
-		TechniqueConstants technique{};
-		EvaluateTechnique(a_out.pass, a_in.technique, technique);
-		Pack(technique.vs, vsLayout, vsTable, kVSGroups[kPerTechnique], kVSFirstVariable[kPerTechnique], c.vsTechnique, w.vsTechnique, kLightingVSTechniqueRows);
-		Pack(technique.ps, psLayout, psTable, kPSGroups[kPerTechnique], kPSFirstVariable[kPerTechnique], c.psTechnique, w.psTechnique, kLightingPSTechniqueRows);
-
-		// PerMaterial (SetupMaterial, with Community Shaders' hooks as the port's contributors, Linear Lighting's SpecularColor among them).
-		MaterialPort::MaterialSnapshot snapshot;
-		if (!MaterialPort::Capture(*property->material, snapshot) || !MaterialPort::Evaluate(snapshot, a_out.pass, a_in.material, a_out.record)) {
-			a_why = "the material port does not cover its material";
-			return false;
-		}
-		Pack(a_out.record.vs, vsLayout, vsTable, kVSGroups[kPerMaterial], kVSFirstVariable[kPerMaterial], c.vsMaterial, w.vsMaterial, kLightingVSMaterialRows);
-		Pack(a_out.record.ps, psLayout, psTable, kPSGroups[kPerMaterial], kPSFirstVariable[kPerMaterial], c.psMaterial, w.psMaterial, kLightingPSMaterialRows);
-
-		// PerGeometry (SetupGeometry): the pipeline's frame values from the menu's scene node, then the object's.
-		GeometryConstants geometry{};
-		if (!GeometryPort::PipelineGeometryConstants(a_out.pass, GeometryPort::kMainPassRenderFlags, a_in.pipeline, geometry)) {
-			a_why = "the menu's scene node has no sun light";
-			return false;
-		}
-		WorldRows(a_geometry.world, a_in.eye, &geometry.vs.floats[vsLayout.offset[kVSWorld]]);
-		WorldRows(a_geometry.previousWorld, a_in.localMap ? RE::NiPoint3{} : a_in.havePrevious ? a_in.previousEye :
-																								 a_in.eye,
-			&geometry.vs.floats[vsLayout.offset[kVSPreviousWorld]]);
-		BindlessShading shading{};
-		SampleShading(*property, a_out.pass, false, shading);
-		for (std::uint32_t i = 0; i < 4; ++i)
-			if (shading.written & (1u << i))
-				geometry.ps.floats[psLayout.offset[kPSMaterialData] + i] = shading.shading.materialData[i];
-		for (std::uint32_t i = 0; i < 3; ++i)
-			if (shading.written & (0x10u << i))
-				geometry.ps.floats[psLayout.offset[kPSEmitColor] + i] = shading.shading.emitColor[i];
-		if (shading.written & 0x80u)
-			geometry.ps.floats[psLayout.offset[kPSSSRParams] + 3] = shading.shading.ssrSpecular;
-		Pack(geometry.vs, vsLayout, vsTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry], c.vsGeometry, w.vsGeometry, kLightingVSGeometryRows);
-		Pack(geometry.ps, psLayout, psTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry], c.psGeometry, w.psGeometry, kLightingPSGeometryRows);
-		// The point light rows replace what the pipeline block left there.
-		for (std::uint32_t r = 15; r < 29; ++r)
-			for (std::uint32_t i = 0; i < 4; ++i)
-				c.psGeometry[r][i] = w.psGeometry[r][i] = 0.0f;
-		PointLightRows(a_in, a_out.lights, a_in.eye, c, w);
-		if (a_in.shadowMaps && a_out.lights.shadow) {
-			// The point light routine (AE 0x1414df650) zeroes ShadowLightMaskSelect, then gives each shadow light its mask channel.
-			ConstantBlock select;
-			select.Reset();
-			float* channels = &select.floats[psLayout.offset[kPSShadowLightMaskSelect]];
-			for (std::uint32_t i = 0; i < 4; ++i)
-				channels[i] = 0.0f;
-			for (std::uint32_t i = 0; i < a_out.lights.shadow && i < 4; ++i)
-				channels[i] = static_cast<float>(static_cast<const RE::BSShadowLight*>(a_out.lights.lights[1 + i])->GetRuntimeData().maskIndex);
-			float rows[kLightingPSGeometryRows][4]{}, written[kLightingPSGeometryRows][4]{};
-			Pack(select, psLayout, psTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry], rows, written, kLightingPSGeometryRows);
-			for (std::uint32_t r = 0; r < kLightingPSGeometryRows; ++r)
-				for (std::uint32_t i = 0; i < 4; ++i)
-					if (written[r][i] != 0.0f) {
-						c.psGeometry[r][i] = rows[r][i];
-						w.psGeometry[r][i] = 1.0f;
-					}
-		}
-		// The local map's land draws find the graphics state's default height map in t6 and t14 (observed in every one; the ORG build reads
-		// neither: no parallax layer, no shadows).
-		if (a_in.localMap) {
-			const auto* height = RE::BSGraphics::State::GetSingleton()->GetRuntimeData().defaultHeightMap.get();
-			for (const std::uint32_t slot : { 6u, 14u })
-				if (!((a_out.record.textureWritten >> slot) & 1)) {
-					a_out.record.textures[slot] = MaterialPort::ViewOf(height);
-					a_out.record.addressModes[slot] = 3;
-					a_out.record.filterModes[slot] = 3;
-					a_out.record.textureWritten |= 1u << slot;
-				}
-		}
-		// A pass with shadow bits reads the shadow mask in t14 (SetupTechnique): clamped, with the technique's filter.
-		if (technique.shadowMask && technique.shadowMaskTexture) {
-			a_out.record.textures[kShadowMaskSlot] = technique.shadowMaskTexture;
-			a_out.record.addressModes[kShadowMaskSlot] = 0;
-			a_out.record.filterModes[kShadowMaskSlot] = technique.filterModes[kShadowMaskSlot];
-			a_out.record.textureWritten |= 1u << kShadowMaskSlot;
-		}
-		return true;
-	}
-
-	Permutation PermutationOf(const RE::BSGeometry& a_geometry, bool a_effect)
-	{
-		using Extra = State::ExtraShaderDescriptors;
-		Permutation out;
-		// The per-draw bits are this draw's; the rest is the frame's.
-		out.extra = globals::state->permutationData.ExtraShaderDescriptor &
-		            ~(static_cast<std::uint32_t>(Extra::InWorld) | static_cast<std::uint32_t>(Extra::SourceAlphaBlend) | static_cast<std::uint32_t>(Extra::ProjectedTextureIsSRGB));
-		auto& linear = globals::features::linearLighting;
-		if (!linear.loaded || !linear.IsLinearLightingActive())
-			return out;
-		// Linear Lighting's RenderMenuScene sets RenderToUI around UI3DSceneManager::Render, and its SetupGeometry hooks the rest.
-		out.renderToUI = 1;
-		const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
-		if (a_effect) {
-			const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
-			using Function = RE::NiAlphaProperty::AlphaFunction;
-			if (property && !property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kPremultAlpha) && alpha && alpha->GetAlphaBlending() &&
-				alpha->GetSrcBlendMode() == Function::kSrcAlpha && (alpha->GetDestBlendMode() == Function::kInvSrcAlpha || alpha->GetDestBlendMode() == Function::kOne))
-				out.extra |= static_cast<std::uint32_t>(Extra::SourceAlphaBlend);
-		} else if (property && property->material) {
-			// With RenderToUI set only a water reflection source is in working space.
-			const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(property->material);
-			out.baseTextureIsWorking = material->diffuseRenderTargetSourceIndex == RE::RENDER_TARGETS::kWATER_REFLECTIONS;
-		}
-		return out;
-	}
-
-	bool BoneRows(const RE::BSGeometry& a_geometry, std::span<std::byte, kBonesBytes> a_out)
-	{
-		auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get();
-		if (!skin)
-			return false;
-		const std::uint32_t rows = skin->numMatrices * SkinPalettes::kRowsPerBone;
-		const float *current = nullptr, *previous = nullptr;
-		if (!rows || rows > kPaletteRows || !SkinPalettes::Sample(a_geometry, rows, current, previous))
-			return false;
-		std::fill(a_out.begin(), a_out.end(), std::byte{ 0 });
-		std::memcpy(a_out.data(), previous, rows * 16);
-		std::memcpy(a_out.data() + kBonesBytes / 2, current, rows * 16);
-		return true;
+		FrameTailRows(a_out);
 	}
 
 	namespace
 	{
+		/** @brief The Lighting draw of a_geometry as SetupTechnique, SetupMaterial and SetupGeometry would bind it. False, with why, when it cannot. */
+		bool ComputeLighting(const Inputs& a_in, const RE::BSGeometry& a_geometry, LightingResult& a_out, std::string& a_why)
+		{
+			a_out = {};
+			const auto* property = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
+			if (!property || !property->material) {
+				a_why = "not a Lighting property with a material";
+				return false;
+			}
+
+			// The pass descriptor: derived from the scene graph, with the shadow lights' bits GetRenderPasses adds from the pass's lights.
+			SelectLights(a_in, a_geometry, a_out.lights);
+			{
+				SceneCapture::LiveLeaf leaf(a_geometry);
+				LightingDescriptors derived{};
+				const auto reason = leaf.view.property ? DeriveLightingDescriptors(*leaf.view.property, leaf.view, nullptr, derived) : Ineligible::NotLightingShader;
+				if (derived.derivedPass == kNotDerived) {
+					a_why = std::format("no pass descriptor ({})", kIneligibleNames[static_cast<std::size_t>(reason)]);
+					return false;
+				}
+				a_out.pass = derived.derivedPass;
+				a_out.rawPixel = derived.rawPixel;
+				// Without shadow maps a shadow light is a plain light of the pass (GetRenderPasses reads the colour accumulator's +0x178). The raw
+				// pixel descriptor takes the same bits: DefShadow reaches the shader through CS's permutation block.
+				if (a_out.lights.shadow && a_in.shadowMaps) {
+					const std::uint32_t bits = (1u << 14) | ((a_out.lights.shadow & 7u) << 6);
+					a_out.pass |= bits;
+					a_out.rawPixel |= bits;
+				}
+			}
+			LightingShaderDescriptors(a_out.pass, false, a_out.vertex, a_out.pixel);
+			// The local map's land passes as the engine draws them: True PBR's glint bit from its material (its GetRenderPasses hook,
+			// TruePBR.cpp) and Landscape Seams' bit on a blended quad (LandscapeSeamsFix.cpp). The ORG Lighting build compiles both features
+			// out, so the bits only name the program.
+			if (a_in.localMap && property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kMultiTextureLandscape)) {
+				using LF = SIE::ShaderCache::LightingShaderFlags;
+				const auto seams = static_cast<std::uint32_t>(LF::LandscapeSeams), glint = static_cast<std::uint32_t>(LF::AnisoLighting);
+				const bool blended = LandscapeSeamsFix::GetInstance().IsBlended(const_cast<RE::BSGeometry*>(&a_geometry));
+				const bool glints = (a_out.pass & static_cast<std::uint32_t>(LF::TruePbr)) && static_cast<const BSLightingShaderMaterialPBRLandscape*>(property->material)->HasGlint();
+				for (auto* d : { &a_out.pass, &a_out.pixel, &a_out.rawPixel })
+					*d = (*d & ~(seams | glint)) | (blended ? seams : 0u) | (glints ? glint : 0u);
+			}
+
+			auto* shader = EngineShaders::Lighting();
+			auto* vs = shader ? globals::shaderCache->GetVertexShader(*shader, a_out.vertex) : nullptr;
+			auto* ps = shader ? globals::shaderCache->GetPixelShader(*shader, a_out.pixel) : nullptr;
+			if (!vs || !ps) {
+				a_why = std::format("no shader for vs {:#x} ps {:#x}", a_out.vertex, a_out.pixel);
+				return false;
+			}
+			const std::span<const std::uint8_t> vsTable(reinterpret_cast<const std::uint8_t*>(vs->constantTable.data()), vs->constantTable.size());
+			const std::span<const std::uint8_t> psTable(reinterpret_cast<const std::uint8_t*>(ps->constantTable.data()), ps->constantTable.size());
+			auto& c = a_out.constants;
+			const auto& vsLayout = LightingVSLayout();
+			const auto& psLayout = LightingPSLayout();
+
+			// PerTechnique (SetupTechnique).
+			TechniqueConstants technique{};
+			EvaluateTechnique(a_out.pass, a_in.technique, technique);
+			Pack(technique.vs, vsLayout, vsTable, kVSGroups[kPerTechnique], kVSFirstVariable[kPerTechnique], c.vsTechnique, kLightingVSTechniqueRows);
+			Pack(technique.ps, psLayout, psTable, kPSGroups[kPerTechnique], kPSFirstVariable[kPerTechnique], c.psTechnique, kLightingPSTechniqueRows);
+
+			// PerMaterial (SetupMaterial, with Community Shaders' hooks as the port's contributors, Linear Lighting's SpecularColor among them).
+			MaterialPort::MaterialSnapshot snapshot;
+			if (!MaterialPort::Capture(*property->material, snapshot) || !MaterialPort::Evaluate(snapshot, a_out.pass, a_in.material, a_out.record)) {
+				a_why = "the material port does not cover its material";
+				return false;
+			}
+			Pack(a_out.record.vs, vsLayout, vsTable, kVSGroups[kPerMaterial], kVSFirstVariable[kPerMaterial], c.vsMaterial, kLightingVSMaterialRows);
+			Pack(a_out.record.ps, psLayout, psTable, kPSGroups[kPerMaterial], kPSFirstVariable[kPerMaterial], c.psMaterial, kLightingPSMaterialRows);
+
+			// PerGeometry (SetupGeometry): the pipeline's frame values from the menu's scene node, then the object's.
+			GeometryConstants geometry{};
+			if (!GeometryPort::PipelineGeometryConstants(a_out.pass, GeometryPort::kMainPassRenderFlags, a_in.pipeline, geometry)) {
+				a_why = "the menu's scene node has no sun light";
+				return false;
+			}
+			WorldRows(a_geometry.world, a_in.eye, &geometry.vs.floats[vsLayout.offset[kVSWorld]]);
+			WorldRows(a_geometry.previousWorld, a_in.localMap ? RE::NiPoint3{} : a_in.havePrevious ? a_in.previousEye :
+																									 a_in.eye,
+				&geometry.vs.floats[vsLayout.offset[kVSPreviousWorld]]);
+			BindlessShading shading{};
+			SampleShading(*property, a_out.pass, false, shading);
+			for (std::uint32_t i = 0; i < 4; ++i)
+				if (shading.written & (1u << i))
+					geometry.ps.floats[psLayout.offset[kPSMaterialData] + i] = shading.shading.materialData[i];
+			for (std::uint32_t i = 0; i < 3; ++i)
+				if (shading.written & (0x10u << i))
+					geometry.ps.floats[psLayout.offset[kPSEmitColor] + i] = shading.shading.emitColor[i];
+			if (shading.written & 0x80u)
+				geometry.ps.floats[psLayout.offset[kPSSSRParams] + 3] = shading.shading.ssrSpecular;
+			Pack(geometry.vs, vsLayout, vsTable, kVSGroups[kPerGeometry], kVSFirstVariable[kPerGeometry], c.vsGeometry, kLightingVSGeometryRows);
+			Pack(geometry.ps, psLayout, psTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry], c.psGeometry, kLightingPSGeometryRows);
+			// The point light rows replace what the pipeline block left there.
+			for (std::uint32_t r = 15; r < 29; ++r)
+				for (std::uint32_t i = 0; i < 4; ++i)
+					c.psGeometry[r][i] = 0.0f;
+			PointLightRows(a_in, a_out.lights, a_in.eye, c);
+			if (a_in.shadowMaps && a_out.lights.shadow) {
+				// The point light routine (AE 0x1414df650) zeroes ShadowLightMaskSelect, then gives each shadow light its mask channel.
+				ConstantBlock select;
+				select.Reset();
+				float* channels = &select.floats[psLayout.offset[kPSShadowLightMaskSelect]];
+				for (std::uint32_t i = 0; i < 4; ++i)
+					channels[i] = 0.0f;
+				for (std::uint32_t i = 0; i < a_out.lights.shadow && i < 4; ++i)
+					channels[i] = static_cast<float>(static_cast<const RE::BSShadowLight*>(a_out.lights.lights[1 + i])->GetRuntimeData().maskIndex);
+				float rows[kLightingPSGeometryRows][4]{}, written[kLightingPSGeometryRows][4]{};
+				PackWritten(select, psLayout, psTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry], rows, written, kLightingPSGeometryRows);
+				for (std::uint32_t r = 0; r < kLightingPSGeometryRows; ++r)
+					for (std::uint32_t i = 0; i < 4; ++i)
+						if (written[r][i] != 0.0f)
+							c.psGeometry[r][i] = rows[r][i];
+			}
+			// The local map's land draws find the graphics state's default height map in t6 and t14 (observed in every one; the ORG build reads
+			// neither: no parallax layer, no shadows).
+			if (a_in.localMap) {
+				const auto* height = RE::BSGraphics::State::GetSingleton()->GetRuntimeData().defaultHeightMap.get();
+				for (const std::uint32_t slot : { 6u, 14u })
+					if (!((a_out.record.textureWritten >> slot) & 1)) {
+						a_out.record.textures[slot] = MaterialPort::ViewOf(height);
+						a_out.record.addressModes[slot] = 3;
+						a_out.record.filterModes[slot] = 3;
+						a_out.record.textureWritten |= 1u << slot;
+					}
+			}
+			// A pass with shadow bits reads the shadow mask in t14 (SetupTechnique): clamped, with the technique's filter.
+			if (technique.shadowMask && technique.shadowMaskTexture) {
+				a_out.record.textures[kShadowMaskSlot] = technique.shadowMaskTexture;
+				a_out.record.addressModes[kShadowMaskSlot] = 0;
+				a_out.record.filterModes[kShadowMaskSlot] = technique.filterModes[kShadowMaskSlot];
+				a_out.record.textureWritten |= 1u << kShadowMaskSlot;
+			}
+			return true;
+		}
+
+		/** @brief CS's permutation block for a_geometry's draw. */
+		Permutation PermutationOf(const RE::BSGeometry& a_geometry, bool a_effect)
+		{
+			using Extra = State::ExtraShaderDescriptors;
+			Permutation out;
+			// The per-draw bits are this draw's; the rest is the frame's.
+			out.extra = globals::state->permutationData.ExtraShaderDescriptor &
+			            ~(static_cast<std::uint32_t>(Extra::InWorld) | static_cast<std::uint32_t>(Extra::SourceAlphaBlend) | static_cast<std::uint32_t>(Extra::ProjectedTextureIsSRGB));
+			auto& linear = globals::features::linearLighting;
+			if (!linear.loaded || !linear.IsLinearLightingActive())
+				return out;
+			// Linear Lighting's RenderMenuScene sets RenderToUI around UI3DSceneManager::Render, and its SetupGeometry hooks the rest.
+			out.renderToUI = 1;
+			const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
+			if (a_effect) {
+				const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+				using Function = RE::NiAlphaProperty::AlphaFunction;
+				if (property && !property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kPremultAlpha) && alpha && alpha->GetAlphaBlending() &&
+					alpha->GetSrcBlendMode() == Function::kSrcAlpha && (alpha->GetDestBlendMode() == Function::kInvSrcAlpha || alpha->GetDestBlendMode() == Function::kOne))
+					out.extra |= static_cast<std::uint32_t>(Extra::SourceAlphaBlend);
+			} else if (property && property->material) {
+				// With RenderToUI set only a water reflection source is in working space.
+				const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(property->material);
+				out.baseTextureIsWorking = material->diffuseRenderTargetSourceIndex == RE::RENDER_TARGETS::kWATER_REFLECTIONS;
+			}
+			return out;
+		}
+
+		/**
+		 * @brief A skinned geometry's palettes as VS b9 (previous) and b10 (current) hold them, after the engine's per-frame palette update.
+		 * False without skin or with more bones than the palettes hold.
+		 */
+		bool BoneRows(const RE::BSGeometry& a_geometry, std::span<std::byte, kBonesBytes> a_out)
+		{
+			auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get();
+			if (!skin)
+				return false;
+			const std::uint32_t rows = skin->numMatrices * SkinPalettes::kRowsPerBone;
+			const float *current = nullptr, *previous = nullptr;
+			if (!rows || rows > kPaletteRows || !SkinPalettes::Sample(a_geometry, rows, current, previous))
+				return false;
+			std::fill(a_out.begin(), a_out.end(), std::byte{ 0 });
+			std::memcpy(a_out.data(), previous, rows * 16);
+			std::memcpy(a_out.data() + kBonesBytes / 2, current, rows * 16);
+			return true;
+		}
+
 		/** @brief An Effect constant variable's floats in a block. */
 		float* Variable(ConstantBlock& a_block, const StageLayout& a_layout, std::uint32_t a_variable)
 		{
@@ -454,7 +534,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 		/** @brief BSEffectShader::SetupTechnique's rows (AE 0x1414ea2c0): the scene graph's fog, as Lighting's, and FilteringParam. */
 		void EffectTechnique(const Inputs& a_in, std::uint32_t a_pass, const StageLayout& a_vsLayout, const StageLayout& a_psLayout,
-			std::span<const std::uint8_t> a_vsTable, std::span<const std::uint8_t> a_psTable, EffectSceneConstants& a_c, EffectSceneConstants& a_w)
+			std::span<const std::uint8_t> a_vsTable, std::span<const std::uint8_t> a_psTable, EffectSceneConstants& a_c)
 		{
 			ConstantBlock vs0, ps0;
 			vs0.Reset();
@@ -500,15 +580,14 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				offset[2] = 0.0f;
 				offset[3] = 0.0f;
 			}
-			Pack(vs0, a_vsLayout, a_vsTable, Effects::kEffectVSGroups[0], Effects::kEffectVSFirstVariable[0], a_c.vsTechnique, a_w.vsTechnique, kEffectVSTechniqueRows);
-			Pack(ps0, a_psLayout, a_psTable, Effects::kEffectPSGroups[0], Effects::kEffectPSFirstVariable[0], a_c.psTechnique, a_w.psTechnique, kEffectPSTechniqueRows);
+			Pack(vs0, a_vsLayout, a_vsTable, Effects::kEffectVSGroups[0], Effects::kEffectVSFirstVariable[0], a_c.vsTechnique, kEffectVSTechniqueRows);
+			Pack(ps0, a_psLayout, a_psTable, Effects::kEffectPSGroups[0], Effects::kEffectPSFirstVariable[0], a_c.psTechnique, kEffectPSTechniqueRows);
 		}
 
 		/** @brief The Effect shader's vertex and pixel shaders for a_out's descriptors, and their constant tables. False, with why, without them. */
 		bool EffectShaders(const EffectResult& a_out, std::span<const std::uint8_t>& a_vsTable, std::span<const std::uint8_t>& a_psTable, std::string& a_why)
 		{
-			static const REL::Relocation<RE::BSShader**> effectShader{ REL::Offset(Effects::Address::kEffectShader) };
-			auto* shader = *effectShader.get();
+			auto* shader = EffectShader();
 			auto* vs = shader ? globals::shaderCache->GetVertexShader(*shader, a_out.vertex) : nullptr;
 			auto* ps = shader ? globals::shaderCache->GetPixelShader(*shader, a_out.pixel) : nullptr;
 			if (!vs || !ps) {
@@ -519,10 +598,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			a_psTable = std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(ps->constantTable.data()), ps->constantTable.size());
 			return true;
 		}
-	}
 
-	namespace
-	{
 		/**
 		 * @brief A lit Effect pass's light rows (SetupGeometry, AE 0x1414eab10): DLightColor from light 0 (the HDR multiplier times its fade
 		 * times its colour at +0x14c), then up to four point lights' PLightPosition (in model space, or less the eye for a skinned pass),
@@ -606,302 +682,300 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 					Variable(a_block, a_layout, Effects::kEffectPSPLightPositionX + v)[i - 1] = values[v];
 			}
 		}
-	}
 
-	bool ComputeEffect(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why)
-	{
-		namespace EF = Effects::EffectFlag;
-		a_out = {};
-		const auto* property = netimmerse_cast<const RE::BSEffectShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
-		if (!property || !property->material) {
-			a_why = "not an Effect property with a material";
-			return false;
-		}
+		/** @brief The Effect draw of a_geometry as BSEffectShader's Setup functions would bind it. The lit, membrane, soft and projected variants are refused. */
+		bool ComputeEffect(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why)
 		{
-			SceneCapture::LiveLeaf leaf(a_geometry);
-			LightingDescriptors derived{};
-			const auto reason = leaf.view.property ? Effects::DeriveEffectDescriptors(*leaf.view.property, leaf.view, derived) : Ineligible::NotLightingShader;
-			if (derived.derivedPass == kNotDerived || (reason != Ineligible::None && derived.pass == 0)) {
-				a_why = std::format("no pass descriptor ({})", kIneligibleNames[static_cast<std::size_t>(reason)]);
+			namespace EF = Effects::EffectFlag;
+			a_out = {};
+			const auto* property = netimmerse_cast<const RE::BSEffectShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
+			if (!property || !property->material) {
+				a_why = "not an Effect property with a material";
 				return false;
 			}
-			a_out.pass = derived.pass;
-			a_out.vertex = derived.vertex;
-			a_out.pixel = derived.pixel;
-			a_out.rawPixel = derived.rawPixel;
-		}
-		// A particle system's quads are expanded by CS (ParticleSnapshots::ExpandNow); their subtexture rects are resolved there. A skinned
-		// draw's bones are its palettes (BoneRows).
-		const bool particles = IsParticles(a_geometry, a_out.pass);
-		constexpr std::uint32_t kUnported = EF::Particles | EF::StripParticles | EF::Membrane | EF::ProjectedUv | EF::TexCoordIndex;
-		if (a_out.pass & kUnported & ~(particles ? EF::Particles | EF::TexCoordIndex : 0u)) {
-			a_why = std::format("an Effect variant the native menu scene does not draw (pass {:#x})", a_out.pass);
-			return false;
-		}
-		std::span<const std::uint8_t> vsTable, psTable;
-		if (!EffectShaders(a_out, vsTable, psTable, a_why))
-			return false;
-		const auto& space = Extensions::MaterialSpaceOf(Effects::kMaterialKindEffect);
-		const auto& vsLayout = space.vs.layout;
-		const auto& psLayout = space.ps.layout;
-		auto& c = a_out.constants;
-		auto& w = a_out.written;
-		EffectTechnique(a_in, a_out.pass, vsLayout, psLayout, vsTable, psTable, c, w);
+			{
+				SceneCapture::LiveLeaf leaf(a_geometry);
+				LightingDescriptors derived{};
+				const auto reason = leaf.view.property ? Effects::DeriveEffectDescriptors(*leaf.view.property, leaf.view, derived) : Ineligible::NotLightingShader;
+				if (derived.derivedPass == kNotDerived || (reason != Ineligible::None && derived.pass == 0)) {
+					a_why = std::format("no pass descriptor ({})", kIneligibleNames[static_cast<std::size_t>(reason)]);
+					return false;
+				}
+				a_out.pass = derived.pass;
+				a_out.vertex = derived.vertex;
+				a_out.pixel = derived.pixel;
+				a_out.rawPixel = derived.rawPixel;
+			}
+			// A particle system's quads are expanded by CS (ParticleSnapshots::ExpandNow); their subtexture rects are resolved there. A skinned
+			// draw's bones are its palettes (BoneRows).
+			const bool particles = IsParticles(a_geometry, a_out.pass);
+			constexpr std::uint32_t kUnported = EF::Particles | EF::StripParticles | EF::Membrane | EF::ProjectedUv | EF::TexCoordIndex;
+			if (a_out.pass & kUnported & ~(particles ? EF::Particles | EF::TexCoordIndex : 0u)) {
+				a_why = std::format("an Effect variant the native menu scene does not draw (pass {:#x})", a_out.pass);
+				return false;
+			}
+			std::span<const std::uint8_t> vsTable, psTable;
+			if (!EffectShaders(a_out, vsTable, psTable, a_why))
+				return false;
+			const auto& space = Extensions::MaterialSpaceOf(Effects::kMaterialKindEffect);
+			const auto& vsLayout = space.vs.layout;
+			const auto& psLayout = space.ps.layout;
+			auto& c = a_out.constants;
+			EffectTechnique(a_in, a_out.pass, vsLayout, psLayout, vsTable, psTable, c);
 
-		// PerMaterial (the Effect material port, which converts BaseColor into Linear Lighting's working space).
-		MaterialPort::MaterialSnapshot snapshot;
-		if (!MaterialPort::Capture(*property->material, snapshot) || snapshot.port != Effects::kMaterialKindEffect ||
-			!MaterialPort::Evaluate(snapshot, a_out.pass, a_in.material, a_out.record)) {
-			a_why = "the Effect material port does not cover its material";
-			return false;
-		}
-		auto& linear = globals::features::linearLighting;
-		const bool linearOn = linear.loaded && linear.IsLinearLightingActive();
-		// A Soft pass's LightingInfluence.y is far * near / softFalloffDepth (SetupMaterial, with the camera SetupTechnique took); the port
-		// keeps the depth itself for DCLF's shader, which divides.
-		if (a_out.pass & EF::Soft) {
-			const auto& camera = a_in.camera.frustum;
-			const float depth = static_cast<const RE::BSEffectShaderMaterial*>(property->material)->softFalloffDepth;
-			a_out.record.ps.floats[psLayout.offset[Effects::kEffectPSLightingInfluence] + 1] = camera.fFar * camera.fNear / depth;
-		}
-		Pack(a_out.record.vs, vsLayout, vsTable, Effects::kEffectVSGroups[1], Effects::kEffectVSFirstVariable[1], c.vsMaterial, w.vsMaterial, kEffectVSMaterialRows);
-		Pack(a_out.record.ps, psLayout, psTable, Effects::kEffectPSGroups[1], Effects::kEffectPSFirstVariable[1], c.psMaterial, w.psMaterial, kEffectPSMaterialRows);
-
-		// PerGeometry (SetupGeometry, AE 0x1414eab10): World and PreviousWorld less posAdjust, and PropertyColor.
-		ConstantBlock vs2, ps2;
-		vs2.Reset();
-		ps2.Reset();
-		// A particle system's World folds its model bound's centre into the translation (SetupGeometry, AE 0x1414eab10). A skinned pass
-		// writes no World: its palettes place it.
-		if (!(a_out.pass & EF::Skinned)) {
-			const auto centre = particles ? a_geometry.GetModelData().modelBound.center : RE::NiPoint3{};
-			WorldRows(a_geometry.world, a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSWorld), centre);
-			// A particle system's PreviousWorld is its World (SetupGeometry copies the rows).
-			if (particles)
-				WorldRows(a_geometry.world, a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld), centre);
-			else
-				WorldRows(a_geometry.previousWorld, a_in.havePrevious ? a_in.previousEye : a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld), centre);
-		}
-		{
-			float* colour = Variable(ps2, psLayout, Effects::kEffectPSPropertyColor);
-			const auto* emittance = property->emittanceColor;
-			RE::NiColor rgb = emittance ? *emittance : RE::NiColor{ 1.0f, 1.0f, 1.0f };
-			// Linear Lighting's EffectGeometryUpload converts it, unless the pass maps greyscale to colour.
-			if (linearOn && !(a_out.rawPixel & EF::GrayscaleToColor))
-				rgb = linear.SRGBToWorking(rgb);
-			colour[0] = rgb.red;
-			colour[1] = rgb.green;
-			colour[2] = rgb.blue;
-			colour[3] = property->alpha;
-		}
-		if (a_out.pass & EF::Lighting)
-			EffectLightRows(a_in, a_geometry, a_out.pass, linearOn, ps2, psLayout);
-		// Weapon blood's AlphaTestRef (SetupGeometry's Blood branch): the alpha property's threshold times the exe's 1/255, then the two
-		// globals BSTempEffectWeaponBlood writes. w is left as the last draw wrote it; the shader does not read it.
-		if (a_out.pass & EF::Blood) {
-			static const REL::Relocation<const float*> blood{ REL::Offset(Effects::Address::kEffectBlood) };
-			const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
-			float* ref = Variable(ps2, psLayout, Effects::kEffectPSAlphaTestRef);
-			ref[0] = alpha ? AlphaRefOf(*alpha) : 0.0f;
-			ref[1] = blood.get()[0];
-			ref[2] = blood.get()[1];
-		}
-		Pack(vs2, vsLayout, vsTable, Effects::kEffectVSGroups[2], Effects::kEffectVSFirstVariable[2], c.vsGeometry, w.vsGeometry, kEffectVSGeometryRows);
-		Pack(ps2, psLayout, psTable, Effects::kEffectPSGroups[2], Effects::kEffectPSFirstVariable[2], c.psGeometry, w.psGeometry, kEffectPSGeometryRows);
-		return true;
-	}
-
-	std::uint32_t MembranePassOf(const RE::BSGeometry& a_geometry)
-	{
-		namespace EF = Effects::EffectFlag;
-		const auto* property = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
-		// Property flag bit 17 (refraction) adds none.
-		const std::uint64_t flags = property ? property->flags.underlying() : 0;
-		if (!property || !property->effectData || (flags & (1ull << 17)))
-			return 0;
-		const auto& data = *property->effectData;
-		std::uint32_t d = EF::Membrane | EF::Texture | EF::TexCoord;
-		if (flags & (1ull << 37))  // vertex colours
-			d |= EF::Vc;
-		if (flags & (1ull << 1))  // skinned
-			d |= EF::Skinned;
-		if (!(flags & (1ull << 12)))  // not model-space normals
-			d |= EF::Normals | EF::BinormalTangent;
-		if (data.grayscaleToColor)
-			d |= EF::GrayscaleToColor;
-		if (data.grayscaleToAlpha)
-			d |= EF::GrayscaleToAlpha;
-		if (data.ignoreTextureAlpha)
-			d |= EF::IgnoreTexAlpha;
-		if (data.baseTextureProjectedUVs)
-			d |= EF::ProjectedUv;
-		const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
-		if (!data.ignoreBaseGeomTexAlpha && alpha && alpha->GetAlphaTesting())
-			d |= EF::AlphaTest;
-		if (data.lighting)
-			d |= EF::Lighting;
-		if (data.destBlend == RE::NiAlphaProperty::AlphaFunction::kOne)
-			d |= EF::AddBlend;
-		return d;
-	}
-
-	bool ComputeMembrane(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why)
-	{
-		namespace EF = Effects::EffectFlag;
-		a_out = {};
-		const auto* property = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
-		const std::uint32_t d = MembranePassOf(a_geometry);
-		if (!d || !property->material || !property->fadeNode) {
-			a_why = "not a membrane pass of a Lighting property with a material and a fade node";
-			return false;
-		}
-		const auto& data = *property->effectData;
-		// Lit and projected membranes read lights and a projection CS does not compute; a block-out texture adds a Utility pass.
-		if ((d & (EF::Lighting | EF::ProjectedUv)) || data.blockOutTexture) {
-			a_why = std::format("a membrane variant the native menu scene does not draw (pass {:#x}, block-out {})", d, static_cast<bool>(data.blockOutTexture));
-			return false;
-		}
-		// The descriptors as SetupTechnique splits them (FUN_141521300, FUN_141521310) and State::ModifyShaderLookup clears them.
-		constexpr std::uint32_t kPermutationBits = EF::GrayscaleToColor | EF::GrayscaleToAlpha | EF::IgnoreTexAlpha;
-		a_out.pass = d;
-		a_out.rawPixel = d & ~EF::SkyObject;
-		a_out.vertex = (d & 0xffc7ffffu) & ~kPermutationBits;
-		a_out.pixel = a_out.rawPixel & ~kPermutationBits;
-		std::span<const std::uint8_t> vsTable, psTable;
-		if (!EffectShaders(a_out, vsTable, psTable, a_why))
-			return false;
-		const auto& space = Extensions::MaterialSpaceOf(Effects::kMaterialKindEffect);
-		const auto& vsLayout = space.vs.layout;
-		const auto& psLayout = space.ps.layout;
-		auto& c = a_out.constants;
-		auto& w = a_out.written;
-		EffectTechnique(a_in, a_out.pass, vsLayout, psLayout, vsTable, psTable, c, w);
-
-		// SetupMaterial (AE 0x1414ea6c0) writes no constants for a membrane; it binds the Lighting material's textures. SetupTechnique set
-		// the base texture's filter.
-		auto& record = a_out.record;
-		record.kind = Effects::kMaterialKindEffect;
-		record.vs.Reset();
-		record.ps.Reset();
-		record.filterModes.fill(kUnwrittenFilterMode);
-		const auto bind = [&](std::uint32_t a_slot, const void* a_texture, std::uint32_t a_address, std::uint32_t a_filter) {
-			record.textures[a_slot] = MaterialPort::ViewOf(a_texture);
-			record.addressModes[a_slot] = a_address;
-			record.filterModes[a_slot] = a_filter;
-			record.textureWritten |= 1u << a_slot;
-		};
-		const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(property->material);
-		bind(0, data.baseTexture.get(), 3, 3);
-		if (!(d & EF::Normals))
-			bind(1, material->normalTexture.get(), 3, 3);
-		if (d & EF::AlphaTest)
-			bind(2, material->diffuseTexture.get(), 3, 3);
-		if (d & (EF::GrayscaleToColor | EF::GrayscaleToAlpha))
-			bind(4, data.paletteTexture.get(), 0, 1);
-
-		// SetupGeometry (AE 0x1414eab10) and its membrane setup (AE 0x1414ebbe0).
-		ConstantBlock vs2, ps2;
-		vs2.Reset();
-		ps2.Reset();
-		if (!(d & EF::Skinned)) {
-			WorldRows(a_geometry.world, a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSWorld));
-			WorldRows(a_geometry.previousWorld, a_in.havePrevious ? a_in.previousEye : a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld));
-		}
-		{
-			// EyePosition: the accumulator's eye in the geometry's model space (the inverse world).
-			const auto& t = a_geometry.world;
-			const auto& r = t.rotate.entry;
-			const auto offset = a_in.eye - t.translate;
-			const float inverseScale = 1.0f / t.scale;
-			float* eye = Variable(vs2, vsLayout, Effects::kEffectVSEyePosition);
-			for (int i = 0; i < 3; ++i)
-				eye[i] = (r[0][i] * offset.x + r[1][i] * offset.y + r[2][i] * offset.z) * inverseScale;
-			float* texcoord = Variable(vs2, vsLayout, Effects::kEffectVSTexcoordOffsetMembrane);
-			texcoord[0] = data.uOffset;
-			texcoord[1] = data.vOffset;
-			texcoord[2] = data.uScale;
-			texcoord[3] = data.vScale;
-			// PosAdjust: the camera offset's z, then the fade node's bound bottom and height.
-			const auto& bound = property->fadeNode->worldBound;
-			float* posAdjust = Variable(vs2, vsLayout, Effects::kEffectVSPosAdjust);
-			posAdjust[0] = bound.center.z - bound.radius;
-			posAdjust[1] = bound.radius + bound.radius;
-			posAdjust[2] = a_in.eye.z;
-		}
-		{
+			// PerMaterial (the Effect material port, which converts BaseColor into Linear Lighting's working space).
+			MaterialPort::MaterialSnapshot snapshot;
+			if (!MaterialPort::Capture(*property->material, snapshot) || snapshot.port != Effects::kMaterialKindEffect ||
+				!MaterialPort::Evaluate(snapshot, a_out.pass, a_in.material, a_out.record)) {
+				a_why = "the Effect material port does not cover its material";
+				return false;
+			}
 			auto& linear = globals::features::linearLighting;
 			const bool linearOn = linear.loaded && linear.IsLinearLightingActive();
-			float* colour = Variable(ps2, psLayout, Effects::kEffectPSPropertyColor);
-			float* vars = Variable(ps2, psLayout, Effects::kEffectPSMembraneVars);
-			vars[0] = data.edgeExponent;
-			const auto& fill = data.fillColor;
-			if (d & EF::GrayscaleToColor) {
-				colour[0] = fill.red;
-				colour[1] = fill.green;
-				colour[2] = fill.blue;
-				colour[3] = fill.alpha;
-				vars[2] = data.baseFillScale;
-			} else {
-				// Linear Lighting's EffectGeometryUpload converts the fill colour.
-				const auto rgb = linearOn ? linear.SRGBToWorking({ fill.red, fill.green, fill.blue }) * data.baseFillScale :
-				                            RE::NiColor{ fill.red * data.baseFillScale, fill.green * data.baseFillScale, fill.blue * data.baseFillScale };
+			// A Soft pass's LightingInfluence.y is far * near / softFalloffDepth (SetupMaterial, with the camera SetupTechnique took); the port
+			// keeps the depth itself for DCLF's shader, which divides.
+			if (a_out.pass & EF::Soft) {
+				const auto& camera = a_in.camera.frustum;
+				const float depth = static_cast<const RE::BSEffectShaderMaterial*>(property->material)->softFalloffDepth;
+				a_out.record.ps.floats[psLayout.offset[Effects::kEffectPSLightingInfluence] + 1] = camera.fFar * camera.fNear / depth;
+			}
+			Pack(a_out.record.vs, vsLayout, vsTable, Effects::kEffectVSGroups[1], Effects::kEffectVSFirstVariable[1], c.vsMaterial, kEffectVSMaterialRows);
+			Pack(a_out.record.ps, psLayout, psTable, Effects::kEffectPSGroups[1], Effects::kEffectPSFirstVariable[1], c.psMaterial, kEffectPSMaterialRows);
+
+			// PerGeometry (SetupGeometry, AE 0x1414eab10): World and PreviousWorld less posAdjust, and PropertyColor.
+			ConstantBlock vs2, ps2;
+			vs2.Reset();
+			ps2.Reset();
+			// A particle system's World folds its model bound's centre into the translation (SetupGeometry, AE 0x1414eab10). A skinned pass
+			// writes no World: its palettes place it.
+			if (!(a_out.pass & EF::Skinned)) {
+				const auto centre = particles ? a_geometry.GetModelData().modelBound.center : RE::NiPoint3{};
+				WorldRows(a_geometry.world, a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSWorld), centre);
+				// A particle system's PreviousWorld is its World (SetupGeometry copies the rows).
+				if (particles)
+					WorldRows(a_geometry.world, a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld), centre);
+				else
+					WorldRows(a_geometry.previousWorld, a_in.havePrevious ? a_in.previousEye : a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld), centre);
+			}
+			{
+				float* colour = Variable(ps2, psLayout, Effects::kEffectPSPropertyColor);
+				const auto* emittance = property->emittanceColor;
+				RE::NiColor rgb = emittance ? *emittance : RE::NiColor{ 1.0f, 1.0f, 1.0f };
+				// Linear Lighting's EffectGeometryUpload converts it, unless the pass maps greyscale to colour.
+				if (linearOn && !(a_out.rawPixel & EF::GrayscaleToColor))
+					rgb = linear.SRGBToWorking(rgb);
 				colour[0] = rgb.red;
 				colour[1] = rgb.green;
 				colour[2] = rgb.blue;
-				colour[3] = fill.alpha * data.baseFillScale;
+				colour[3] = property->alpha;
 			}
-			float* rim = Variable(ps2, psLayout, Effects::kEffectPSMembraneRimColor);
-			rim[0] = data.rimColor.red;
-			rim[1] = data.rimColor.green;
-			rim[2] = data.rimColor.blue;
-			rim[3] = data.rimColor.alpha;
-			if (d & EF::AlphaTest) {
-				// The alpha property's threshold times 1/255 plus a bias just under it (the constants at AE 0x141ad2810 and 0x141abfc44);
-				// a threshold of 4 adds 1/255 more.
-				constexpr float kStep = std::bit_cast<float>(0x3B808081u), kBias = std::bit_cast<float>(0x3B80802Cu);
-				const auto threshold = a_geometry.GetGeometryRuntimeData().alphaProperty->alphaThreshold;
-				float ref = static_cast<float>(threshold) * kStep + kBias;
-				if (threshold == 4)
-					ref += kStep;
-				Variable(ps2, psLayout, Effects::kEffectPSAlphaTestRef)[0] = ref;
+			if (a_out.pass & EF::Lighting)
+				EffectLightRows(a_in, a_geometry, a_out.pass, linearOn, ps2, psLayout);
+			// Weapon blood's AlphaTestRef (SetupGeometry's Blood branch): the alpha property's threshold times the exe's 1/255, then the two
+			// globals BSTempEffectWeaponBlood writes. w is left as the last draw wrote it; the shader does not read it.
+			if (a_out.pass & EF::Blood) {
+				static const REL::Relocation<const float*> blood{ REL::Offset(Effects::Address::kEffectBlood) };
+				const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+				float* ref = Variable(ps2, psLayout, Effects::kEffectPSAlphaTestRef);
+				ref[0] = alpha ? AlphaRefOf(*alpha) : 0.0f;
+				ref[1] = blood.get()[0];
+				ref[2] = blood.get()[1];
 			}
+			Pack(vs2, vsLayout, vsTable, Effects::kEffectVSGroups[2], Effects::kEffectVSFirstVariable[2], c.vsGeometry, kEffectVSGeometryRows);
+			Pack(ps2, psLayout, psTable, Effects::kEffectPSGroups[2], Effects::kEffectPSFirstVariable[2], c.psGeometry, kEffectPSGeometryRows);
+			return true;
 		}
-		Pack(vs2, vsLayout, vsTable, Effects::kEffectVSGroups[2], Effects::kEffectVSFirstVariable[2], c.vsGeometry, w.vsGeometry, kEffectVSGeometryRows);
-		Pack(ps2, psLayout, psTable, Effects::kEffectPSGroups[2], Effects::kEffectPSFirstVariable[2], c.psGeometry, w.psGeometry, kEffectPSGeometryRows);
-		return true;
-	}
 
-	bool MembraneStateOf(const RE::BSGeometry& a_geometry, bool a_closestPoint, DrawState& a_out)
-	{
-		using Function = RE::NiAlphaProperty::AlphaFunction;
-		const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
-		if (!property || !property->effectData)
-			return false;
-		// The membrane setup's blend from the effect data's pair; another pair keeps the previous draw's blend.
-		const auto source = property->effectData->srcBlend, destination = property->effectData->destBlend;
-		a_out = {};
-		if (source == Function::kSrcAlpha && destination == Function::kInvSrcAlpha)
-			a_out.blend = 1;
-		else if (source == Function::kSrcAlpha && (destination == Function::kOne || destination == Function::kInvDestAlpha))
-			a_out.blend = 2;
-		else if (source == Function::kDestColor && destination == Function::kInvSrcAlpha)
-			a_out.blend = 3;
-		else if (source == Function::kZero && destination == Function::kSrcColor)
-			a_out.blend = 4;
-		else
-			return false;
-		// The membrane group (FUN_1414b3d50): depth test without write and bias mode 10, plus one with the accumulator's +0x51; the
-		// membrane setup culls back faces and turns the alpha test off; SetupGeometry writes mode 11 for a hint 3 pass.
-		a_out.depth = 1;
-		a_out.depthBias = a_closestPoint ? 11u : 10u;
-		a_out.cull = 1;
-		a_out.write = 11;
-		a_out.alphaRef = 0.0f;
-		return true;
-	}
+		/**
+		 * @brief The membrane pass descriptor BSLightingShaderProperty::GetRenderPasses (AE 0x1414adfb0) adds for a Lighting property with
+		 * effect data (an enchantment glow), or 0 when it adds none.
+		 */
+		std::uint32_t MembranePassOf(const RE::BSGeometry& a_geometry)
+		{
+			namespace EF = Effects::EffectFlag;
+			const auto* property = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
+			// Property flag bit 17 (refraction) adds none.
+			const std::uint64_t flags = property ? property->flags.underlying() : 0;
+			if (!property || !property->effectData || (flags & (1ull << 17)))
+				return 0;
+			const auto& data = *property->effectData;
+			std::uint32_t d = EF::Membrane | EF::Texture | EF::TexCoord;
+			if (flags & (1ull << 37))  // vertex colours
+				d |= EF::Vc;
+			if (flags & (1ull << 1))  // skinned
+				d |= EF::Skinned;
+			if (!(flags & (1ull << 12)))  // not model-space normals
+				d |= EF::Normals | EF::BinormalTangent;
+			if (data.grayscaleToColor)
+				d |= EF::GrayscaleToColor;
+			if (data.grayscaleToAlpha)
+				d |= EF::GrayscaleToAlpha;
+			if (data.ignoreTextureAlpha)
+				d |= EF::IgnoreTexAlpha;
+			if (data.baseTextureProjectedUVs)
+				d |= EF::ProjectedUv;
+			const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+			if (!data.ignoreBaseGeomTexAlpha && alpha && alpha->GetAlphaTesting())
+				d |= EF::AlphaTest;
+			if (data.lighting)
+				d |= EF::Lighting;
+			if (data.destBlend == RE::NiAlphaProperty::AlphaFunction::kOne)
+				d |= EF::AddBlend;
+			return d;
+		}
 
-	namespace
-	{
+		/** @brief The membrane pass of a_geometry as BSEffectShader's Setup functions would bind it (the material is the Lighting property's). */
+		bool ComputeMembrane(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why)
+		{
+			namespace EF = Effects::EffectFlag;
+			a_out = {};
+			const auto* property = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
+			const std::uint32_t d = MembranePassOf(a_geometry);
+			if (!d || !property->material || !property->fadeNode) {
+				a_why = "not a membrane pass of a Lighting property with a material and a fade node";
+				return false;
+			}
+			const auto& data = *property->effectData;
+			// Lit and projected membranes read lights and a projection CS does not compute; a block-out texture adds a Utility pass.
+			if ((d & (EF::Lighting | EF::ProjectedUv)) || data.blockOutTexture) {
+				a_why = std::format("a membrane variant the native menu scene does not draw (pass {:#x}, block-out {})", d, static_cast<bool>(data.blockOutTexture));
+				return false;
+			}
+			// The descriptors as SetupTechnique splits them (FUN_141521300, FUN_141521310) and State::ModifyShaderLookup clears them.
+			constexpr std::uint32_t kPermutationBits = EF::GrayscaleToColor | EF::GrayscaleToAlpha | EF::IgnoreTexAlpha;
+			a_out.pass = d;
+			a_out.rawPixel = d & ~EF::SkyObject;
+			a_out.vertex = (d & 0xffc7ffffu) & ~kPermutationBits;
+			a_out.pixel = a_out.rawPixel & ~kPermutationBits;
+			std::span<const std::uint8_t> vsTable, psTable;
+			if (!EffectShaders(a_out, vsTable, psTable, a_why))
+				return false;
+			const auto& space = Extensions::MaterialSpaceOf(Effects::kMaterialKindEffect);
+			const auto& vsLayout = space.vs.layout;
+			const auto& psLayout = space.ps.layout;
+			auto& c = a_out.constants;
+			EffectTechnique(a_in, a_out.pass, vsLayout, psLayout, vsTable, psTable, c);
+
+			// SetupMaterial (AE 0x1414ea6c0) writes no constants for a membrane; it binds the Lighting material's textures. SetupTechnique set
+			// the base texture's filter.
+			auto& record = a_out.record;
+			record.kind = Effects::kMaterialKindEffect;
+			record.vs.Reset();
+			record.ps.Reset();
+			record.filterModes.fill(kUnwrittenFilterMode);
+			const auto bind = [&](std::uint32_t a_slot, const void* a_texture, std::uint32_t a_address, std::uint32_t a_filter) {
+				record.textures[a_slot] = MaterialPort::ViewOf(a_texture);
+				record.addressModes[a_slot] = a_address;
+				record.filterModes[a_slot] = a_filter;
+				record.textureWritten |= 1u << a_slot;
+			};
+			const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(property->material);
+			bind(0, data.baseTexture.get(), 3, 3);
+			if (!(d & EF::Normals))
+				bind(1, material->normalTexture.get(), 3, 3);
+			if (d & EF::AlphaTest)
+				bind(2, material->diffuseTexture.get(), 3, 3);
+			if (d & (EF::GrayscaleToColor | EF::GrayscaleToAlpha))
+				bind(4, data.paletteTexture.get(), 0, 1);
+
+			// SetupGeometry (AE 0x1414eab10) and its membrane setup (AE 0x1414ebbe0).
+			ConstantBlock vs2, ps2;
+			vs2.Reset();
+			ps2.Reset();
+			if (!(d & EF::Skinned)) {
+				WorldRows(a_geometry.world, a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSWorld));
+				WorldRows(a_geometry.previousWorld, a_in.havePrevious ? a_in.previousEye : a_in.eye, Variable(vs2, vsLayout, Effects::kEffectVSPreviousWorld));
+			}
+			{
+				// EyePosition: the accumulator's eye in the geometry's model space (the inverse world).
+				const auto& t = a_geometry.world;
+				const auto& r = t.rotate.entry;
+				const auto offset = a_in.eye - t.translate;
+				const float inverseScale = 1.0f / t.scale;
+				float* eye = Variable(vs2, vsLayout, Effects::kEffectVSEyePosition);
+				for (int i = 0; i < 3; ++i)
+					eye[i] = (r[0][i] * offset.x + r[1][i] * offset.y + r[2][i] * offset.z) * inverseScale;
+				float* texcoord = Variable(vs2, vsLayout, Effects::kEffectVSTexcoordOffsetMembrane);
+				texcoord[0] = data.uOffset;
+				texcoord[1] = data.vOffset;
+				texcoord[2] = data.uScale;
+				texcoord[3] = data.vScale;
+				// PosAdjust: the camera offset's z, then the fade node's bound bottom and height.
+				const auto& bound = property->fadeNode->worldBound;
+				float* posAdjust = Variable(vs2, vsLayout, Effects::kEffectVSPosAdjust);
+				posAdjust[0] = bound.center.z - bound.radius;
+				posAdjust[1] = bound.radius + bound.radius;
+				posAdjust[2] = a_in.eye.z;
+			}
+			{
+				auto& linear = globals::features::linearLighting;
+				const bool linearOn = linear.loaded && linear.IsLinearLightingActive();
+				float* colour = Variable(ps2, psLayout, Effects::kEffectPSPropertyColor);
+				float* vars = Variable(ps2, psLayout, Effects::kEffectPSMembraneVars);
+				vars[0] = data.edgeExponent;
+				const auto& fill = data.fillColor;
+				if (d & EF::GrayscaleToColor) {
+					colour[0] = fill.red;
+					colour[1] = fill.green;
+					colour[2] = fill.blue;
+					colour[3] = fill.alpha;
+					vars[2] = data.baseFillScale;
+				} else {
+					// Linear Lighting's EffectGeometryUpload converts the fill colour.
+					const auto rgb = linearOn ? linear.SRGBToWorking({ fill.red, fill.green, fill.blue }) * data.baseFillScale :
+					                            RE::NiColor{ fill.red * data.baseFillScale, fill.green * data.baseFillScale, fill.blue * data.baseFillScale };
+					colour[0] = rgb.red;
+					colour[1] = rgb.green;
+					colour[2] = rgb.blue;
+					colour[3] = fill.alpha * data.baseFillScale;
+				}
+				float* rim = Variable(ps2, psLayout, Effects::kEffectPSMembraneRimColor);
+				rim[0] = data.rimColor.red;
+				rim[1] = data.rimColor.green;
+				rim[2] = data.rimColor.blue;
+				rim[3] = data.rimColor.alpha;
+				if (d & EF::AlphaTest)
+					Variable(ps2, psLayout, Effects::kEffectPSAlphaTestRef)[0] = BiasedAlphaRefOf(*a_geometry.GetGeometryRuntimeData().alphaProperty);
+			}
+			Pack(vs2, vsLayout, vsTable, Effects::kEffectVSGroups[2], Effects::kEffectVSFirstVariable[2], c.vsGeometry, kEffectVSGeometryRows);
+			Pack(ps2, psLayout, psTable, Effects::kEffectPSGroups[2], Effects::kEffectPSFirstVariable[2], c.psGeometry, kEffectPSGeometryRows);
+			return true;
+		}
+
+		/**
+		 * @brief A membrane pass's states, drawn in the accumulator's membrane group (accumulation hint 3, FUN_1414b3d50): the effect data's
+		 * blend, depth test without write, depth bias mode 10 (11 with a_closestPoint), back faces culled, write mode 11. False for a blend
+		 * pair the membrane setup leaves as it finds it.
+		 */
+		bool MembraneStateOf(const RE::BSGeometry& a_geometry, bool a_closestPoint, DrawState& a_out)
+		{
+			using Function = RE::NiAlphaProperty::AlphaFunction;
+			const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
+			if (!property || !property->effectData)
+				return false;
+			// The membrane setup's blend from the effect data's pair; another pair keeps the previous draw's blend.
+			const auto source = property->effectData->srcBlend, destination = property->effectData->destBlend;
+			a_out = {};
+			if (source == Function::kSrcAlpha && destination == Function::kInvSrcAlpha)
+				a_out.blend = 1;
+			else if (source == Function::kSrcAlpha && (destination == Function::kOne || destination == Function::kInvDestAlpha))
+				a_out.blend = 2;
+			else if (source == Function::kDestColor && destination == Function::kInvSrcAlpha)
+				a_out.blend = 3;
+			else if (source == Function::kZero && destination == Function::kSrcColor)
+				a_out.blend = 4;
+			else
+				return false;
+			// The membrane group (FUN_1414b3d50): depth test without write and bias mode 10, plus one with the accumulator's +0x51; the
+			// membrane setup culls back faces and turns the alpha test off; SetupGeometry writes mode 11 for a hint 3 pass.
+			a_out.depth = 1;
+			a_out.depthBias = a_closestPoint ? 11u : 10u;
+			a_out.cull = 1;
+			a_out.write = 11;
+			a_out.alphaRef = 0.0f;
+			return true;
+		}
+
 		/**
 		 * @brief The states a menu model's Utility draw is drawn with: depth test and write and no colour, the property's culling, and the
 		 * alpha property's test.
@@ -918,6 +992,27 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				state.alphaRef = AlphaRefOf(*alpha);
 			return state;
 		}
+
+		/**
+		 * @brief Whether a_geometry's pass has accumulation hint 1, the accumulator's blended list (FUN_1414f50b0, batch renderer +0xF0), as
+		 * GetRenderPasses gives it. BSEffectShaderProperty (AE 0x1414bd890): not a decal or billboard, and the property's alpha below one,
+		 * the alpha property blending, a particle system or falloff. BSLightingShaderProperty: the alpha property blends (a blended pass
+		 * that also fades below alpha one gets hint 9 or 10, which Render refuses).
+		 */
+		bool BlendedList(const RE::BSGeometry& a_geometry)
+		{
+			using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
+			const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
+			const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+			const bool blending = alpha && alpha->GetAlphaBlending();
+			if (netimmerse_cast<const RE::BSEffectShaderProperty*>(property)) {
+				if (property->flags.any(Flag::kDecal, Flag::kDynamicDecal, Flag::kBillboard))
+					return false;
+				const bool particles = netimmerse_cast<const RE::NiParticleSystem*>(&a_geometry) != nullptr;
+				return property->alpha < 1.0f || blending || particles || property->flags.any(Flag::kFalloff);
+			}
+			return blending && !(property && property->flags.any(Flag::kDecal, Flag::kDynamicDecal));
+		}
 	}
 
 	void UtilityFrameRows(const RE::NiCamera& a_camera, float (*a_out)[4])
@@ -927,125 +1022,115 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		ShadowCameras::CameraMatrices(a_camera, matrices);
 		const RE::NiPoint3 eye{ matrices.eye[0], matrices.eye[1], matrices.eye[2] };
 		Snapshot::FrameCamera::WriteCamera(matrices.view, matrices.proj, matrices.viewProj, eye, { 0.0f, 0.0f }, nullptr, &a_out[0][0]);
-		Snapshot::FrameCamera::WriteRatios({}, Snapshot::Core().drClampOffset, &a_out[0][0]);
-		const float params[4]{ Snapshot::Core().inverseGamma, 1.0f, 0.0f, 0.0f };
-		std::memcpy(a_out[42], params, sizeof(params));
-	}
-
-	bool ComputeUtility(const UtilityView& a_view, const RE::BSGeometry& a_geometry, UtilityResult& a_out, std::string& a_why)
-	{
-		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
-		a_out = {};
-		a_why.clear();
-		const auto* property = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
-		if (!property || !property->material)
-			return false;
-		const std::uint64_t flags = property->flags.underlying();
-		const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
-		const bool testing = alpha && alpha->GetAlphaTesting();
-		const bool blending = alpha && alpha->GetAlphaBlending();
-		// The passes GetRenderPasses registers: the depth pass takes what writes depth and is not blended, a shadow map its casters.
-		std::uint32_t technique = 0;
-		if (a_view.view == View::MenuDepth) {
-			if (!property->flags.any(Flag::kZBufferWrite) || BlendedList(a_geometry) || property->flags.any(Flag::kDecal, Flag::kDynamicDecal))
-				return false;
-			technique = ShadowUtilityTechnique(flags, testing) | ShadowModeBits(0xC);
-		} else if (a_view.view == View::LocalMap) {
-			// GetRenderPasses_LocalMap (vtable 0x2C, AE 0x1414afb00, SE 0x1412c7cd0) in render mode 0x12: none for a skinned or refracting
-			// property, a blended one, or one whose fade times material alpha is below 1 (the constant at SE 0x1415232d8).
-			if ((flags & 0x8002) || blending)
-				return false;
-			const float fade = property->fadeNode ? property->fadeNode->GetRuntimeData().currentFade : 1.0f;
-			if (fade * static_cast<const RE::BSLightingShaderMaterialBase*>(property->material)->materialAlpha < 1.0f)
-				return false;
-			technique = UtilityShaderDecl(flags) | (testing ? 0x80u : 0u) | static_cast<std::uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderBaseTexture);
-		} else if (a_view.view == View::LocalMapFog) {
-			// The same function in render mode 0x13 (the fog of war): every property, no alpha test bit.
-			technique = UtilityShaderDecl(flags) | static_cast<std::uint32_t>(SIE::ShaderCache::UtilityShaderFlags::LocalMapFogOfWar);
-		} else {
-			const auto type = static_cast<std::uint8_t>(a_geometry.GetType().underlying());
-			if (ShadowCasterReject(flags, type, blending, property->alpha, FrameGlobals::Current().shadowGlobal) != ShadowReject::None)
-				return false;
-			technique = ShadowUtilityTechnique(flags, testing) | ShadowModeBits(a_view.renderMode);
-		}
-		a_out.technique = technique;
-		a_out.vertex = ShadowMask::Native::VertexDescriptorOf(technique);
-		auto& c = a_out.constants;
-		auto& w = a_out.written;
-		const auto write = [](float* a_row, float* a_mask, std::uint32_t a_i, float a_value) {
-			a_row[a_i] = a_value;
-			a_mask[a_i] = 1.0f;
-		};
-		const std::uint32_t t = a_out.vertex;
-		// SetupTechnique: a paraboloid's ParabolaParam (VS c1).
-		if ((t & 0x20004000u) == 0x4000u && (t & 0x10000u)) {
-			write(c.vsTechnique[1], w.vsTechnique[1], 0, a_view.parabola[0]);
-			write(c.vsTechnique[1], w.vsTechnique[1], 1, a_view.parabola[1]);
-		}
-		// SetupMaterial: a textured technique's TexcoordOffset, and t0 the diffuse with the material's clamp mode.
-		const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(property->material);
-		if ((t & 0x2u) && (t & 0x2040280u)) {
-			const std::uint32_t buffer = a_view.textureTransformBuffer & 1;
-			write(c.vsMaterial[0], w.vsMaterial[0], 0, material->texCoordOffset[buffer].x);
-			write(c.vsMaterial[0], w.vsMaterial[0], 1, material->texCoordOffset[buffer].y);
-			write(c.vsMaterial[0], w.vsMaterial[0], 2, material->texCoordScale[buffer].x);
-			write(c.vsMaterial[0], w.vsMaterial[0], 3, material->texCoordScale[buffer].y);
-			if (t & 0x2040080u) {
-				if (property->material->GetType() != RE::BSShaderMaterial::Type::kLighting) {
-					a_why = "a textured Utility pass of a material that is not a Lighting material";
-					return false;
-				}
-				a_out.texture = material->diffuseTexture.get();
-				a_out.address = static_cast<std::uint32_t>(material->textureClampMode);
-				a_out.filter = 3;
-			}
-		}
-		// SetupGeometry: World (VS c1-c4) less the eye, unskinned only; a skinned draw's palettes place it.
-		if (!(t & 0x4u)) {
-			float rows[12];
-			WorldRows(a_geometry.world, a_view.eye, rows);
-			for (std::uint32_t r = 0; r < 3; ++r)
-				for (std::uint32_t i = 0; i < 4; ++i)
-					write(c.vsGeometry[1 + r], w.vsGeometry[1 + r], i, rows[r * 4 + i]);
-			const float last[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
-			for (std::uint32_t i = 0; i < 4; ++i)
-				write(c.vsGeometry[4], w.vsGeometry[4], i, last[i]);
-		}
-		if (t & 0x200u) {
-			a_why = std::format("a Utility technique with an eye position row ({:#x})", t);
-			return false;
-		}
-		// AlphaTestRef.x (PS c2), which only the depth pass's pixel shader declares: 0x3F7EFEFF while the alpha property blends, else the
-		// threshold over 255 plus the exe's bias.
-		// The fog of war's pixel shader has no PerGeometry: the engine writes no row there.
-		if ((a_view.view == View::MenuDepth || a_view.view == View::LocalMap) && alpha && (blending || (t & 0x80u) || (t & 0x14000u) == 0x10000u)) {
-			float ref = std::bit_cast<float>(0x3F7EFEFFu);
-			if (!blending) {
-				constexpr float kStep = std::bit_cast<float>(0x3B808081u), kBias = std::bit_cast<float>(0x3B80802Cu);
-				ref = static_cast<float>(alpha->alphaThreshold) * kStep + kBias;
-				if (alpha->alphaThreshold == 4)
-					ref += kStep;
-			}
-			write(c.psGeometry[2], w.psGeometry[2], 0, ref);
-		}
-		a_out.state = UtilityStateOf(a_geometry, *property);
-		// The local map's states (LocalMapRenderer::Render): the base textures write colour (mode 1); the fog of war writes alpha only
-		// (mode 8) with no depth test and no culling.
-		if (a_view.view == View::LocalMap || a_view.view == View::LocalMapFog)
-			a_out.state.stencil = 0;
-		if (a_view.view == View::LocalMap)
-			a_out.state.write = 1;
-		else if (a_view.view == View::LocalMapFog) {
-			a_out.state.write = 8;
-			a_out.state.depth = 0;
-			a_out.state.cull = 0;
-		}
-		c.alphaTestRef = a_out.state.alphaRef;
-		return true;
+		FrameTailRows(a_out);
 	}
 
 	namespace
 	{
+		/**
+		 * @brief The Utility pass a_geometry registers into a_view's accumulator (GetRenderPasses in the depth or shadow map render mode),
+		 * with its constants (BSUtilityShader::SetupTechnique AE 0x1414fa160, SetupMaterial 0x1414faa60, SetupGeometry 0x1414fae40). False
+		 * with an empty a_why when the geometry has no pass there; false with a_why when CS cannot compute it.
+		 */
+		bool ComputeUtility(const UtilityView& a_view, const RE::BSGeometry& a_geometry, UtilityResult& a_out, std::string& a_why)
+		{
+			using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
+			a_out = {};
+			a_why.clear();
+			const auto* property = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
+			if (!property || !property->material)
+				return false;
+			const std::uint64_t flags = property->flags.underlying();
+			const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+			const bool testing = alpha && alpha->GetAlphaTesting();
+			const bool blending = alpha && alpha->GetAlphaBlending();
+			// The passes GetRenderPasses registers: the depth pass takes what writes depth and is not blended, a shadow map its casters.
+			std::uint32_t technique = 0;
+			if (a_view.view == View::MenuDepth) {
+				if (!property->flags.any(Flag::kZBufferWrite) || BlendedList(a_geometry) || property->flags.any(Flag::kDecal, Flag::kDynamicDecal))
+					return false;
+				technique = ShadowUtilityTechnique(flags, testing) | ShadowModeBits(0xC);
+			} else if (a_view.view == View::LocalMap) {
+				// GetRenderPasses_LocalMap (vtable 0x2C, AE 0x1414afb00, SE 0x1412c7cd0) in render mode 0x12: none for a skinned or refracting
+				// property, a blended one, or one whose fade times material alpha is below 1 (the constant at SE 0x1415232d8).
+				if ((flags & 0x8002) || blending)
+					return false;
+				const float fade = property->fadeNode ? property->fadeNode->GetRuntimeData().currentFade : 1.0f;
+				if (fade * static_cast<const RE::BSLightingShaderMaterialBase*>(property->material)->materialAlpha < 1.0f)
+					return false;
+				technique = UtilityShaderDecl(flags) | (testing ? 0x80u : 0u) | static_cast<std::uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderBaseTexture);
+			} else if (a_view.view == View::LocalMapFog) {
+				// The same function in render mode 0x13 (the fog of war): every property, no alpha test bit.
+				technique = UtilityShaderDecl(flags) | static_cast<std::uint32_t>(SIE::ShaderCache::UtilityShaderFlags::LocalMapFogOfWar);
+			} else {
+				const auto type = static_cast<std::uint8_t>(a_geometry.GetType().underlying());
+				if (ShadowCasterReject(flags, type, blending, property->alpha, FrameGlobals::Current().shadowGlobal) != ShadowReject::None)
+					return false;
+				technique = ShadowUtilityTechnique(flags, testing) | ShadowModeBits(a_view.renderMode);
+			}
+			a_out.technique = technique;
+			a_out.vertex = ShadowMask::Native::VertexDescriptorOf(technique);
+			auto& c = a_out.constants;
+			const std::uint32_t t = a_out.vertex;
+			// SetupTechnique: a paraboloid's ParabolaParam (VS c1).
+			if ((t & 0x20004000u) == 0x4000u && (t & 0x10000u)) {
+				c.vsTechnique[1][0] = a_view.parabola[0];
+				c.vsTechnique[1][1] = a_view.parabola[1];
+			}
+			// SetupMaterial: a textured technique's TexcoordOffset, and t0 the diffuse with the material's clamp mode.
+			const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(property->material);
+			if ((t & 0x2u) && (t & 0x2040280u)) {
+				const std::uint32_t buffer = a_view.textureTransformBuffer & 1;
+				c.vsMaterial[0][0] = material->texCoordOffset[buffer].x;
+				c.vsMaterial[0][1] = material->texCoordOffset[buffer].y;
+				c.vsMaterial[0][2] = material->texCoordScale[buffer].x;
+				c.vsMaterial[0][3] = material->texCoordScale[buffer].y;
+				if (t & 0x2040080u) {
+					if (property->material->GetType() != RE::BSShaderMaterial::Type::kLighting) {
+						a_why = "a textured Utility pass of a material that is not a Lighting material";
+						return false;
+					}
+					a_out.texture = material->diffuseTexture.get();
+					a_out.address = static_cast<std::uint32_t>(material->textureClampMode);
+					a_out.filter = 3;
+				}
+			}
+			// SetupGeometry: World (VS c1-c4) less the eye, unskinned only; a skinned draw's palettes place it.
+			if (!(t & 0x4u)) {
+				float rows[12];
+				WorldRows(a_geometry.world, a_view.eye, rows);
+				for (std::uint32_t r = 0; r < 3; ++r)
+					for (std::uint32_t i = 0; i < 4; ++i)
+						c.vsGeometry[1 + r][i] = rows[r * 4 + i];
+				const float last[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
+				for (std::uint32_t i = 0; i < 4; ++i)
+					c.vsGeometry[4][i] = last[i];
+			}
+			if (t & 0x200u) {
+				a_why = std::format("a Utility technique with an eye position row ({:#x})", t);
+				return false;
+			}
+			// AlphaTestRef.x (PS c2), which only the depth pass's pixel shader declares: 0x3F7EFEFF while the alpha property blends, else the
+			// threshold over 255 plus the exe's bias.
+			// The fog of war's pixel shader has no PerGeometry: the engine writes no row there.
+			if ((a_view.view == View::MenuDepth || a_view.view == View::LocalMap) && alpha && (blending || (t & 0x80u) || (t & 0x14000u) == 0x10000u))
+				c.psGeometry[2][0] = blending ? std::bit_cast<float>(0x3F7EFEFFu) : BiasedAlphaRefOf(*alpha);
+			a_out.state = UtilityStateOf(a_geometry, *property);
+			// The local map's states (LocalMapRenderer::Render): the base textures write colour (mode 1); the fog of war writes alpha only
+			// (mode 8) with no depth test and no culling.
+			if (a_view.view == View::LocalMap || a_view.view == View::LocalMapFog)
+				a_out.state.stencil = 0;
+			if (a_view.view == View::LocalMap)
+				a_out.state.write = 1;
+			else if (a_view.view == View::LocalMapFog) {
+				a_out.state.write = 8;
+				a_out.state.depth = 0;
+				a_out.state.cull = 0;
+			}
+			c.alphaTestRef = a_out.state.alphaRef;
+			return true;
+		}
+
 		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 
@@ -1078,13 +1163,16 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return state;
 		}
 
-		/** @brief The colour targets of a menu scene's colour pass, as UI::Render and UI3DSceneManager::Render bind them. */
-		std::array<std::int32_t, kMaxColours> ColourTargets(std::int32_t a_scheme, bool a_taa)
+		/**
+		 * @brief The colour targets of a menu scene's colour pass, as UI::Render and UI3DSceneManager::Render bind them. No motion vectors
+		 * outside scheme 4: schemes 3 and 6 never take TAA, and CS turns the engine's TAA off around UI::Render (Hooks.cpp), so no TAA mask
+		 * fill follows.
+		 */
+		std::array<std::int32_t, kMaxColours> ColourTargets(std::int32_t a_scheme)
 		{
 			if (a_scheme == 4)
 				return { kMainTarget, kMotionVectorTarget, kNormalTaaMaskSwapTarget };
-			const bool motion = a_taa && (a_scheme == 1 || a_scheme == 2 || a_scheme == 7);
-			return { kFramebufferTarget, motion ? kMotionVectorTarget : -1, -1 };
+			return { kFramebufferTarget, -1, -1 };
 		}
 
 		/** @brief Maps a_targets into a_view's client's imports. Null when mapped. */
@@ -1239,14 +1327,6 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return a_draw.bonesOffset == ~0u ? "more palettes than the batch's latch holds" : nullptr;
 		}
 
-		/** @brief A menu draw's viewport: the target's, with the depth range 0..1 (decision 148) less its depth bias mode's offset. */
-		Family::Viewport MenuViewport(std::int32_t a_target, const DrawState& a_state)
-		{
-			auto viewport = Family::FrameViewport(a_target, static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN), 0);
-			viewport.depthRange = { 0.0f, 1.0f - Family::DepthBiasViewportOffset(a_state.depthBias) };
-			return viewport;
-		}
-
 		const char* DescribeStates(Draw& a_draw, const DrawState& a_state)
 		{
 			a_draw.stencilRef = a_state.stencilRef;
@@ -1385,8 +1465,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				return why;
 			if (const char* why = DescribeStates(draw, a_state))
 				return why;
-			static const REL::Relocation<RE::BSShader**> effectShader{ REL::Offset(Effects::Address::kEffectShader) };
-			auto* shader = *effectShader.get();
+			auto* shader = EffectShader();
 			auto* vs = globals::shaderCache->GetVertexShader(*shader, a_result.vertex);
 			EffectSceneConstants c = a_result.constants;
 			c.alphaTestRef = a_state.alphaRef;
@@ -1596,30 +1675,16 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		return PushDraw(a_geometry, vs->vertexDesc, a_run, std::move(draw), c, a_detail);
 	}
 
+	Family::Viewport MenuViewport(std::int32_t a_target, const DrawState& a_state)
+	{
+		auto viewport = Family::FrameViewport(a_target, static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN), 0);
+		viewport.depthRange = { 0.0f, 1.0f - Family::DepthBiasViewportOffset(a_state.depthBias) };
+		return viewport;
+	}
+
 	bool LeftOut(const char* a_why)
 	{
 		return a_why == kBuilding || a_why == kNoBuffers || a_why == kStreaming;
-	}
-
-	/**
-	 * @brief Whether a_geometry's pass has accumulation hint 1, the accumulator's blended list (FUN_1414f50b0, batch renderer +0xF0), as
-	 * GetRenderPasses gives it. BSEffectShaderProperty (AE 0x1414bd890): not a decal or billboard, and the property's alpha below one,
-	 * the alpha property blending, a particle system or falloff. BSLightingShaderProperty: the alpha property blends (a blended pass
-	 * that also fades below alpha one gets hint 9 or 10, which Render refuses).
-	 */
-	bool BlendedList(const RE::BSGeometry& a_geometry)
-	{
-		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
-		const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
-		const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
-		const bool blending = alpha && alpha->GetAlphaBlending();
-		if (netimmerse_cast<const RE::BSEffectShaderProperty*>(property)) {
-			if (property->flags.any(Flag::kDecal, Flag::kDynamicDecal, Flag::kBillboard))
-				return false;
-			const bool particles = netimmerse_cast<const RE::NiParticleSystem*>(&a_geometry) != nullptr;
-			return property->alpha < 1.0f || blending || particles || property->flags.any(Flag::kFalloff);
-		}
-		return blending && !(property && property->flags.any(Flag::kDecal, Flag::kDynamicDecal));
 	}
 
 	void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, bool a_closestPoint, std::vector<ScenePass>& a_out)
@@ -1679,7 +1744,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		static const bool native = ::RenderGraph::Engine::Native::Active();
 		if (!native)
 			return false;
-		// The schemes whose draws CS computes as the engine does (observe parity, draw order included): the inventory's item (1, 2) with its
+		// The schemes whose draws CS computes as the engine does (draw order included): the inventory's item (1, 2) with its
 		// enchantment membranes, the book (3, its pages sample the kBOOK_TEXT targets), MistMenu (4: the main menu, a loading screen, and a
 		// loading model with its shadow maps, depth pass and masks), the stats menu's constellations and the lockpicking menu's lock (7).
 		// The journal's scheme (0) has no 3D scene, and no menu pushes scheme 5 (the light scheme push, AE 0x1409738f0, has callers for
@@ -1720,8 +1785,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				return why;
 			// LOD's pixel stage reads t4 (and t3 with Reflections, which the local map's passes never carry); every other slot is null.
 			for (std::uint32_t t = 0; t < Water::kMaterialSlots; ++t) {
-				const auto& slot = t == 4 ? r.normals : t == 3 ? r.cube :
-				                                                 WaterResult::Slot{};
+				const auto slot = t == 4 ? r.normals : WaterResult::Slot{};
 				if (const char* why = AddTexture(slot.view, slot.address, slot.filter, t, a_run, c.textures[t], c.samplers[t], a_detail, Water::MaterialKind(t)))
 					return why;
 			}
@@ -1755,7 +1819,6 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 		struct LocalMapState
 		{
-			PreviousCamera previous;  // never read: the local map's draws have no previous camera
 			std::uint64_t renders = 0, leftOut = 0;
 		};
 
@@ -1806,11 +1869,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 	{
 		// The engine's shader objects pass through EngineDrawPrograms::Get, which reads only the key. Before the engine has made them (CS's
 		// setup can come first), the queue waits for the first native menu scene render, which comes before any local map.
-		static const REL::Relocation<RE::BSShader**> lightingShader{ REL::Offset(Engine::Address::kLightingShader) };
-		static const REL::Relocation<RE::BSShader**> waterShader{ RELOCATION_ID(528163, 415108) };
 		const RE::BSShader* utility = RE::BSUtilityShader::GetSingleton();
-		const RE::BSShader* lighting = *lightingShader.get();
-		const RE::BSShader* waterShaderObject = *waterShader.get();
+		const RE::BSShader* lighting = LightingShader();
+		const RE::BSShader* waterShaderObject = WaterShader();
 		auto& state = GetLocalMapQueue();
 		if (state.done)
 			return;
@@ -1879,7 +1940,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return;
 		const auto& camera = *scene.camera;
 		SetLocalMapTreeDetail();
-		const auto in = SampleLocalMapInputs(camera, state.previous);
+		const auto in = SampleLocalMapInputs(camera);
 		const auto water = SampleLocalMapWater(in, scene.water);
 		const auto mapView = LocalMapUtilityView(View::LocalMap, camera, in);
 
@@ -2006,9 +2067,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		std::vector<ScenePass> passes;
 		SceneGeometry(root, *camera, closestPoint, passes);
 
-		// No TAA: schemes 3 and 6 never take it, and CS turns the engine's TAA off around UI::Render (Hooks.cpp), so no TAA mask fill follows.
-		const bool taa = false;
-		const auto targets = ColourTargets(scheme, taa);
+		const auto targets = ColourTargets(scheme);
 		// The frame's family resources start before the draws lease theirs, then kMAIN's depth and stencil clear, as at the render's start.
 		Family::BeginBatch();
 		if (!::RenderGraph::Engine::Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL))
@@ -2020,7 +2079,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			::RenderGraph::Fatal("menu scenes", "kMAIN's colour clear at a native menu scene render was not taken");
 		// The shadow maps, the depth pass the colour pass keeps, and the masks its Lighting draws read.
 		if (shadowMaps)
-			RenderShadowsAndDepth(*a_manager, *camera, root, in);
+			RenderShadowsAndDepth(*a_manager, *camera, root, in, passes);
 		auto run = std::make_shared<Run>();
 		run->view = View::MenuColour;
 		std::uint32_t frame = ~0u;

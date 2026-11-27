@@ -2,13 +2,16 @@
 
 #include "RenderGraph/BufferRef.h"
 
-// Menu scenes as an engine draw family (docs/development/engine/menus.md). The engine culls, registers and sets up every pass as
-// usual, DrawTriShape latches each draw, and an ORG pass at the EngineDraws anchor draws the batch in engine order.
-// Batches are the local map (LocalMapRenderer::Render, SE 16094, AE 16335) with its fog of war, and a menu model's depth and
-// colour passes (UI3DSceneManager::Render, SE 51855, AE 52727). In local map mode a Lighting property makes a BSUtilityShader
-// RENDER_BASE_TEXTURE pass instead (SE 0x1412c7cd0), while landscape keeps its Lighting passes.
-// Programs are ORG builds of Utility.hlsl, Lighting.hlsl and Effect.hlsl, with the world's CS features off. A draw with no ORG
-// build, such as tree LOD, or a refused draw ends its batch's latched part, and the engine draws the rest.
+// Menu scenes as an engine draw family (docs/development/engine/menus.md). Batches are the local map (LocalMapRenderer::Render,
+// SE 16094, AE 16335) with its fog of war, and a menu model's shadow, depth and colour passes (UI3DSceneManager::Render, SE 51855,
+// AE 52727). An ORG pass at the EngineDraws anchor draws each batch in engine order (MenuScenesDraws.cpp). Programs are ORG builds of
+// Utility.hlsl, Lighting.hlsl, Effect.hlsl and Water.hlsl, with the world's CS features off.
+// Native mode computes and draws the scenes itself (MenuScenesNative.cpp): each draw comes from the scene graph, its lights and camera,
+// no engine render function runs, and a draw CS cannot compute is fatal.
+// Guest mode keeps the engine's render (MenuScenesCapture.cpp): the engine culls and sets up every pass, and DrawTriShape latches each
+// draw. In local map mode a Lighting property makes a BSUtilityShader RENDER_BASE_TEXTURE pass instead (SE 0x1412c7cd0), while
+// landscape keeps its Lighting passes. A draw with no ORG build, such as tree LOD, or a refused draw ends its batch's latched part,
+// and the engine draws the rest.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -394,8 +397,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		/** @brief The render's tree detail: each loaded tree's LOD switch shows child 1 (FUN_140438580(BSTreeManager, 1)). */
 		void SetLocalMapTreeDetail();
 
-		/** @brief The inputs of the local map's Lighting draws: the world's scene node and the local map camera. */
-		Inputs SampleLocalMapInputs(const RE::NiCamera& a_camera, const PreviousCamera& a_previous);
+		/** @brief The inputs of the local map's Lighting draws: the world's scene node and the local map camera, with no previous camera. */
+		Inputs SampleLocalMapInputs(const RE::NiCamera& a_camera);
 
 		/**
 		 * @brief The water port's frame inputs as BSWaterShader sees them in the local map's render (AE 0x140242e00): the local map camera's
@@ -404,48 +407,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		 */
 		Water::Port::FrameInputs SampleLocalMapWater(const Inputs& a_in, bool a_water);
 
-		/** @brief A draw's lights as GetRenderPasses gives a menu pass: the scene node's sun, its shadow lights, then its point lights. */
-		struct Lights
-		{
-			std::array<RE::BSLight*, 16> lights{};
-			std::uint32_t count = 0;
-			std::uint32_t shadow = 0;
-		};
-		void SelectLights(const Inputs& a_in, const RE::BSGeometry& a_geometry, Lights& a_out);
-
 		/** @brief The FrameBuffer (VS_PerFrame, b12) rows SetCameraData writes for the menu camera. */
 		void FrameRows(const Inputs& a_in, float (*a_out)[4]);
-
-		/** @brief A Lighting draw's constants, which floats of them the engine writes (1.0), and its descriptors and material record. */
-		struct LightingResult
-		{
-			LightingSceneConstants constants{};
-			LightingSceneConstants written{};
-			std::uint32_t pass = 0, vertex = 0, pixel = 0, rawPixel = 0;
-			MaterialRecord record{};
-			Lights lights;
-		};
-		/** @brief The Lighting draw of a_geometry as SetupTechnique, SetupMaterial and SetupGeometry would bind it. False, with why, when it cannot. */
-		bool ComputeLighting(const Inputs& a_in, const RE::BSGeometry& a_geometry, LightingResult& a_out, std::string& a_why);
-
-		/** @brief An Effect draw's constants, written floats, descriptors and material record. */
-		struct EffectResult
-		{
-			EffectSceneConstants constants{};
-			EffectSceneConstants written{};
-			std::uint32_t pass = 0, vertex = 0, pixel = 0, rawPixel = 0;
-			MaterialRecord record{};
-		};
-		/** @brief The Effect draw of a_geometry as BSEffectShader's Setup functions would bind it. The lit, membrane, soft and projected variants are refused. */
-		bool ComputeEffect(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why);
-
-		/**
-		 * @brief The membrane pass descriptor BSLightingShaderProperty::GetRenderPasses (AE 0x1414adfb0) adds for a Lighting property with
-		 * effect data (an enchantment glow), or 0 when it adds none.
-		 */
-		std::uint32_t MembranePassOf(const RE::BSGeometry& a_geometry);
-		/** @brief The membrane pass of a_geometry as BSEffectShader's Setup functions would bind it (the material is the Lighting property's). */
-		bool ComputeMembrane(const Inputs& a_in, const RE::BSGeometry& a_geometry, EffectResult& a_out, std::string& a_why);
 
 		/** @brief What a draw needs besides its constants: the states the engine's batch leaves for it. */
 		struct DrawState
@@ -454,12 +417,13 @@ namespace DCLF::Features::MenuViews::Scenes
 			std::uint32_t stencil = 2, stencilRef = 0xff;  // the colour pass writes stencil bit 0 everywhere it draws
 			float alphaRef = 0.0f;
 		};
+		/** @brief A menu draw's viewport: the target's, with the depth range 0..1 (decision 148) less its depth bias mode's offset. */
+		Family::Viewport MenuViewport(std::int32_t a_target, const DrawState& a_state);
 
-		/** @brief A local map water draw: the latch rows, which floats the setup writes, descriptors, states and the two textures LOD reads. */
+		/** @brief A local map water draw: the latch rows, descriptors, states and the normal map LOD reads. */
 		struct WaterResult
 		{
 			Water::DrawConstants constants{};
-			Water::DrawConstants written{};
 			std::uint32_t descriptor = 0, vertex = 0, pixel = 0;
 			DrawState state;
 			struct Slot
@@ -467,21 +431,17 @@ namespace DCLF::Features::MenuViews::Scenes
 				ID3D11ShaderResourceView* view = nullptr;
 				std::uint32_t address = 0, filter = 0;
 			};
-			Slot cube, normals;  // t3 (with the Reflections bit) and t4
+			Slot normals;  // t4
 			const RE::BSShader* shader = nullptr;
 			std::uint64_t vertexDesc = 0;  // CS's vertex shader's input description
 		};
+		/** @brief The engine's water shader object (GetRenderPasses' pass shader). Null before the engine makes it. */
+		RE::BSShader* WaterShader();
 		/**
 		 * @brief The water pass a_geometry makes in the local map (BSWaterShaderProperty::GetRenderPasses' local map branch, AE 0x1414c02e0),
 		 * with BSWaterShader's Setup functions through the water port. False, with why, when it cannot.
 		 */
 		bool ComputeWater(const Water::Port::FrameInputs& a_frame, const RE::BSGeometry& a_geometry, WaterResult& a_out, std::string& a_why);
-		/**
-		 * @brief A membrane pass's states, drawn in the accumulator's membrane group (accumulation hint 3, FUN_1414b3d50): the effect data's
-		 * blend, depth test without write, depth bias mode 10 (11 with a_closestPoint), back faces culled, write mode 11. False for a blend
-		 * pair the membrane setup leaves as it finds it.
-		 */
-		bool MembraneStateOf(const RE::BSGeometry& a_geometry, bool a_closestPoint, DrawState& a_out);
 
 		/** @brief One pass of a menu scene in draw order: a geometry's own pass, or the membrane pass its Lighting property adds. */
 		struct ScenePass
@@ -494,23 +454,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		 * far to near.
 		 */
 		void SceneGeometry(RE::NiAVObject* a_root, const RE::NiCamera& a_camera, bool a_closestPoint, std::vector<ScenePass>& a_out);
-		/** @brief Whether a_geometry's pass goes to the accumulator's blended list (accumulation hint 1). */
-		bool BlendedList(const RE::BSGeometry& a_geometry);
 		/** @brief Whether the menu's colour accumulator sorts its blended list by each bound's closest point. */
 		bool SortsByClosestPoint(const RE::UI3DSceneManager& a_manager);
-
-		/** @brief CS's permutation block for a draw: the extra shader descriptor and Linear Lighting's two words, as CS's hooks set them. */
-		struct Permutation
-		{
-			std::uint32_t extra = 0, baseTextureIsWorking = 0, renderToUI = 0;
-		};
-		Permutation PermutationOf(const RE::BSGeometry& a_geometry, bool a_effect);
-
-		/**
-		 * @brief A skinned geometry's palettes as VS b9 (previous) and b10 (current) hold them, after the engine's per-frame palette update.
-		 * False without skin or with more bones than the palettes hold.
-		 */
-		bool BoneRows(const RE::BSGeometry& a_geometry, std::span<std::byte, kBonesBytes> a_out);
 
 		/** @brief What a Utility draw of a menu model is drawn for: the depth pass with the menu camera, or a shadow light's map. */
 		struct UtilityView
@@ -524,24 +469,6 @@ namespace DCLF::Features::MenuViews::Scenes
 			Family::Viewport viewport;
 			float frame[kFrameRows][4]{};  // FrameBuffer (b12) as SetCameraData writes it for the camera
 		};
-
-		/** @brief A Utility draw as BSUtilityShader's Setup functions would bind it: its rows, which floats are written, technique, states, t0. */
-		struct UtilityResult
-		{
-			UtilitySceneConstants constants{};
-			UtilitySceneConstants written{};
-			std::uint32_t technique = 0, vertex = 0;
-			DrawState state;
-			const RE::NiSourceTexture* texture = nullptr;  // t0, the diffuse an alpha-tested draw samples
-			std::uint32_t address = 0, filter = 0;
-		};
-
-		/**
-		 * @brief The Utility pass a_geometry registers into a_view's accumulator (GetRenderPasses in the depth or shadow map render mode),
-		 * with its constants (BSUtilityShader::SetupTechnique AE 0x1414fa160, SetupMaterial 0x1414faa60, SetupGeometry 0x1414fae40). False
-		 * with an empty a_why when the geometry has no pass there; false with a_why when CS cannot compute it.
-		 */
-		bool ComputeUtility(const UtilityView& a_view, const RE::BSGeometry& a_geometry, UtilityResult& a_out, std::string& a_why);
 
 		/**
 		 * @brief Appends a_geometry's Utility draw in a_view to a_run (none when it has no pass there). Null when added or when it has none,
@@ -558,9 +485,11 @@ namespace DCLF::Features::MenuViews::Scenes
 		 * @brief A loading model's shadow lights, depth pass and shadow masks for a native render of scheme 4 with its depth pass, in
 		 * UI3DSceneManager::Render's order (MenuScenesShadows.cpp): FUN_140973210's light loop by CS's ports (camera update, keep, mask
 		 * index, scissor, Accumulate's bookkeeping, Render's targets, slices and light transforms) with each map drawn from the menu
-		 * geometry, then the depth pass into kMAIN's depth, then the menu masks. Fatal when a draw CS cannot compute is met.
+		 * geometry, then the depth pass of a_passes (the colour pass's SceneGeometry) into kMAIN's depth, then the menu masks. Fatal when a
+		 * draw CS cannot compute is met.
 		 */
-		void RenderShadowsAndDepth(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, RE::NiAVObject* a_root, const Inputs& a_in);
+		void RenderShadowsAndDepth(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, RE::NiAVObject* a_root, const Inputs& a_in,
+			std::span<const ScenePass> a_passes);
 
 		/**
 		 * @brief LocalMapRenderer::Render (AE 16335) in native mode: the land and objects, their water and the fog of war computed from the

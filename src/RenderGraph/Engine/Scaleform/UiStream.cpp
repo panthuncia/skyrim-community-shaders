@@ -98,16 +98,43 @@ namespace RenderGraph::Engine::Scaleform
 		return result;
 	}
 
+	void RefreshViewPerspective(RendererState& a_state)
+	{
+		if (!a_state.viewPerspectiveDirty)
+			return;
+		a_state.viewPerspectiveDirty = false;
+		float temp[16];
+		From2D(a_state.userMatrix, temp);
+		Multiply(a_state.viewPerspective, temp, a_state.view3D);
+		std::memcpy(temp, a_state.viewPerspective, sizeof(temp));
+		Multiply(a_state.viewPerspective, temp, a_state.perspective3D);
+	}
+
+	void BlendStackPush(std::uint32_t& a_mode, std::vector<std::uint32_t>& a_stack, std::uint32_t a_push)
+	{
+		a_stack.push_back(a_mode);
+		if (a_push > 2)
+			a_mode = a_push;
+	}
+
+	void BlendStackPop(std::uint32_t& a_mode, std::vector<std::uint32_t>& a_stack)
+	{
+		if (a_stack.empty())
+			return;
+		std::uint32_t mode = 0;
+		for (auto it = a_stack.rbegin(); it != a_stack.rend(); ++it)
+			if (*it > 2) {
+				mode = *it;
+				break;
+			}
+		a_stack.pop_back();
+		a_mode = mode;
+	}
+
 	void ApplyMatrix3D(RendererState& a_state, const float (&a_matrix)[6], float (&a_mvp)[4][4])
 	{
+		RefreshViewPerspective(a_state);
 		float temp[16];
-		if (a_state.viewPerspectiveDirty) {
-			a_state.viewPerspectiveDirty = false;
-			From2D(a_state.userMatrix, temp);
-			Multiply(a_state.viewPerspective, temp, a_state.view3D);
-			std::memcpy(temp, a_state.viewPerspective, sizeof(temp));
-			Multiply(a_state.viewPerspective, temp, a_state.perspective3D);
-		}
 		float local[16];
 		From2D(a_matrix, temp);
 		Multiply(local, temp, a_state.worldMatrix);
@@ -289,10 +316,8 @@ namespace RenderGraph::Engine::Scaleform
 						break;
 					end.blendStack.clear();
 					const auto& args = *reinterpret_cast<const BeginDisplayArgs*>(At(c));
-					if (reinterpret_cast<const std::uint8_t*>(&args.background)[3] != 0) {
-						static constexpr float kIdentity[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
-						std::memcpy(state.matrix, kIdentity, sizeof(kIdentity));
-					}
+					if (reinterpret_cast<const std::uint8_t*>(&args.background)[3] != 0)
+						std::memcpy(state.matrix, kIdentityMatrix, sizeof(kIdentityMatrix));
 					break;
 				}
 			case UiOp::EndDisplay:
@@ -308,21 +333,10 @@ namespace RenderGraph::Engine::Scaleform
 				std::memcpy(state.cxform, floats(c), sizeof(state.cxform));
 				break;
 			case UiOp::PushBlendMode:
-				end.blendStack.push_back(end.blendMode);
-				if (static_cast<std::uint32_t>(c.a) > 2)
-					end.blendMode = static_cast<std::uint32_t>(c.a);
+				BlendStackPush(end.blendMode, end.blendStack, static_cast<std::uint32_t>(c.a));
 				break;
 			case UiOp::PopBlendMode:
-				if (!end.blendStack.empty()) {
-					std::uint32_t mode = 0;
-					for (auto it = end.blendStack.rbegin(); it != end.blendStack.rend(); ++it)
-						if (*it > 2) {
-							mode = *it;
-							break;
-						}
-					end.blendStack.pop_back();
-					end.blendMode = mode;
-				}
+				BlendStackPop(end.blendMode, end.blendStack);
 				break;
 			case UiOp::SetPerspective3D:
 				state.SetPerspective3D(*reinterpret_cast<const float (*)[16]>(At(c)));
@@ -347,14 +361,8 @@ namespace RenderGraph::Engine::Scaleform
 			case UiOp::DrawBlurRect:
 			case UiOp::DrawColorMatrixRect:
 				// ApplyMatrix3D's cached product, which a 3D draw brings up to date.
-				if (inDisplay && state.world3D && state.viewPerspectiveDirty) {
-					float temp[16];
-					state.viewPerspectiveDirty = false;
-					From2D(state.userMatrix, temp);
-					Multiply(state.viewPerspective, temp, state.view3D);
-					std::memcpy(temp, state.viewPerspective, sizeof(temp));
-					Multiply(state.viewPerspective, temp, state.perspective3D);
-				}
+				if (inDisplay && state.world3D)
+					RefreshViewPerspective(state);
 				break;
 			case UiOp::LineStyleDisable:
 				state.LineStyleDisable();
