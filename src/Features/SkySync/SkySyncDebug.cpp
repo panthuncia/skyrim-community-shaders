@@ -86,7 +86,7 @@ void SkySync::DrawDebugSection()
 	ImGui::Text(T(TKEY("debug_transition_intensity_factor"), "Transition intensity factor: %.3f"), shadowFader.intensityFactor);
 	ImGui::Text(T(TKEY("debug_caster_fade"), "Caster fade: %.3f"), shadowFader.casterFade);
 	if (shadowFader.transitioning) {
-		const float t = shadowFader.Progress(settings.ShadowTransitionDuration);
+		const float t = shadowFader.Progress(settings.ShadowTransitionDuration.Adopted());
 		ImGui::ProgressBar(t, { -1.0f, 0.0f }, "");
 		ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
 		ImGui::Text(T(TKEY("debug_transitioning"), "Transitioning %.0f%%"), t * 100.0f);

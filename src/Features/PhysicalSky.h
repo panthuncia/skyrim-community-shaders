@@ -174,7 +174,7 @@ struct PhysicalSky final : public Feature
 	{
 		CS::Setting<bool> enabled = true;
 		bool enableAllExteriorCells = false;
-		bool forceEnableAllInteriorCells = false;
+		CS::Setting<bool> forceEnableAllInteriorCells = false;  // read adopted by Sky Sync and Interior Sun on the game thread
 		bool overrideDirLight = true;
 		bool lightSkyStatics = true;
 		float skyStaticsBrightness = 1.0f;

@@ -21,6 +21,7 @@ namespace Snapshot::EngineReads
 		constexpr std::uint32_t kWorld = static_cast<std::uint32_t>(RenderGraph::Frame::Kind::World);
 
 		thread_local std::uint32_t t_captureDepth = 0;
+		thread_local std::uint32_t t_uiDepth = 0;
 		std::atomic<Site*> g_sites{ nullptr };
 		std::atomic<std::uint32_t> g_renderThread{ 0 };
 		// Before the first Begin the driver describes a main-menu frame.
@@ -66,7 +67,7 @@ namespace Snapshot::EngineReads
 
 		struct Totals
 		{
-			std::uint64_t live = 0, liveRender = 0, world = 0, captured = 0;
+			std::uint64_t live = 0, liveRender = 0, world = 0, captured = 0, ui = 0;
 			std::array<std::uint64_t, static_cast<std::size_t>(Category::Count)> worldBy{};
 		};
 	}
@@ -75,8 +76,11 @@ namespace Snapshot::EngineReads
 	{
 		if (t_captureDepth)
 			captured.fetch_add(1, std::memory_order_relaxed);
-		else
+		else {
 			live[ThreadIndex()][g_kind.load(std::memory_order_relaxed)].fetch_add(1, std::memory_order_relaxed);
+			if (t_uiDepth)
+				ui.fetch_add(1, std::memory_order_relaxed);
+		}
 		if (!listed.load(std::memory_order_relaxed))
 			List(*this);
 	}
@@ -103,6 +107,21 @@ namespace Snapshot::EngineReads
 	bool InCapture() noexcept
 	{
 		return t_captureDepth != 0;
+	}
+
+	void EnterUiFrame() noexcept
+	{
+		++t_uiDepth;
+	}
+
+	void LeaveUiFrame() noexcept
+	{
+		--t_uiDepth;
+	}
+
+	bool InUiFrame() noexcept
+	{
+		return t_uiDepth != 0;
 	}
 
 	void BeginFrame(std::uint8_t a_kind) noexcept
@@ -156,8 +175,10 @@ namespace Snapshot::EngineReads
 			for (const auto& count : site->live[0])
 				render += count.load(std::memory_order_relaxed);
 			const auto captured = site->captured.load(std::memory_order_relaxed);
+			const auto ui = site->ui.load(std::memory_order_relaxed);
 			for (Totals* t : { &all, &byFeature[FeatureOf(row.path)], &byObject[static_cast<std::size_t>(site->object)] }) {
 				t->live += row.live;
+				t->ui += ui;
 				t->liveRender += render;
 				t->world += row.world;
 				t->captured += captured;
@@ -186,7 +207,7 @@ namespace Snapshot::EngineReads
 		for (std::uint32_t k = 0; k < kKinds; ++k)
 			kinds[kKindKeys[k]] = frames[k];
 		::Testing::SetReport("engine_reads", { { "mode", RenderGraph::Frame::Driver::ModeName() }, { "frames", kinds }, { "sites", rows.size() }, { "live", all.live },
-												 { "captured", all.captured }, { "world_per_frame", all.world / worldFrames }, { "world_per_frame_by_category", byCategory },
+												 { "captured", all.captured }, { "ui_frame", all.ui }, { "world_per_frame", all.world / worldFrames }, { "world_per_frame_by_category", byCategory },
 												 { "features", features } });
 
 		if (!Logging())
@@ -196,6 +217,10 @@ namespace Snapshot::EngineReads
 			"thread; {} captured; per world frame {:.1f} ({})",
 			a_when, RenderGraph::Frame::Driver::ModeName(), frames[0], frames[1], frames[2], frames[3], frames[4], all.live, rows.size(), all.liveRender, all.captured,
 			all.world / worldFrames, categories(all));
+		logger::info("[Snapshot] UI-frame engine reads {}: {} live reads inside the ImGui frame", a_when, all.ui);
+		for (const auto& row : rows)
+			if (const auto n = row.site->ui.load(std::memory_order_relaxed))
+				logger::info("[Snapshot] UI-frame read site: {}:{} {}: {}", row.path, row.site->where.line(), kObjectNames[static_cast<std::size_t>(row.site->object)], n);
 		for (const auto& [name, t] : byFeature)
 			if (t.live)
 				logger::info("[Snapshot] live reads by feature: {}: {} live ({} on the render thread), per world frame {:.1f} ({}); {} captured", name, t.live, t.liveRender,

@@ -9,19 +9,20 @@
 #include <PCH.h>
 
 #include "Features/HDRDisplay.h"
+#include "Features/PhysicalSky.h"
 #include "Features/Screenshot/Avif.h"
 #include "Features/Screenshot/ORGScreenshot.h"
 #include "Features/Upscaling.h"
 #include "Globals.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
-#include "Features/PhysicalSky.h"
 #include "RenderGraph/Switches.h"
 #include "Snapshot/Publication.h"
 #include "State.h"
 #include "Utils/Clipboard.h"
 #include "Utils/D3D.h"
 #include "Utils/FileSystem.h"
+#include "Utils/GameThread.h"
 
 #define I18N_KEY_PREFIX "feature.screenshot."
 
@@ -617,17 +618,19 @@ void ScreenshotFeature::SetupResources()
 
 void ScreenshotFeature::ApplyVanillaScreenshotSetting()
 {
-	// Toggles the in-memory value only; Skyrim.ini on disk is never rewritten.
-	auto* setting = CS_ENGINE_READ(Ini, RecordTime, RE::GetINISetting("bAllowScreenShot:Display"));
-	if (!setting || setting->GetType() != RE::Setting::Type::kBool)
-		return;
-	if (!vanillaScreenshotDefault)
-		vanillaScreenshotDefault = setting->GetBool();
-	const bool allow = disableVanillaScreenshot ? false : *vanillaScreenshotDefault;
-	if (setting->GetBool() != allow) {
-		setting->data.b = allow;
-		logger::info("[Screenshot] Vanilla screenshots {}", allow ? "enabled" : "disabled");
-	}
+	// Toggles the in-memory value only; Skyrim.ini on disk is never rewritten. An INI value is game state: game thread.
+	GameThread::Run("Screenshot: bAllowScreenShot", [this, disable = disableVanillaScreenshot] {
+		auto* setting = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bAllowScreenShot:Display"));
+		if (!setting || setting->GetType() != RE::Setting::Type::kBool)
+			return;
+		if (!vanillaScreenshotDefault)
+			vanillaScreenshotDefault = setting->GetBool();
+		const bool allow = disable ? false : *vanillaScreenshotDefault;
+		if (setting->GetBool() != allow) {
+			setting->data.b = allow;
+			logger::info("[Screenshot] Vanilla screenshots {}", allow ? "enabled" : "disabled");
+		}
+	});
 }
 
 void ScreenshotFeature::SuppressVanillaMultiScreenshot() const

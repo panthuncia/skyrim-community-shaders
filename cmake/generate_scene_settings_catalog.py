@@ -1713,6 +1713,8 @@ def collect_local_setting_aliases(body: str) -> dict[str, tuple[str, ...]]:
     for match in pattern.finditer(mask_cpp_source(body)):
         expression = strip_integral_casts(
             unwrap_combo_proxy(re.sub(r"\s+", " ", match.group(3)), True))
+        # `auto& fb = *settings.Filmback.Raw();` edits a struct-valued CS::Setting in place.
+        expression = re.sub(r"^\*\s*(.+?)\s*\.\s*Raw\s*\(\s*\)$", r"\1", expression)
         setting_pattern = (
             r"((?:settings|debugSettings|[A-Za-z_]\w*Settings)\."
             r"([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*))")
@@ -3744,9 +3746,10 @@ def _project_standard_controls(
                     function, control.start(), *identity, kind, args, choices=choices), 3)
                 add_choices(identity, choices)
 
-            # A feature may draw an owned component's setting itself, e.g. `&component.settings.Enabled`.
+            # A feature may draw an owned component's setting itself, e.g. `&component.settings.Enabled`, or
+            # `component.settings.Enabled` for a CS::Setting through a Util control.
             container = re.search(
-                r"&\s*([A-Za-z_]\w*)\s*\.\s*settings\s*\.\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*$",
+                r"(?:&|^)\s*([A-Za-z_]\w*)\s*\.\s*settings\s*\.\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*$",
                 args[storage_index])
             component_owner = (
                 (component_containers or {}).get(function.owner, {}).get(container.group(1))

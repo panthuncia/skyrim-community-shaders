@@ -23,6 +23,7 @@
 #include "State.h"
 #include "Util.h"
 #include "Utils/Format.h"
+#include "Utils/GameThread.h"
 #include "Utils/SwitchFile.h"
 #include "Utils/UI.h"
 #include "Vram/Debug.h"
@@ -667,16 +668,18 @@ void AdvancedSettingsRenderer::RenderDeveloperSection()
 
 void AdvancedSettingsRenderer::RunTestConditions()
 {
-	auto ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
-	if (!ui || ui->menuStack.empty() || !CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton()))
-		return;
-	RE::Console::ExecuteCommand("player.setav speedmult 1000");
-	RE::Console::ExecuteCommand("tgm");
-	RE::Console::ExecuteCommand("tcl");
-	EditorWindow::GetSingleton()->PauseTime();
-	RE::Console::ExecuteCommand("set gamehour to 12");
-	RE::Console::ExecuteCommand("coc whiterun");
-	RE::Console::ExecuteCommand("fw 81a");
+	GameThread::Post("Run test conditions", [] {
+		auto ui = CS_ENGINE_READ(UI, Other, RE::UI::GetSingleton());
+		if (!ui || ui->menuStack.empty() || !CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton()))
+			return;
+		RE::Console::ExecuteCommand("player.setav speedmult 1000");
+		RE::Console::ExecuteCommand("tgm");
+		RE::Console::ExecuteCommand("tcl");
+		EditorWindow::GetSingleton()->PauseTime();
+		RE::Console::ExecuteCommand("set gamehour to 12");
+		RE::Console::ExecuteCommand("coc whiterun");
+		RE::Console::ExecuteCommand("fw 81a");
+	});
 }
 
 const char* AdvancedSettingsRenderer::GetTestConditionsTooltip()

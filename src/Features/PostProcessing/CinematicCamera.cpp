@@ -200,6 +200,15 @@ namespace CinematicCamera
 	// Controller: serialization
 	/////////////////////////////////////////////////////////////////////////////////
 
+	Controller::Controller()
+	{
+		settings.Enabled.Bind(CS::SettingRegistry::Declare("PostProcessing.CinematicCamera.Enabled"));
+		settings.Filmback.Bind(CS::SettingRegistry::Declare("PostProcessing.CinematicCamera.Filmback"));
+		settings.Lens.Bind(CS::SettingRegistry::Declare("PostProcessing.CinematicCamera.Lens"));
+		settings.Focus.Bind(CS::SettingRegistry::Declare("PostProcessing.CinematicCamera.Focus"));
+		settings.Exposure.Bind(CS::SettingRegistry::Declare("PostProcessing.CinematicCamera.Exposure"));
+	}
+
 	void Controller::LoadSettings(json& o_json)
 	{
 		settings = o_json;
@@ -217,9 +226,17 @@ namespace CinematicCamera
 		ValidateSettings();
 	}
 
+	void Controller::RaiseEdits()
+	{
+		CS::SettingRegistry::RaiseAt(settings.Filmback.Raw());
+		CS::SettingRegistry::RaiseAt(settings.Lens.Raw());
+		CS::SettingRegistry::RaiseAt(settings.Focus.Raw());
+		CS::SettingRegistry::RaiseAt(settings.Exposure.Raw());
+	}
+
 	void Controller::ValidateSettings()
 	{
-		auto& fb = settings.Filmback;
+		auto fb = settings.Filmback.Get();
 		fb.Preset = std::clamp(fb.Preset, (int)FilmbackPreset::FullFrame, (int)FilmbackPreset::Custom);
 		fb.GateFit = std::clamp(fb.GateFit, (int)GateFit::Horizontal, (int)GateFit::Vertical);
 		// Non-custom presets own the sensor dimensions.
@@ -242,22 +259,25 @@ namespace CinematicCamera
 			fb.SensorHeightMM = 24.0f;
 			break;
 		}
+		settings.Filmback = fb;
 
-		auto& lens = settings.Lens;
+		auto lens = settings.Lens.Get();
 		lens.FocalLengthMM = std::clamp(lens.FocalLengthMM, 1.0f, 300.0f);
 		lens.FNumber = std::clamp(lens.FNumber, 0.7f, 32.0f);
 		lens.ApertureBladeCount = std::clamp(lens.ApertureBladeCount, 4, 10);
 		lens.ApertureBladeRotationDeg = std::clamp(lens.ApertureBladeRotationDeg, 0.0f, 360.0f);
 		lens.ApertureRoundness = std::clamp(lens.ApertureRoundness, 0.0f, 1.0f);
+		settings.Lens = lens;
 
-		auto& focus = settings.Focus;
+		auto focus = settings.Focus.Get();
 		focus.Mode = std::clamp(focus.Mode, (int)FocusMode::Manual, (int)FocusMode::Target);
 		focus.ManualDistanceM = std::clamp(focus.ManualDistanceM, 0.01f, 10000.0f);
 		focus.ScreenPointUV.x = std::clamp(focus.ScreenPointUV.x, 0.0f, 1.0f);
 		focus.ScreenPointUV.y = std::clamp(focus.ScreenPointUV.y, 0.0f, 1.0f);
 		focus.TransitionSpeed = std::clamp(focus.TransitionSpeed, 0.1f, 1.0f);
+		settings.Focus = focus;
 
-		auto& exp = settings.Exposure;
+		auto exp = settings.Exposure.Get();
 		exp.Mode = std::clamp(exp.Mode, (int)ExposureMode::AutoISO, (int)ExposureMode::Manual);
 		exp.ISO = std::clamp(exp.ISO, 25.0f, 12800.0f);
 		exp.MinISO = std::clamp(exp.MinISO, 25.0f, 12800.0f);
@@ -265,6 +285,7 @@ namespace CinematicCamera
 		exp.FrameRate = std::clamp(exp.FrameRate, 1.0f, 240.0f);
 		exp.ShutterAngleDeg = std::clamp(exp.ShutterAngleDeg, 1.0f, 360.0f);
 		exp.ExposureCompensationEV = std::clamp(exp.ExposureCompensationEV, -5.0f, 5.0f);
+		settings.Exposure = exp;
 	}
 
 	/////////////////////////////////////////////////////////////////////////////////
@@ -275,10 +296,10 @@ namespace CinematicCamera
 	{
 		PhysicalCameraState s{};
 
-		const auto& fb = settings.Filmback;
-		const auto& lens = settings.Lens;
-		const auto& focus = settings.Focus;
-		const auto& exp = settings.Exposure;
+		const auto fb = settings.Filmback.Adopted();
+		const auto lens = settings.Lens.Adopted();
+		const auto focus = settings.Focus.Adopted();
+		const auto exp = settings.Exposure.Adopted();
 
 		s.SensorWidthMM = fb.SensorWidthMM;
 		s.SensorHeightMM = fb.SensorHeightMM;
@@ -325,7 +346,8 @@ namespace CinematicCamera
 
 	void Controller::Update(bool runnable, float viewportAspect)
 	{
-		if (!settings.Enabled || !runnable) {
+		const bool enabled = settings.Enabled.Adopted();
+		if (!enabled || !runnable) {
 			// Conditional restore: only when nothing else has taken the value
 			// since our last write.
 			if (fovState == FovState::Applied || fovState == FovState::ExternallyModified) {
@@ -335,7 +357,7 @@ namespace CinematicCamera
 						worldFOV = restoreFOV;
 				}
 			}
-			fovState = settings.Enabled ? FovState::Suspended : FovState::Inactive;
+			fovState = enabled ? FovState::Suspended : FovState::Inactive;
 			stateValid = false;
 			return;
 		}
@@ -403,7 +425,7 @@ namespace CinematicCamera
 
 	const char* Controller::GetFilmbackPresetName() const
 	{
-		switch ((FilmbackPreset)settings.Filmback.Preset) {
+		switch ((FilmbackPreset)settings.Filmback.Get().Preset) {
 		case FilmbackPreset::Super35:
 			return T("feature.post_processing.cinematic_camera.preset_super_35", "Super 35");
 		case FilmbackPreset::APSC:
@@ -440,10 +462,12 @@ namespace CinematicCamera
 		if (!settings.Enabled)
 			return;
 
-		auto& fb = settings.Filmback;
-		auto& lens = settings.Lens;
-		auto& focus = settings.Focus;
-		auto& exp = settings.Exposure;
+		// The widgets edit the bound values in place (scene authoring binds their addresses); the edits are raised when the page ends.
+		const SKSE::stl::scope_exit raiseEdits([this]() noexcept { RaiseEdits(); });
+		auto& fb = *settings.Filmback.Raw();
+		auto& lens = *settings.Lens.Raw();
+		auto& focus = *settings.Focus.Raw();
+		auto& exp = *settings.Exposure.Raw();
 
 		constexpr auto logSliderFlags = ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic;
 		Util::SettingHint(T("feature.post_processing.cinematic_camera.slider_input_hint", "Ctrl+click a slider to enter an exact value."), false);

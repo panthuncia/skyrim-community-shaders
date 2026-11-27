@@ -3,6 +3,7 @@
 #include "../I18n/I18n.h"
 #include "../Menu.h"
 #include "../Utils/FileSystem.h"
+#include "../Utils/GameThread.h"
 #include "../Utils/UI.h"
 #include "Browser/BrowserWidgets.h"
 #include "EditorWindow.h"
@@ -73,34 +74,32 @@ static RE::BSShadowLight* AsShadowLight(RE::BSLight* light)
 	return (light && light->IsShadowLight()) ? static_cast<RE::BSShadowLight*>(light) : nullptr;
 }
 
-/** @brief Schedules a console command on the task thread, optionally against a selected reference. */
+/** @brief Schedules a console command on the game thread, optionally against a selected reference. */
 static void ScheduleConsoleCommand(std::string cmd, RE::TESObjectREFR* refr = nullptr)
 {
-	if (auto* taskInterface = SKSE::GetTaskInterface()) {
-		taskInterface->AddTask([cmd = std::move(cmd), refr]() {
-			// Console::SetSelectedRef needs a live Console (UI open only), so write the selected-ref global
-			// directly (RELOCATION_ID = Console::GetSelectedRefHandle); refr is passed as thisObj for handlers.
-			static REL::Relocation<RE::ObjectRefHandle*> selectedRef{
-				RELOCATION_ID(519394, AE_CHECK(SKSE::RUNTIME_SSE_1_6_1130, 405935, 504099))
-			};
+	GameThread::Post("Light editor: console script", [cmd = std::move(cmd), refr]() {
+		// Console::SetSelectedRef needs a live Console (UI open only), so write the selected-ref global
+		// directly (RELOCATION_ID = Console::GetSelectedRefHandle); refr is passed as thisObj for handlers.
+		static REL::Relocation<RE::ObjectRefHandle*> selectedRef{
+			RELOCATION_ID(519394, AE_CHECK(SKSE::RUNTIME_SSE_1_6_1130, 405935, 504099))
+		};
 
-			RE::ObjectRefHandle prevHandle;
-			if (refr) {
-				prevHandle = *selectedRef;
-				*selectedRef = RE::ObjectRefHandle(refr);
-			}
+		RE::ObjectRefHandle prevHandle;
+		if (refr) {
+			prevHandle = *selectedRef;
+			*selectedRef = RE::ObjectRefHandle(refr);
+		}
 
-			const auto factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::Script>();
-			if (auto* script = factory ? static_cast<RE::Script*>(factory->Create()) : nullptr) {
-				script->SetCommand(cmd);
-				script->CompileAndRun(refr);
-				delete script;
-			}
+		const auto factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::Script>();
+		if (auto* script = factory ? static_cast<RE::Script*>(factory->Create()) : nullptr) {
+			script->SetCommand(cmd);
+			script->CompileAndRun(refr);
+			delete script;
+		}
 
-			if (refr)
-				*selectedRef = prevHandle;
-		});
-	}
+		if (refr)
+			*selectedRef = prevHandle;
+	});
 }
 
 // Light Placer's JSON parser rejects nulls (e.g. a stray "whiteList": null), so strip every null
@@ -2200,7 +2199,9 @@ void LightEditor::ResetOverrides()
 void LightEditor::ApplyShadowDepthBias()
 {
 	if (auto* shadowLight = AsShadowLight(activeBsLight.get()))
-		shadowLight->GetRuntimeData().shadowBiasScale = shadowDepthBias;
+		GameThread::Post("Light editor: shadow bias", [light = RE::NiPointer<RE::BSLight>(shadowLight), bias = shadowDepthBias] {
+			static_cast<RE::BSShadowLight*>(light.get())->GetRuntimeData().shadowBiasScale = bias;
+		});
 }
 
 void LightEditor::UpdateSelectedLight(RE::TESObjectREFR* refr, RE::TESObjectLIGH* ligh, RE::NiLight* niLight, RE::BSLight* bsLight)
@@ -2289,7 +2290,10 @@ void LightEditor::UpdateSelectedLight(RE::TESObjectREFR* refr, RE::TESObjectLIGH
 	if (selected.isRef) {
 		const auto currentPos = refr->GetPosition();
 		if (currentPos != current.pos) {
-			refr->SetPosition(current.pos);
+			GameThread::Post("Light editor: move the reference", [handle = RE::ObjectRefHandle(refr), pos = current.pos] {
+				if (auto ref = handle.get())
+					ref->SetPosition(pos);
+			});
 			waitFrames = 1;
 		}
 		displayInfo.pos = current.pos;
@@ -2297,9 +2301,11 @@ void LightEditor::UpdateSelectedLight(RE::TESObjectREFR* refr, RE::TESObjectLIGH
 		if (niLight->parent) {
 			const auto currentPos = niLight->parent->local.translate;
 			if (currentPos != current.pos) {
-				niLight->parent->local.translate = current.pos;
-				RE::NiUpdateData updateData;
-				niLight->parent->Update(updateData);
+				GameThread::Post("Light editor: move the light", [parent = RE::NiPointer<RE::NiNode>(niLight->parent), pos = current.pos] {
+					parent->local.translate = pos;
+					RE::NiUpdateData updateData;
+					parent->Update(updateData);
+				});
 				waitFrames = 1;
 			}
 			displayInfo.pos = current.pos;
@@ -2311,7 +2317,7 @@ void LightEditor::UpdateSelectedLight(RE::TESObjectREFR* refr, RE::TESObjectLIGH
 	// Only non-LP lights apply TES-flag edits (mutating the base LIGH form + rebuilding the ref); LP flags
 	// go via JSON/reloadlp. Running this for LP lights would mutate the shared form and vanish the mesh.
 	if (!selected.isOther && !lpInfo.isLPLight && refr && tesFlags && current.tesFlags.underlying() != tesFlags->underlying()) {
-		*tesFlags = static_cast<RE::TES_LIGHT_FLAGS>(current.tesFlags.underlying());
+		GameThread::Post("Light editor: the base light's flags", [tesFlags, flags = static_cast<RE::TES_LIGHT_FLAGS>(current.tesFlags.underlying())] { *tesFlags = flags; });
 		RequestRefRefresh(refr);
 	}
 
@@ -2379,7 +2385,7 @@ void LightEditor::RestoreOriginal()
 		return;
 
 	auto* runtimeData = LLFCommon::RuntimeLightDataExt::Get(activeNiLight.get());
-	*runtimeData = original.data;
+	*runtimeData = original.data;  // CS's own per-light data, read by Light Limit Fix
 	// original.data is raw for LP bulbs (see RefreshLPJsonState); re-bake the owner-ref scale that Light Placer
 	// applies, symmetric with ApplyOverrides, so deselecting restores the live scaled state rather than the raw one.
 	const float scale = GetLPRefScale();
@@ -2388,22 +2394,29 @@ void LightEditor::RestoreOriginal()
 	runtimeData->radius = original.data.radius * scale;
 
 	if (activeIsRef && activeRefr) {
-		activeRefr->SetPosition(original.pos);
+		GameThread::Post("Light editor: put the reference back", [handle = RE::ObjectRefHandle(activeRefr), pos = original.pos] {
+			if (auto ref = handle.get())
+				ref->SetPosition(pos);
+		});
 	} else if (activeNiLight->parent) {
-		activeNiLight->parent->local.translate = original.pos;
-		RE::NiUpdateData updateData;
-		activeNiLight->parent->Update(updateData);
+		GameThread::Post("Light editor: put the light back", [parent = RE::NiPointer<RE::NiNode>(activeNiLight->parent), pos = original.pos] {
+			parent->local.translate = pos;
+			RE::NiUpdateData updateData;
+			parent->Update(updateData);
+		});
 	}
 
 	// Mirror the non-LP gate in UpdateSelectedLight: only non-LP lights ever mutated the base form's
 	// flags, so only they need the revert + rebuild here.
 	if (!lpInfo.isLPLight && activeLigh && activeRefr && current.tesFlags.underlying() != original.tesFlags.underlying()) {
-		activeLigh->data.flags = static_cast<RE::TES_LIGHT_FLAGS>(original.tesFlags.underlying());
+		GameThread::Post("Light editor: restore the base light's flags", [ligh = activeLigh, flags = static_cast<RE::TES_LIGHT_FLAGS>(original.tesFlags.underlying())] { ligh->data.flags = flags; });
 		RequestRefRefresh(activeRefr);
 	}
 
 	if (auto* shadowLight = AsShadowLight(activeBsLight.get()))
-		shadowLight->GetRuntimeData().shadowBiasScale = originalShadowDepthBias;
+		GameThread::Post("Light editor: restore the shadow bias", [light = RE::NiPointer<RE::BSLight>(shadowLight), bias = originalShadowDepthBias] {
+			static_cast<RE::BSShadowLight*>(light.get())->GetRuntimeData().shadowBiasScale = bias;
+		});
 
 	activeNiLight.reset();
 	activeBsLight.reset();
@@ -2419,11 +2432,15 @@ void LightEditor::RequestRefRefresh(RE::TESObjectREFR* refr)
 	if (!refr)
 		return;
 	// Flush a still-pending refresh on a different reference so it doesn't stay disabled.
-	if (pendingRefreshFrames > 0) {
-		if (auto prev = pendingRefreshRefr.get(); prev && prev.get() != refr)
-			prev->Enable(false);
-	}
-	refr->Disable();
+	if (pendingRefreshFrames > 0 && pendingRefreshRefr.get().get() != refr)
+		GameThread::Post("Light editor: enable the last refreshed reference", [handle = pendingRefreshRefr] {
+			if (auto prev = handle.get())
+				prev->Enable(false);
+		});
+	GameThread::Post("Light editor: disable the reference to rebuild it", [handle = RE::ObjectRefHandle(refr)] {
+		if (auto ref = handle.get())
+			ref->Disable();
+	});
 	pendingRefreshRefr = RE::ObjectRefHandle(refr);
 	pendingRefreshFrames = kRefreshEnableDelay;
 	// Hold off resampling until after the deferred Enable so we don't read a mid-rebuild reference.
@@ -2435,8 +2452,10 @@ void LightEditor::UpdateRefRefresh()
 	if (pendingRefreshFrames <= 0)
 		return;
 	if (--pendingRefreshFrames == 0) {
-		if (auto refr = pendingRefreshRefr.get())
-			refr->Enable(false);
+		GameThread::Post("Light editor: enable the rebuilt reference", [handle = pendingRefreshRefr] {
+			if (auto refr = handle.get())
+				refr->Enable(false);
+		});
 		pendingRefreshRefr = {};
 	}
 }

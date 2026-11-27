@@ -57,6 +57,8 @@ DoF::DoF()
 	settings.GatherQuality.Bind(CS::SettingRegistry::Declare("PostProcessing.DoF.GatherQuality"));
 	settings.BokehMode.Bind(CS::SettingRegistry::Declare("PostProcessing.DoF.BokehMode"));
 	settings.HighlightShape.Bind(CS::SettingRegistry::Declare("PostProcessing.DoF.HighlightShape"));
+	settings.targetFocus.Bind(CS::SettingRegistry::Declare("PostProcessing.DoF.targetFocus"));
+	settings.consoleSelection.Bind(CS::SettingRegistry::Declare("PostProcessing.DoF.consoleSelection"));
 }
 
 void DoF::DrawSettings()
@@ -112,14 +114,14 @@ void DoF::DrawSettings()
 	}
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T("feature.post_processing.do_f.transition_speed_desc", "How quickly focus follows a new distance. 1 snaps immediately."));
-	ImGui::Checkbox(T("feature.post_processing.do_f.target_focus", "Target Focus"), &settings.targetFocus);
+	Util::Checkbox(T("feature.post_processing.do_f.target_focus", "Target Focus"), settings.targetFocus);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T("feature.post_processing.do_f.target_focus_desc", "Focus on the dialogue speaker or True Directional Movement lock-on target, using its own focal length."));
 	if (settings.targetFocus) {
 		ImGui::SliderFloat(T("feature.post_processing.do_f.target_focus_focal_length", "Target Focus Focal Length"), &settings.targetFocusFocalLength, 1.0f, 300.0f, "%.1f mm");
 	}
 	ImGui::EndDisabled();
-	ImGui::Checkbox(T("feature.post_processing.do_f.console_selection", "Console Selection"), &settings.consoleSelection);
+	Util::Checkbox(T("feature.post_processing.do_f.console_selection", "Console Selection"), settings.consoleSelection);
 	if (auto _tt = Util::HoverTooltipWrapper())
 		ImGui::TextUnformatted(T("feature.post_processing.do_f.console_selection_desc", "With Target Focus, also focus on the reference selected in the console."));
 	if (settings.consoleSelection && currentRef != 0) {

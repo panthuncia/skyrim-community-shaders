@@ -1,0 +1,149 @@
+# The Community Shaders menu open over the world, and actions taken as its widgets and the CS Editor's take them, inside the
+# ImGui frame (cs-ui): a setting Sky Sync reads on the game thread, pause, the game hour, a weather lock and the timescale. Each
+# engine write goes through the game-thread queue; cs-ui-expect checks the game state a few frames later and that no write from
+# the ImGui frame went around the queue. Compose it: native-vulkan+menu-ui, guest+menu-ui.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "open"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "cs-ui"
+arg = "setting SkySync.MinShadowElevation=20.0"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "cs-ui-expect"
+arg = "setting SkySync.MinShadowElevation=20.0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-ui"
+arg = "pause"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "cs-ui-expect"
+arg = "paused"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-ui"
+arg = "hour=20"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "cs-ui-expect"
+arg = "hour=20"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-ui"
+arg = "lock=81a"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "cs-ui-expect"
+arg = "lock=81a"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "menu-dusk"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-ui"
+arg = "unlock"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "cs-ui-expect"
+arg = "unlocked"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-ui"
+arg = "resume"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "cs-ui-expect"
+arg = "running"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-ui"
+arg = "timescale=20"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "cs-ui-expect"
+arg = "timescale=20"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-ui"
+arg = "setting SkySync.MinShadowElevation=7.0"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "cs-ui-expect"
+arg = "ui-writes=0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "close"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "closed"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "menu-dusk", "closed"]

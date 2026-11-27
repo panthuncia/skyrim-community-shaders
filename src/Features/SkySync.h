@@ -6,6 +6,7 @@
 
 #include "Snapshot/FrameSnapshot.h"
 #include "Utils/Moon.h"
+#include "Utils/Setting.h"
 
 struct PhysicalSky;
 
@@ -36,28 +37,32 @@ public:
 				T("feature.sky_sync.key_feature_6", "Fixes the sun appearing higher on the horizon when the player gains altitude") } };
 	};
 
+	// The scalars are bound: Sky Sync's work runs on the game thread (Sky::Update) and reads them adopted. The worldspace list
+	// reaches the game side through the game-thread queue (PublishDisabledWorldspaces).
 	struct Settings
 	{
-		bool Enabled = true;
-		bool UseAlternateSunPath = false;
-		int32_t MoonLightSource = 0;
-		int32_t SunPath = 0;
-		float CustomAngle = -35.0f;
-		float MinShadowElevation = 7.0f;
-		float ShadowTransitionDuration = 300.0f;
-		bool DimSunlightUnderHorizon = true;
-		bool DimVolumetricLighting = true;
-		float HorizonFadeHours = 0.7f;
-		float HorizonFadeElevation = 7.0f;
-		float HorizonElevation = -1.0f;
-		float NewMoonIntensity = 0.05f;
-		float CrescentMoonIntensity = 0.25f;
-		float FullMoonIntensity = 1.0f;
+		CS::Setting<bool> Enabled = true;
+		CS::Setting<bool> UseAlternateSunPath = false;
+		CS::Setting<int32_t> MoonLightSource = 0;
+		CS::Setting<int32_t> SunPath = 0;
+		CS::Setting<float> CustomAngle = -35.0f;
+		CS::Setting<float> MinShadowElevation = 7.0f;
+		CS::Setting<float> ShadowTransitionDuration = 300.0f;
+		CS::Setting<bool> DimSunlightUnderHorizon = true;
+		CS::Setting<bool> DimVolumetricLighting = true;
+		CS::Setting<float> HorizonFadeHours = 0.7f;
+		CS::Setting<float> HorizonFadeElevation = 7.0f;
+		CS::Setting<float> HorizonElevation = -1.0f;
+		CS::Setting<float> NewMoonIntensity = 0.05f;
+		CS::Setting<float> CrescentMoonIntensity = 0.25f;
+		CS::Setting<float> FullMoonIntensity = 1.0f;
 		// Editor IDs; the defaults are realms whose weathers keep the same light around the clock
 		std::vector<std::string> DisabledWorldspaces = { "Blackreach", "AlftandWorld", "Sovngarde", "DLC01SoulCairn", "DLC01Boneyard", "DLC2ApocryphaWorld" };
 	};
 
 	Settings settings;
+
+	SkySync();
 
 	/** @brief Draws the ImGui settings panel for Sky Sync configuration. */
 	virtual void DrawSettings() override;
@@ -243,7 +248,7 @@ private:
 	RE::TESWorldSpace* currentCellWorldspace = nullptr;
 	bool worldspaceDisabled = false;  // currentCellWorldspace is in DisabledWorldspaces
 	bool active = false;              // the last Update steered the light, so the colour hooks may apply its state
-	float sunAngle = 90.0f;
+	std::vector<std::string> gameDisabledWorldspaces;  // the game thread's copy of settings.DisabledWorldspaces
 	float currentSkyRotation = D3D11_FLOAT32_MAX;
 	bool skyRotationApplied = false;  // survives the game-load cache reset until the root is restored
 	float lastGameHour = -1.0f;
@@ -283,7 +288,11 @@ private:
 	float GetHorizonDim(float heightAboveHorizon) const;
 
 	/** @brief Fraction of the moonlight fade duration that the given hours cover; 1 when the duration is zero. */
-	float GetMoonlightFadeProgress(float hours) const { return settings.HorizonFadeHours > 0.0f ? hours / settings.HorizonFadeHours : 1.0f; }
+	float GetMoonlightFadeProgress(float hours) const
+	{
+		const float fadeHours = settings.HorizonFadeHours.Adopted();
+		return fadeHours > 0.0f ? hours / fadeHours : 1.0f;
+	}
 
 	/** @brief Ramps moonlightFade in while the sun is below the horizon and out otherwise, never above twilightCap. */
 	void UpdateMoonlightFade(float advanceHours, bool immediate);
@@ -300,16 +309,20 @@ private:
 	/** @brief Sky-local sun direction for the active path at any hour, with the night arc below the horizon. */
 	RE::NiPoint3 GetSunDirectionAtHour(const RE::TESClimate::Timing& timing, float hour) const;
 
-	void SetSunAngle();
+	/** @brief The alternate path's tilt in degrees, from the adopted sun path settings. */
+	float GetSunAngle() const;
 
 	void SetSkyRotation(const RE::Sky* sky, RE::TESObjectCELL* cell);
 	void ResetSkyRotation(const RE::Sky* sky);
 
-	/** @brief Whether the worldspace's editor ID is in the disabled list. */
-	bool IsWorldspaceDisabled(const RE::TESWorldSpace* worldspace) const;
+	/** @brief Whether the worldspace's editor ID is in a_list. */
+	static bool IsWorldspaceDisabled(const std::vector<std::string>& a_list, const RE::TESWorldSpace* worldspace);
 
-	/** @brief Re-evaluates worldspaceDisabled; call whenever the current worldspace or the disabled list changes. */
-	void UpdateWorldspaceDisabled() { worldspaceDisabled = IsWorldspaceDisabled(currentCellWorldspace); }
+	/** @brief Game thread. Re-evaluates worldspaceDisabled; call whenever the current worldspace or the disabled list changes. */
+	void UpdateWorldspaceDisabled() { worldspaceDisabled = IsWorldspaceDisabled(gameDisabledWorldspaces, currentCellWorldspace); }
+
+	/** @brief Any thread. Hands a copy of settings.DisabledWorldspaces to the game thread, through the game-thread queue. */
+	void PublishDisabledWorldspaces();
 
 	/** @brief Hours at which the active sun path crosses the horizon, as { sunrise, sunset }. */
 	std::pair<float, float> GetSunHorizonHours(const RE::TESClimate::Timing& timing) const;

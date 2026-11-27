@@ -122,7 +122,7 @@ bool InteriorSun::CellHasSun(const RE::TESObjectCELL* cell)
 bool InteriorSun::IsInteriorWithSun(bool a_interior, bool a_cellHasSun)
 {
 	auto& physicalSky = globals::features::physicalSky;
-	bool physicalSkyInteriorOverride = physicalSky.IsActive() && physicalSky.settings.forceEnableAllInteriorCells;
+	bool physicalSkyInteriorOverride = physicalSky.IsActive() && physicalSky.settings.forceEnableAllInteriorCells.Adopted();
 	return a_interior && (a_cellHasSun || physicalSkyInteriorOverride);
 }
 

@@ -1,4 +1,5 @@
 #include "SceneSettingsManager.h"
+#include "CSEditor/EditorWindow.h"
 #include "Snapshot/EngineReads.h"
 
 #include "Feature.h"
@@ -12,6 +13,7 @@
 #include "Utils/FileSystem.h"
 #include "Utils/Format.h"
 #include "Utils/Game.h"
+#include "Utils/GameThread.h"
 #include "Utils/SettingsCatalog.h"
 
 #include <algorithm>
@@ -311,13 +313,13 @@ namespace
 float SceneSettingsManager::GetCurrentGameHour()
 {
 	// Prefer calendar (ground truth), which the Weather Editor slider writes to.
-	// sky->currentGameHour may lag when timeScale is 0 (time paused).
-	auto calendar = Util::Climate::GetCalendar();
+	// sky->currentGameHour may lag when timeScale is 0 (time paused). Both as the game thread published them.
+	const auto view = EditorWindow::PublishedGameView();
 	float hour = 12.0f;
-	if (calendar && calendar->gameHour)
-		hour = calendar->gameHour->value;
-	else if (auto sky = CS_ENGINE_READ(Sky, Other, globals::game::sky))
-		hour = sky->currentGameHour;
+	if (view.hasCalendar)
+		hour = view.gameHour;
+	else if (view.hasSky)
+		hour = view.skyGameHour;
 	if (!std::isfinite(hour))
 		hour = 12.0f;
 
@@ -332,9 +334,11 @@ void SceneSettingsManager::SetGameHour(float hour)
 {
 	if (!std::isfinite(hour))
 		return;
-	auto calendar = Util::Climate::GetCalendar();
-	if (calendar && calendar->gameHour)
-		calendar->gameHour->value = std::clamp(hour, 0.0f, 24.0f);
+	GameThread::Run("Scene settings: set the game hour", [hour] {
+		auto calendar = Util::Climate::GetCalendar();
+		if (calendar && calendar->gameHour)
+			calendar->gameHour->value = std::clamp(hour, 0.0f, 24.0f);
+	});
 }
 
 SceneSettingsManager::PeriodStartHours SceneSettingsManager::GetPeriodStartHours()

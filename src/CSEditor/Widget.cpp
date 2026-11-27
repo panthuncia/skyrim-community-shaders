@@ -16,6 +16,7 @@
 #include "Menu/MenuIcons.h"
 #include "SaveManager.h"
 #include "Util.h"
+#include "Utils/GameThread.h"
 #include "Utils/UI.h"
 #include "Utils/UIAnim.h"
 #include "imgui_internal.h"
@@ -125,7 +126,7 @@ void Widget::Delete()
 
 		// The active preset's file, when it has one, takes over from the deleted user file.
 		Load(false);
-		ApplyChanges();
+		RequestApply();
 
 		EditorWindow::GetSingleton()->OnWidgetJsonAttachmentChanged(this);
 
@@ -326,23 +327,32 @@ bool Widget::BeginWidgetWindow(bool showApply, bool showSaveLoadRevert, bool sho
 	return result;
 }
 
+void Widget::RequestApply()
+{
+	GameThread::Run("CS Editor: apply a widget to its form", [this] { ApplyChanges(); });
+}
+
 void Widget::ForceWeatherReinit(RE::TESWeather* weather)
 {
-	auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
-	if (weather && sky && sky->currentWeather == weather) {
-		Util::ForceWeather(sky, weather, true);
-		// An engaged lock owns the override slot; releasing it flickers the sky until the lock reasserts.
-		if (EditorWindow::GetSingleton()->IsWeatherLocked())
-			EditorWindow::MaintainWeatherLock();
-		else
-			sky->ReleaseWeatherOverride();
-	}
+	GameThread::Run("CS Editor: reinitialise a weather", [weather] {
+		auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
+		if (weather && sky && sky->currentWeather == weather) {
+			Util::ForceWeather(sky, weather, true);
+			// An engaged lock owns the override slot; releasing it flickers the sky until the lock reasserts.
+			if (EditorWindow::GetSingleton()->IsWeatherLocked())
+				EditorWindow::MaintainWeatherLock();
+			else
+				sky->ReleaseWeatherOverride();
+		}
+	});
 }
 
 void Widget::ForceCurrentWeatherReinit()
 {
-	if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky))
-		ForceWeatherReinit(sky->currentWeather);
+	GameThread::Run("CS Editor: reinitialise the current weather", [] {
+		if (auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky))
+			ForceWeatherReinit(sky->currentWeather);
+	});
 }
 
 namespace
@@ -440,7 +450,7 @@ bool Widget::DrawTitleBarActions(bool showApply, bool showSaveLoadRevert, bool s
 	// Apply
 	if (showApply && (!editorWindow->settings.autoApplyChanges || RequiresManualApply())) {
 		const char* tooltip = T(TKEY("apply_changes"), "Apply changes to the game");
-		auto onClick = [this]() { ApplyChanges(); };
+		auto onClick = [this]() { RequestApply(); };
 		if (useIcons && Util::IconLoader::GetIcons().applyToGame.texture) {
 			addIcon("##TitleApply", Util::IconLoader::GetIcons().applyToGame.texture, tooltip, onClick);
 		} else {
@@ -771,11 +781,11 @@ void Widget::DrawWidgetHeader(const char* searchId, bool showApply, bool showSav
 		// Apply button
 		if (inlineActions && showApply && (!editorWindow->settings.autoApplyChanges || RequiresManualApply())) {
 			if (Util::IconLoader::GetIcons().applyToGame.texture) {
-				iconButton("_Apply", Util::IconLoader::GetIcons().applyToGame.texture, T(TKEY("apply_changes"), "Apply changes to the game"), [&]() { ApplyChanges(); });
+				iconButton("_Apply", Util::IconLoader::GetIcons().applyToGame.texture, T(TKEY("apply_changes"), "Apply changes to the game"), [&]() { RequestApply(); });
 			} else {
 				ImGui::SameLine();
 				if (Util::Button(T(TKEY("apply"), "Apply")))
-					ApplyChanges();
+					RequestApply();
 				Util::AddTooltip(T(TKEY("apply_changes"), "Apply changes to the game"));
 			}
 		}
@@ -838,7 +848,7 @@ void Widget::DrawWidgetHeader(const char* searchId, bool showApply, bool showSav
 			if (inlineActions && showApply && (!editorWindow->settings.autoApplyChanges || RequiresManualApply())) {
 				ImGui::SameLine();
 				if (Util::SuccessButton(T(TKEY("apply"), "Apply")))
-					ApplyChanges();
+					RequestApply();
 				Util::AddTooltip(T(TKEY("apply_changes"), "Apply changes to the game"));
 			}
 
@@ -1021,7 +1031,7 @@ bool Widget::MatchesSearch(const std::string& settingId) const
 void Widget::AutoApply(bool changed)
 {
 	if (changed && EditorWindow::GetSingleton()->settings.autoApplyChanges)
-		ApplyChanges();
+		RequestApply();
 }
 
 bool Widget::MatchesAnySearch(std::initializer_list<const char*> settingIds) const
