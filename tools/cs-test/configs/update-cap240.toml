@@ -1,0 +1,54 @@
+# The update-rate cap at 240 game updates a second (Advanced, Update Rate Cap; Snapshot::PaceGameUpdate): the game runs faster than the
+# render side (render-thread roadmap phase 7, item 8). The autoloaded save: a shot once settled, one three updates after a turn and one
+# once that settled, then exit. Step frames count game updates. Read the [Perf] lines for "rendered" against "game ... updates/s".
+# Until the render thread runs, the cap needs snapshot.update_rate_cap (CS_UPDATE_RATE_CAP=1) and the engine's Present still paces the
+# render side to the game. Compose it: native-vulkan+update-cap240.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[snapshot]
+update_rate_cap = true
+
+[saved_settings.Advanced]
+"Update Rate Cap" = 240
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle z 90"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "shot"
+arg = "turn"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "settled"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "turn", "settled"]
