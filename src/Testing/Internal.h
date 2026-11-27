@@ -128,6 +128,12 @@ namespace Testing
 	/** @brief Lifecycle: the phase timeouts, from the status thread and from Present. */
 	void CheckPhaseTimeouts();
 
+	/**
+	 * @brief Lifecycle: native, and the render thread did not run at any frame since the last world-ready (the world was drawn on
+	 * Main::DrawFrame, for example under a menu that stayed open). Caller holds the run's lock.
+	 */
+	bool WorldNeverRouted();
+
 	/** @brief Steps: per game update, and per Present outside a game update. a_frame is the step clock (game frames). */
 	void RunSteps(std::uint32_t a_frame);
 

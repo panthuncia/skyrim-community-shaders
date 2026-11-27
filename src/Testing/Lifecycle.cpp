@@ -1,5 +1,7 @@
 // The load milestones and phases, and the phase timeouts.
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderThread.h"
 #include "Snapshot/EngineReads.h"
 #include "Testing/Internal.h"
 #include "Testing/SwitchRegistry.h"
@@ -20,6 +22,7 @@ namespace Testing
 		bool loadingScreenSeen = false;  // this load showed the loading menu
 		bool heldFrameSeen = false;      // this load drew a world frame under the kept loading menu
 		bool worldReady = false;
+		bool neverRouted = false;  // native: the render thread has not run since world-ready
 		std::uint32_t readyFrames = 0;
 		std::uint32_t lifecycleFrame = 0;  // the step clock at the previous UpdateLifecycle
 		std::uint64_t loadingScreenCalls = 0;  // SetLoadingScreenActive calls seen at the previous UpdateLifecycle
@@ -66,6 +69,7 @@ namespace Testing
 			loadingScreenSeen = false;
 			heldFrameSeen = false;
 			worldReady = false;
+			neverRouted = false;
 			readyFrames = 0;
 			loadTimerStart = Now();
 			RecordMilestone("load-start", a_frame);
@@ -184,6 +188,7 @@ namespace Testing
 				inLoad = false;
 				loadTimerStart = -1.0;
 				RecordMilestone("world-ready", a_frame);
+				neverRouted = RenderGraph::Engine::Native::Active();
 			}
 		} else {
 			readyFrames = 0;
@@ -191,7 +196,14 @@ namespace Testing
 			if (worldReady && (loading || mainMenu))
 				worldReady = false;
 		}
+		if (neverRouted && RenderGraph::Engine::Native::RenderThread::Running())
+			neverRouted = false;
 		UpdatePhase(run);
+	}
+
+	bool WorldNeverRouted()
+	{
+		return worldReady && neverRouted;
 	}
 
 	void CheckPhaseTimeouts()
