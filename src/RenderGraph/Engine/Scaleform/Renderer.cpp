@@ -1623,7 +1623,9 @@ namespace RenderGraph::Engine::Scaleform
 				std::uint32_t color;
 			};
 			static_assert(sizeof(GlyphVertex) == 20);
-			std::vector<GlyphVertex> vertices;
+			// The capture thread's scratch: its capacity carries over between calls.
+			thread_local std::vector<GlyphVertex> vertices;
+			vertices.clear();
 			vertices.reserve(static_cast<std::size_t>(a_count) * 6);
 			for (std::int32_t i = 0; i < a_count; ++i) {
 				const BitmapDesc& b = a_bitmaps[i];
@@ -1920,6 +1922,8 @@ namespace RenderGraph::Engine::Scaleform
 			float worldValues[16]{};
 			// A repeated render's stream (cadence repeat): GFx's calls are not recorded, and this stream is replayed in their place.
 			std::shared_ptr<const UiStream> repeat;
+			// The last finished stream's sizes: a new stream reserves them, so it does not grow from empty every frame.
+			std::size_t commands = 0, payload = 0, textures = 0;
 		};
 
 		Recorder& Rec()
@@ -1980,6 +1984,9 @@ namespace RenderGraph::Engine::Scaleform
 			auto& recorder = Rec();
 			if (!recorder.stream) {
 				recorder.stream = std::make_shared<UiStream>();
+				recorder.stream->commands.reserve(recorder.commands);
+				recorder.stream->payload.reserve(recorder.payload);
+				recorder.stream->textures.reserve(recorder.textures);
 				recorder.stream->sequence = ++recorder.sequence;
 				recorder.stream->header = recorder.next;
 				UiResources::OpenStream(recorder.stream->sequence);
@@ -1998,6 +2005,9 @@ namespace RenderGraph::Engine::Scaleform
 			if (!recorder.stream)
 				return nullptr;
 			recorder.stream->named.clear();
+			recorder.commands = recorder.stream->commands.size();
+			recorder.payload = recorder.stream->payload.size();
+			recorder.textures = recorder.stream->textures.size();
 			recorder.next = recorder.stream->EndState();
 			UiResources::CloseStream(recorder.stream->sequence);
 			std::shared_ptr<const UiStream> finished = std::move(recorder.stream);

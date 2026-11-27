@@ -1949,7 +1949,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			::RenderGraph::Fatal("local map", "kLOCAL_MAP_SWAP's clear was not taken");
 
 		// The land and objects batch, then its water (the post-resolve group after them, FinishAccumulatingPostResolveDepth).
-		std::vector<RE::BSGeometry*> visible;
+		thread_local std::vector<RE::BSGeometry*> visible;
 		LocalMapVisible(scene.roots, camera, visible);
 		auto run = std::make_shared<Run>();
 		run->view = View::LocalMap;

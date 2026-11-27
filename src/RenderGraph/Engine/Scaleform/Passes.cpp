@@ -130,6 +130,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			winrt::com_ptr<ID3D11ShaderResourceView> view;  // keeps the view's identity while it is declared
 			FrameAnchors::Texture texture;
 			std::uint64_t lastCommit = 0;
+			bool engineTarget = false;  // an engine render target's view, read by its declared index only
 		};
 
 		using Reads = std::vector<FrameAnchors::Texture>;
@@ -629,20 +630,23 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 		/**
 		 * @brief The declared read for a display texture, or null when it is read untracked. A new tracked texture is added and the
-		 * client registers again after the run, so the next build declares it.
+		 * client registers again after the run, so the next build declares it. a_engineTarget tells an engine render target's view.
 		 */
-		const void* DeclaredRead(PathState& a_state, ID3D11ShaderResourceView* a_view, bool& a_new)
+		const void* DeclaredRead(PathState& a_state, ID3D11ShaderResourceView* a_view, bool& a_new, bool& a_engineTarget)
 		{
 			a_new = false;
+			a_engineTarget = false;
 			if (!a_view || !Engine::Native::OwnedResources())
 				return nullptr;
 			for (auto& read : a_state.reads)
 				if (read.view.get() == a_view) {
 					read.lastCommit = a_state.commits;
+					a_engineTarget = read.engineTarget;
 					return read.texture.Key();
 				}
 			FrameAnchors::Texture texture;
-			if (const auto target = EngineTargetOfView(a_view); target >= 0) {
+			const auto target = EngineTargetOfView(a_view);
+			if (target >= 0) {
 				// An engine target the UI stage draws (the local map's image): read through the graph, by its declared index only.
 				texture = FrameAnchors::EngineTexture(FrameAnchors::Colour(static_cast<std::uint32_t>(target)));
 			} else if (auto promoted = Engine::Native::PromotedTextureOf(a_view)) {
@@ -669,6 +673,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			read.view.copy_from(a_view);
 			read.texture = texture;
 			read.lastCommit = a_state.commits;
+			read.engineTarget = target >= 0;
+			a_engineTarget = read.engineTarget;
 			a_state.reads.push_back(std::move(read));
 			a_state.readsChanged = true;
 			a_new = true;
@@ -717,14 +723,14 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::vector<const void*> reads(display.textures.size(), nullptr);
 			for (std::size_t i = 0; i < display.textures.size(); ++i) {
 				auto* view = display.textures[i];
-				bool added = false;
-				reads[i] = DeclaredRead(state, view, added);
+				bool added = false, engineTarget = false;
+				reads[i] = DeclaredRead(state, view, added, engineTarget);
 				// Until a build declares the read, the raw index is the fallback, and the validator counts it as declared.
 				std::optional<RenderGraph::UndeclaredAccess::DeclaredViewScope> declared;
 				if (reads[i] && !added)
 					declared.emplace();
 				// An engine target has no binding of its own: the recording puts the declared read's index in its place.
-				if (reads[i] && EngineTargetOfView(view) >= 0) {
+				if (reads[i] && engineTarget) {
 					declared.reset();
 					if (added) {
 						state.commitReason = "a new engine target read (drawn once the UI stage's build declares it)";

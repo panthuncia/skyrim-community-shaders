@@ -140,7 +140,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		};
 
 		// The process's own mode: every object outside hidden subtrees, in scene order.
-		std::vector<RE::NiAVObject*> level, next;
+		// Scratch whose capacity carries over between renders (the render owner's).
+		thread_local std::vector<RE::NiAVObject*> level, next;
+		next.clear();
 		for (const auto& root : a_roots) {
 			if (!root.object || root.cell || hidden(root.object))
 				continue;
@@ -168,8 +170,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			else if (auto* node = root.object->AsNode())
 				children(*node, level);
 		}
-		std::vector<float> x, y, z, r;
-		std::vector<std::uint8_t> pass;
+		thread_local std::vector<float> x, y, z, r;
+		thread_local std::vector<std::uint8_t> pass;
 		while (!level.empty()) {
 			const auto count = static_cast<std::uint32_t>(level.size());
 			x.resize(count);
