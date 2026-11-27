@@ -30,45 +30,69 @@
     "accepted": "2026-11-26"
   },
   "native-d3d12-quick/start": {
-    "sha256": "80f874a1ef6c7c057871f2b65462cdca1f84900290c5bfec46fc50feccf9822d",
+    "sha256": "48c2afe822ec47e8a6a5ed27b8d80694828f45401b9251a3dfbbcfe04fd67bc8",
     "size": "1920x1080",
-    "run": "1126-145949-dir-native-d3d12-quick-dir-s3fg-native-d3d12-quick",
+    "run": "1126-185705-dir-native-d3d12-quick-dir-s7dk-native-d3d12-quick",
     "accepted": "2026-11-26"
   },
   "native-vulkan+facegen/racemenu": {
-    "sha256": "6f8e67c8873ed7f36228a88c7ff54b9ad2b13cf3c1789493d8f4d30709428bc5",
+    "sha256": "03f3a6882f74601096fb5616094330e1f8c9c4422f97e4524d79eeba058fbd3c",
     "size": "1920x1080",
-    "run": "1126-142517-s7-facegen-native-vulkan-facegen-s7-facegen-a-nvk-facegen",
+    "run": "1126-185749-dir-native-vulkan-facegen-dir-s7dk-native-vulkan+facegen",
+    "accepted": "2026-11-26"
+  },
+  "native-vulkan+menu-scenes/inventory-item": {
+    "sha256": "57629d2473c8099440bc3b217291c3150a269f0b8362387228f8afe0351b0074",
+    "size": "1920x1080",
+    "run": "1126-185845-dir-native-vulkan-menu-scenes-dir-s7dk-native-vulkan+menu-scenes",
+    "accepted": "2026-11-26"
+  },
+  "native-vulkan+menu-scenes/journal": {
+    "sha256": "1f9e0b7352fd149596f02b1c8cf07b2c1039bed131309f20ff2f335a221bef30",
+    "size": "1920x1080",
+    "run": "1126-185845-dir-native-vulkan-menu-scenes-dir-s7dk-native-vulkan+menu-scenes",
+    "accepted": "2026-11-26"
+  },
+  "native-vulkan+menu-scenes/stats": {
+    "sha256": "c861f942fe8a5e8ec8e44171977efe961268f827cb544d8937739d30e15e4aee",
+    "size": "1920x1080",
+    "run": "1126-185845-dir-native-vulkan-menu-scenes-dir-s7dk-native-vulkan+menu-scenes",
+    "accepted": "2026-11-26"
+  },
+  "native-vulkan+menu-scenes/world": {
+    "sha256": "f854e1602e0aafc7570c1d8b41ac256ad846deef69dc409d15c6cd04e6780b15",
+    "size": "1920x1080",
+    "run": "1126-185845-dir-native-vulkan-menu-scenes-dir-s7dk-native-vulkan+menu-scenes",
     "accepted": "2026-11-26"
   },
   "native-vulkan+native-interior/dragonsreach": {
-    "sha256": "90bcf03f4a0ccfc6a949edfd59b4ae7355b53a6d6e12bf3929ad0cc47f0e88a3",
+    "sha256": "eae28e60584c0625a8af1dcc42fd5b6ff968f6b9f25f38883881175de000882c",
     "size": "1920x1080",
-    "run": "1126-150517-dir-native-vulkan-native-interior-dir-s3fg-native-vulkan+native-interior",
+    "run": "1126-185746-dir-native-vulkan-native-interior-dir-s7dk-native-vulkan+native-interior",
     "accepted": "2026-11-26"
   },
   "native-vulkan+native-interior/dragonsreach2": {
-    "sha256": "57b3cf2c65d0cec23931717ad904a80622654b5bd30872efc7e7feb57bd71249",
+    "sha256": "59f692d878b44be23773930f8aedec607c70fea9a03b2e5c1807eab44c53933e",
     "size": "1920x1080",
-    "run": "1126-150517-dir-native-vulkan-native-interior-dir-s3fg-native-vulkan+native-interior",
+    "run": "1126-185746-dir-native-vulkan-native-interior-dir-s7dk-native-vulkan+native-interior",
     "accepted": "2026-11-26"
   },
   "native-vulkan+native-interior/vl-custom": {
-    "sha256": "78e3deeb2a3b5a1615a3b177508977c2425e3633109c968334d6f1d6592aac1d",
+    "sha256": "55fbe40f62a8315d88beaa74e3faf9645e3b0f103a3bbe7c10c2e5ea949e206d",
     "size": "1920x1080",
-    "run": "1126-150517-dir-native-vulkan-native-interior-dir-s3fg-native-vulkan+native-interior",
+    "run": "1126-185746-dir-native-vulkan-native-interior-dir-s7dk-native-vulkan+native-interior",
     "accepted": "2026-11-26"
   },
   "native-vulkan+native-interior/vl-exterior": {
-    "sha256": "4fe8b26e185f9731153c2cbb7deefee351623ed4f8092fc3fa3334d7e6e56f6b",
+    "sha256": "5e0d516357cdcaed3fe07787667f0c3663784ef43ebcdbecfb2be88763dad990",
     "size": "1920x1080",
-    "run": "1126-150517-dir-native-vulkan-native-interior-dir-s3fg-native-vulkan+native-interior",
+    "run": "1126-185746-dir-native-vulkan-native-interior-dir-s7dk-native-vulkan+native-interior",
     "accepted": "2026-11-26"
   },
   "native-vulkan+quick/start": {
-    "sha256": "c1a2bf6c6cef9f3c80777290d6991a1ff51e6432bb6e50c55e45969e1ab10e4e",
+    "sha256": "ecbc5bd088d286f9f8b7ceeea9f15f28ecdb2038a4c3b6ac2d3b9a2b718141ce",
     "size": "1920x1080",
-    "run": "1126-145905-dir-native-vulkan-quick-dir-s3fg-native-vulkan+quick",
+    "run": "1126-185658-dir-native-vulkan-quick-dir-s7dk-native-vulkan+quick",
     "accepted": "2026-11-26"
   }
 }

@@ -1,4 +1,5 @@
 # Fast iteration: the autoloaded save, one shot a second after world-ready, then exit. Compose it: guest+quick, native-vulkan+quick.
+# God mode first: the save is a guard fight, and a player who dies reloads, so the shot would show a loading screen.
 extends = ["base"]
 
 [run]
@@ -6,6 +7,12 @@ timeout_s = 300
 
 [[steps]]
 at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
 frames = 60
 do = "shot"
 arg = "start"

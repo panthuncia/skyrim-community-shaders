@@ -111,7 +111,7 @@ The harness writes this file. All keys are present; empty means none.
   the same pixels (a frozen final target: the screen kept one frame) or are missing. `result.json`'s `live_image` holds what it found.
   A config whose last steps leave a still image on screen (a menu that pauses the world) sets it to 0.
 - **A malformed configuration or an unknown name** ends the game at once with `config-error`, after the status file is written.
-- **`at`** anchors a step at the first time its milestone is reached at or after the previous step ran. So a step after a `load` waits for that load's `world-ready`. `"previous"` is the frame the previous step ran at.
+- **`at`** anchors a step at the first time its milestone is reached at or after the previous step ran. Every load records the load milestones again, so a step after a `load` or a coc waits for that load's `world-ready`: `at = "world-ready"` and `frames` to settle (60-120 for a shot). `"previous"` is the frame the previous step ran at. A step waiting for its milestone while the world is ready and no load is under way fails after `wait_s` (else `timeouts.step_wait`), for example after a coc that loaded nothing. Through boot, compiling, a load or a menu the phase timeouts time the wait.
 
 ### Commands and waits
 
@@ -166,7 +166,7 @@ The game rewrites this file about once a second and at every milestone and outco
   snapshot <id> (render frame <n>)`): a shot asked at game frame N is the first render of snapshot N or later.
   `expect.live_frames` and the graph-frames report count rendered frames.
 - **`phase`** is one of `boot`, `compiling`, `menu`, `loading`, `world` and `exiting`.
-- **Milestones** are recorded the first time each is reached. A save loaded after the first world-ready records `load-start` and `world-ready` again, in a `loads` array of the same shape.
+- **Milestones** are recorded the first time each is reached. Every later load records `load-start` and `world-ready` again (and `loading-screen` and `held-frame` when it shows them), in a `loads` array of the same shape. A load is a loading menu (a save loaded, a coc into another cell) or a teleport: the player moved more than 1024 units between two Presents, as a coc nearby does, which loads with no loading menu.
 - **`config.unchecked`** lists `CS_DCLF_*` names that may be DCLF feature switches but could not be checked, because DCLF did not install.
 - **held-frame** is recorded at the first world frame of a load drawn under the loading menu DCLF's load hold keeps up.
 - **world-ready** is recorded when all of these hold:

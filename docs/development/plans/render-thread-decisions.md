@@ -752,3 +752,55 @@ pushes until the user is back.
 179. **Slow lab phases are mostly machine contention** (builds starving the driver and startup: Streamline init, device
      creation, pipeline cache load); the spin made them worse. Worker priorities are left as they are (a frame-time
      trade-off).
+
+## 2026-11-26: reference shot checks in cs-test (snap3-shotref; director accepted, merge after snap3-dark)
+
+180. **cs-test checks shots against kept references:** configs opt in with `expect.shot_refs` (quick, facegen,
+     native-interior, menu-scenes except the random loading model); `tools/cs-test/refs.json` holds hashes and sources,
+     PNGs live in `C:\Modding\CS-AB\refs`; `ref accept <run>` by hand only (passed runs), `ref check`, `ref list`. A
+     coarse tile check on square-root luma (16x9 tiles of a 96x54 grid) fails a run when more than 23% of tiles move by
+     more than 56 or turn flat or busy, the mean moves by more than 20, or the frame is black or white; calibrated on
+     741 good and 525 quarter-frame pairs from 2026-11-26 (no bad pair passes). A missing reference only logs. Native
+     references are taken from before the 3f5b50150 darkness; the branch merges after snap3-dark's fix, then native
+     references are re-accepted from a fixed run. Open: a native-vs-guest cross-check would have caught the darkness;
+     `quick` has no `tgm` (a death puts a loading screen in the shot).
+
+## 2026-11-26: the darkness regression (snap3-dark; director accepted)
+
+181. **Closes 177:** native's shared constants take the permutation block from CS's state (`permutationData`) at each
+     upload. They used `permutationDataPrevious`, the block `permutationCB` last uploaded, which only `State::Draw`
+     refreshes from the engine's state flush hook; `State::Reset` sets it to all ones each frame. Each of snap3-post
+     and snap3-depth alone left one engine flush before the world (VL's block, or RenderDepth and DCLF's depth-capture
+     `ApplyPendingState`); merged, none was left, so world segments uploaded all ones (every extra-descriptor bit,
+     RenderToUI set) and native frames came out a quarter as bright. Guest keeps the uploaded block. Open: any other CS
+     state that only `State::Draw` refreshes is stale the same way in native world frames.
+182. **Open: cadence-drop-cells' riverwood shot is black since snap3-jobhang:** steps count frames from the coc and
+     loading-screen frames now count, so the shot lands in the load. snap3-cocwait makes steps after a load wait for
+     the next world-ready.
+
+## 2026-11-26: the main menu scene is native (snap5-menus3; director accepted)
+
+183. **The main menu (MistMenu, scheme 4) is CS's** when the render has no depth pass and the frame is not a loading
+     frame (`Owns(scheme, keepDepth)`): smoke through DCLF's particle expansion (shared slot fill; Effect.hlsl's ORG
+     build reads the quads from the draw's latch), the menu HDR chain staged by `ImageSpace::MenuSceneHdr` from the
+     menu's ImageSpace override (no engine call; framebuffer range 1), menu lights on `shadowSceneNode[1]`, fog from the
+     menu scene node, the sun colour from the override's HDR value, kMAIN cleared. Shadow lights add their bits only when
+     the render has shadow maps; owned renders draw none, only the dimmers (a port of the shadow-light camera update).
+     The update half sets the menu culler's camera and frustum (engine CPU call, as 147). Main-menu frames: 20 -> 1
+     engine render call (Main::DrawFrame).
+184. **Menu geometry with no renderer buffers yet is skipped in that render** (it streams in), like 169's building
+     programs. The loading model and loading frames stay the engine's: CS drawing a loading screen's early renders
+     crashed DCLF's shadow-mask path once (vertex shader dirty with none bound), cause not found. Left: loading model
+     (depth pass, shadow maps and mask), inventory (membrane pass, skinned Effects; `menu-items` config shows Chillrend
+     and Savior's Hide), lockpick, journal, book, local map; the light fade-distance swap is not ported.
+
+## 2026-11-26: cs-test steps wait for each load (snap3-cocwait; director accepted)
+
+185. **Closes 182:** cs-test records every load again, including a coc with no loading menu, seen as a player jump of
+     more than 1024 units between two Presents (the snapshot's teleport distance; logged as `[TEST] teleport at frame
+     ...`); `held-frame` counts as a load milestone. Steps after a coc or `load` anchor at `world-ready` (39 configs;
+     shots 400 rendered frames after it: 120 fell inside the post-load fade at full frame rate), and a step whose milestone never comes in a ready, non-loading world fails after
+     `wait_s` / `step_wait` with a clear reason. `quick` starts with `tgm`. Limits: a coc to where the player stands is
+     not seen (the step fails after 60 s). An exact signal (counting `SetLoadingScreenActive(false)` in
+     Snapshot/Publication) was not added: the lead's edit outside its boundary was refused by the permission system;
+     left for the user to decide.

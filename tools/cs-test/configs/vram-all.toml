@@ -29,8 +29,8 @@ do = "console"
 arg = "coc Whiterun"
 
 [[steps]]
-at = "previous"
-frames = 600
+at = "world-ready"
+frames = 60
 do = "weather"
 arg = "SkyrimClear_A"
 
