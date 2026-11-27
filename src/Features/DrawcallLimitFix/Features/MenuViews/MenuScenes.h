@@ -235,6 +235,11 @@ namespace DCLF::Features::MenuViews::Scenes
 	/** @brief The most draws and latch bytes one batch takes. Past either, the rest of the batch is the engine's. */
 	inline constexpr std::uint32_t kMaxDraws = 2048;
 	inline constexpr std::uint32_t kLatchBytes = 1u << 20;
+	/** @brief A batch's latch size. The local map's land and objects draw a few thousand passes. */
+	constexpr std::uint32_t LatchBytesOf(View a_view)
+	{
+		return a_view == View::LocalMap ? 4u * kLatchBytes : kLatchBytes;
+	}
 
 	enum class Shader : std::uint8_t
 	{
@@ -272,7 +277,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		std::uint32_t Append(std::span<const std::byte> a_bytes)
 		{
 			const std::size_t offset = (latch.size() + 15) & ~std::size_t{ 15 };
-			if (offset + a_bytes.size() > kLatchBytes)
+			if (offset + a_bytes.size() > LatchBytesOf(view))
 				return ~0u;
 			latch.resize(offset + a_bytes.size());
 			std::copy(a_bytes.begin(), a_bytes.end(), latch.begin() + static_cast<std::ptrdiff_t>(offset));
@@ -467,27 +472,6 @@ namespace DCLF::Features::MenuViews::Scenes
 		 * scene node's light update) as the engine runs it, then the colour pass CS builds from the scene graph into its own frame.
 		 */
 		DWORD Render(RE::UI3DSceneManager* a_manager, std::int32_t a_scheme, RE::NiCamera* a_camera, bool a_keepDepth);
-	}
-
-	/** @brief Temporary observe step of the native menu scenes (MenuScenesObserve.cpp): CS's draws against the engine's. */
-	namespace Observe
-	{
-		bool Enabled();
-		void Begin(View a_view, RE::NiCamera* a_camera);
-		void End();
-		void Other(const char* a_shader, const RE::BSRenderPass* a_pass, std::uint32_t a_vertex, std::uint32_t a_pixel);
-		void Lighting(const RE::BSRenderPass* a_pass, const LightingSceneConstants& a_engine, const float (*a_frame)[4], const ID3D11ShaderResourceView* const* a_views,
-			const std::uint32_t* a_address, const std::uint32_t* a_filter, std::uint32_t a_vertex, std::uint32_t a_pixel);
-		void Effect(const RE::BSRenderPass* a_pass, const EffectSceneConstants& a_engine, const ID3D11ShaderResourceView* const* a_views, const std::uint32_t* a_address,
-			const std::uint32_t* a_filter);
-		void State(const RE::BSRenderPass* a_pass, std::uint32_t a_blend, std::uint32_t a_coverage, std::uint32_t a_write, std::uint32_t a_extra, std::uint32_t a_depth,
-			std::uint32_t a_stencil, std::uint32_t a_stencilRef, std::uint32_t a_fill, std::uint32_t a_cull, std::uint32_t a_depthBias, float a_alphaRef,
-			const Family::Viewport& a_viewport, std::int32_t a_target);
-		void Bones(const RE::BSRenderPass* a_pass, std::span<const std::byte> a_engine);
-		/** @brief A latched Utility draw (depth pass or shadow map) against CS's: technique, rows, frame, states, viewport and t0. */
-		void Utility(const RE::BSRenderPass* a_pass, const UtilitySceneConstants& a_engine, const float (*a_frame)[4], std::uint32_t a_vertex, std::uint32_t a_slice,
-			const Native::DrawState& a_state, const Family::Viewport& a_viewport, const ID3D11ShaderResourceView* a_t0, std::uint32_t a_address, std::uint32_t a_filter);
-		void Report();
 	}
 
 	namespace SceneDraws

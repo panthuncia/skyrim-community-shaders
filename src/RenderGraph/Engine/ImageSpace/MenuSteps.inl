@@ -6,6 +6,7 @@
 // - under a menu that freezes the world, the frozen frame (kMENUBG) is composited into the framebuffer,
 // - a menu's 3D scene with TAA marks its pixels in the TAA mask, runs TAA's UI form and copies the result into the framebuffer,
 // - the book menu copies its page texture into each kBOOK_TEXT target before Scaleform draws the page's text there.
+// - the local map runs ISLocalMap from kLOCAL_MAP_SWAP, which its batches drew, into kLOCAL_MAP, which the map menu's displays read.
 // Each is a step of the UI stage in every frame kind. The player's face tint at a load is a step of the start stage in a
 // world frame and of the UI stage in a loading screen. Hooks only stage the engine's constants, and the stage records at execution.
 
@@ -194,6 +195,14 @@ std::vector<MenuStep> MenuStepList(std::uint32_t a_levels)
 		StepDesc c{ .name = "copy.taa.ui", .output = engine(kFinal) };
 		c.inputs[0] = engine(T::kIMAGESPACE_TEMP_COPY);
 		add(WorldScope::MenuCopy, E::ISCopy, InOut(T::kIMAGESPACE_TEMP_COPY, kFinal), std::move(c));
+	}
+
+	// The local map (LocalMapRenderer::Render, AE 16335): ISLocalMap from kLOCAL_MAP_SWAP, which its batches drew, into kLOCAL_MAP, which
+	// the map menu's displays read. After the local map's batches in the UI stage, before the displays.
+	if (targets[T::kLOCAL_MAP].texture && targets[T::kLOCAL_MAP_SWAP].texture) {
+		StepDesc d{ .name = "localmap", .output = engine(T::kLOCAL_MAP) };
+		d.inputs[0] = engine(T::kLOCAL_MAP_SWAP);
+		add(WorldScope::MenuCopy, E::ISLocalMap, InOut(T::kLOCAL_MAP_SWAP, T::kLOCAL_MAP), std::move(d));
 	}
 
 	// The book's page texture into each page's target (BookMenu::PreDisplay's RenderEffect texture form, effect 0x22). t0 is the loaded
@@ -397,9 +406,6 @@ void StageLoadedSources(Pending& a_pending, std::uint32_t a_slots)
 	a_pending.source = std::move(owners);
 }
 
-/** @brief Observe step of the native menu HDR (CS_MENU_SCENES_OBSERVE): CS's rows for a_key against the engine's (NativePost.inl). */
-void ObserveMenuHdrStep(const StepKey& a_key);
-
 /**
 * @brief Stages a menu composite step by its key, in the build the frame runs: the engine's draw's constants, or the native rows armed in
 * NativeSteps. A_uiSource names a TAA UI draw's source for the log.
@@ -472,8 +478,6 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 		key = { WorldScope::MenuCopy, id, InOut(call.source, call.destination) };
 		known = call.source >= 0 && call.destination >= 0;
 	}
-	if (known && menu.inHdr)
-		ObserveMenuHdrStep(key);
 	return StageMenuKey(key, known, a_effect, a_compute, a_groups, uiSource);
 }
 

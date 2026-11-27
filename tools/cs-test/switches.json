@@ -955,16 +955,6 @@
 			"description": "seconds without progress before the hang watchdog writes its report (default 15)"
 		},
 		{
-			"name": "CS_MENU_SCENES_OBSERVE",
-			"key": "",
-			"type": "bool",
-			"default": "",
-			"choices": [],
-			"kind": "diagnostic",
-			"family": "cs",
-			"description": "1: native mode's menu scene observe: CS's menu scene draws (constants, descriptors, lights, order) computed beside the engine's latched ones and compared, with a summary every 600 batches (Features/MenuViews/MenuScenesObserve.cpp)"
-		},
-		{
 			"name": "CS_NATIVE_D3D11",
 			"key": "",
 			"type": "string",

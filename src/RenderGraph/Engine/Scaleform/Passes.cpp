@@ -279,6 +279,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			bool committed = false;
 			bool executed = false;
 			const char* commitReason = nullptr;
+			bool commitLagged = false;  // the commit's reason is schedule lag, not a refusal
 		};
 
 		PathState& Path()
@@ -607,6 +608,25 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::uint32_t gateBase = 0;
 		};
 
+		/** @brief The engine render target whose shader view a_view is, or -1. The map menu's displays read kLOCAL_MAP. */
+		std::int32_t EngineTargetOfView(ID3D11ShaderResourceView* a_view)
+		{
+			auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
+			if (!renderer || !a_view)
+				return -1;
+			// GFx's texture for a render target holds a view of its own, so the target is found by its texture (the engine's handle).
+			winrt::com_ptr<ID3D11Resource> resource;
+			Tripwire::Unwrap(a_view)->GetResource(resource.put());
+			if (!resource)
+				return -1;
+			const auto& targets = renderer->GetRuntimeData().renderTargets;
+			for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL); ++i)
+				if (const auto* texture = targets[i].texture;
+					texture && (static_cast<const ID3D11Resource*>(texture) == resource.get() || static_cast<const ID3D11Resource*>(Tripwire::Unwrap(texture)) == resource.get()))
+					return static_cast<std::int32_t>(i);
+			return -1;
+		}
+
 		/**
 		 * @brief The declared read for a display texture, or null when it is read untracked. A new tracked texture is added and the
 		 * client registers again after the run, so the next build declares it.
@@ -622,7 +642,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					return read.texture.Key();
 				}
 			FrameAnchors::Texture texture;
-			if (auto promoted = Engine::Native::PromotedTextureOf(a_view)) {
+			if (const auto target = EngineTargetOfView(a_view); target >= 0) {
+				// An engine target the UI stage draws (the local map's image): read through the graph, by its declared index only.
+				texture = FrameAnchors::EngineTexture(FrameAnchors::Colour(static_cast<std::uint32_t>(target)));
+			} else if (auto promoted = Engine::Native::PromotedTextureOf(a_view)) {
 				texture = FrameAnchors::Texture(std::move(promoted));
 			} else if (Engine::Native::IsTrackedTexture(a_view)) {
 				winrt::com_ptr<ID3D11Resource> resource;
@@ -700,6 +723,16 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				std::optional<RenderGraph::UndeclaredAccess::DeclaredViewScope> declared;
 				if (reads[i] && !added)
 					declared.emplace();
+				// An engine target has no binding of its own: the recording puts the declared read's index in its place.
+				if (reads[i] && EngineTargetOfView(view) >= 0) {
+					declared.reset();
+					if (added) {
+						state.commitReason = "a new engine target read (drawn once the UI stage's build declares it)";
+						state.commitLagged = true;
+						return;
+					}
+					continue;
+				}
 				const auto* kept = state.bindings.Resolve(view, ::DCLF::GpuTextures::Tag(::DCLF::GpuTextures::Source::Scaleform));
 				declared.reset();
 				if (!kept) {
@@ -1485,12 +1518,14 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			state.committed = false;
 			state.executed = false;
 			state.commitReason = nullptr;
+			state.commitLagged = false;
 			const auto result = FrameAnchors::Run(Anchor::Interface);
 			if (!result)
 				a_reason = ReasonOf(result.status);
-			else if (!state.committed)
+			else if (!state.committed) {
 				a_reason = state.commitReason ? state.commitReason : "the commit did not run";
-			else if (!state.executed)
+				a_lagged = state.commitLagged;
+			} else if (!state.executed)
 				a_reason = "the client was not in the Interface epoch";
 		}
 		state.pending = nullptr;

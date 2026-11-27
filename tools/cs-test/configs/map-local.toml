@@ -1,0 +1,95 @@
+# The local map at noon in clear weather: the world map opened from Whiterun through the UI message queue, the local map shown with
+# MapMenu's LocalMap user event, two shots a few frames apart, then the local map hidden, the map closed and exit. Compose it:
+# guest+map-local, native-vulkan+map-local.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+# The save's low health shows a help message over the map otherwise.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.restoreav health 1000"
+
+[[steps]]
+at = "previous"
+frames = 200
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 20
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "menu"
+arg = "MapMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "uievent"
+arg = "MapMenu=LocalMap"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "localmap"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "shot"
+arg = "localmap-b"
+
+[[steps]]
+at = "previous"
+frames = 20
+do = "uievent"
+arg = "MapMenu=LocalMap"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "shot"
+arg = "map"
+
+[[steps]]
+at = "previous"
+frames = 20
+do = "menu"
+arg = "MapMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["localmap", "localmap-b", "map"]

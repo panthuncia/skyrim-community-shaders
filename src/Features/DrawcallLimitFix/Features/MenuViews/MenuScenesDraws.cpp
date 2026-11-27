@@ -306,7 +306,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			auto client = std::make_shared<Client>();
 			client->view = a_view;
 			client->id = std::string("cs.menu-scenes.") + NameOf(a_view);
-			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kLatchBytes);
+			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", LatchBytesOf(a_view));
 			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
 			for (const auto target : TargetsOf(a_view)) {
 				if (client->colourCount >= kMaxImports)
@@ -341,6 +341,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		{
 			a_desc.id = a_client->id;
 			a_desc.sharedConstants = true;
+			// The local map's two batches tap their UI step one after the other, each client once.
+			a_desc.repeats = a_client->view == View::LocalMap || a_client->view == View::LocalMapFog;
 			a_desc.gates = { a_client->gate };
 			a_desc.passes.push_back({ .name = a_client->id + ".draws",
 				.anchor = FrameAnchors::Anchor::EngineDraws,

@@ -2726,12 +2726,15 @@ namespace RenderGraph::Engine::Scaleform
 		 * interface's ImageSpace effect still run where DrawInterface calls them.
 		 */
 		/**
-		* @brief BookMenu::PreDisplay (SE 50121 / AE 51052): the page copies into kBOOK_TEXT_n and the pages' displays. Main::DrawFrame
-		* calls it before the world, through the offscreen menus' loop (SE 79948 / AE 82085). In graph mode, native and guest, it runs
-		* at DrawInterface's start instead, inside the UI stage, where the copies and the displays are CS's steps. Nothing in the world
-		* reads the pages, so the move changes no image. The map menu's offscreen work stays where it is.
+		* @brief An offscreen menu's PreDisplay. Main::DrawFrame calls it before the world, through the offscreen menus' loop (SE 79948 /
+		* AE 82085). In graph mode, native and guest, it runs at DrawInterface's start instead, inside the UI stage, where its draws are
+		* CS's steps. Nothing in the world reads the targets they draw, so the move changes no image.
+		* - BookMenu::PreDisplay (SE 50121 / AE 51052): the page copies into kBOOK_TEXT_n and the pages' displays.
+		* - MapMenu::PreDisplay (SE 52216 / AE 53103, vtable slot 7): the local map's render while the local map shows (LocalMapRenderer::
+		*   Render, SE 16094 / AE 16335): its land and objects and its fog of war into kLOCAL_MAP_SWAP, and ISLocalMap into kLOCAL_MAP.
 		*/
-		struct BookPreDisplay
+		template <int Menu>
+		struct OffscreenPreDisplay
 		{
 			static void thunk(void* a_menu)
 			{
@@ -2773,13 +2776,17 @@ namespace RenderGraph::Engine::Scaleform
 			static inline bool running = false;
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+		using BookPreDisplay = OffscreenPreDisplay<0>;
+		using MapPreDisplay = OffscreenPreDisplay<1>;
 
 		struct DrawInterface
 		{
 			static void thunk(void* a_manager)
 			{
-				if (FrameAnchors::IsRenderOwner())
+				if (FrameAnchors::IsRenderOwner()) {
 					BookPreDisplay::RunDue();
+					MapPreDisplay::RunDue();
+				}
 				if (!NativeUi() || !FrameAnchors::IsRenderOwner())
 					return func(a_manager);
 				auto& recorder = Rec();
@@ -2914,6 +2921,9 @@ namespace RenderGraph::Engine::Scaleform
 		if (!REL::Module::IsVR()) {
 			stl::detour_thunk<DrawInterface>(REL::RelocationID(79947, 82084));
 			stl::detour_thunk<BookPreDisplay>(REL::RelocationID(50121, 51052));
+			// MapMenu::PreDisplay is a jump into its local map menu's, so the vtable slot is replaced.
+			REL::Relocation<std::uintptr_t> mapMenu{ RE::VTABLE_MapMenu[0] };
+			MapPreDisplay::func = mapMenu.write_vfunc(7, MapPreDisplay::thunk);
 			if (!DrawInterface::func.address() || !BookPreDisplay::func.address())
 				RenderGraph::Fatal("Scaleform", "DrawInterface or BookMenu::PreDisplay could not be hooked");
 		}
