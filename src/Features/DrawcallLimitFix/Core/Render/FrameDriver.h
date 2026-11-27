@@ -43,6 +43,7 @@ namespace DCLF
 		WaterScene,  // the tracked water shapes (Features/Water/WaterNative.cpp)
 		SkyRoot,     // the sky root's objects (Features/Sky/SkyNative.cpp)
 		Fades,       // the fade update's engine inputs (Features/Fades/FadeState.cpp)
+		AnimatedFades,  // the animation job's fade updates (Features/Fades/FadeWriters.cpp)
 		FirstPerson,  // the first-person latch and skeleton walk (Features/FirstPerson/FirstPersonView.cpp)
 		Count
 	};
@@ -51,11 +52,19 @@ namespace DCLF
 	/** @brief Takes a part's values in the game half, inside its capture scope. Null leaves the part empty. */
 	using TicketPartCapture = std::shared_ptr<const void> (*)();
 
-	/** @brief At install, before the first frame. One capture per part. */
-	void RegisterTicketPart(TicketPart a_part, TicketPartCapture a_capture);
+	/**
+	 * @brief Folds a superseded ticket's part into the fresh ticket's, for values every game update adds to. Game thread, before the
+	 * fresh ticket is published. Either may be null.
+	 */
+	using TicketPartFold = std::shared_ptr<const void> (*)(const std::shared_ptr<const void>& a_older, const std::shared_ptr<const void>& a_fresh);
+
+	/** @brief At install, before the first frame. One capture per part. Without a fold, a superseded ticket's part is dropped. */
+	void RegisterTicketPart(TicketPart a_part, TicketPartCapture a_capture, TicketPartFold a_fold = nullptr);
 
 	/** @brief Render thread: the rendered ticket's part, or null (before the first ticket, or when its capture took nothing). */
 	const void* TicketPartOf(TicketPart a_part);
+	/** @brief Like TicketPartOf, for a reader that keeps the part past the render (a frame-value producer). */
+	std::shared_ptr<const void> TicketPartHeld(TicketPart a_part);
 
 	/** @brief DCLF's scene source, from RegisterSceneSource. */
 	RenderGraph::Frame::Revision::FragmentSourceId SceneSource();

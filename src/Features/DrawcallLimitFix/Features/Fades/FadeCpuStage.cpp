@@ -48,20 +48,6 @@ namespace DCLF::Features::Fades
 		Api::FrameValuePoolId cpuStatesPool;
 		constexpr std::uint32_t kNoObject = ~0u;  // matches FadeStateCS's kNoObject
 
-		/** @brief Drops a handed-off animated drain if the producer never took it. */
-		struct AnimatedDrainHold
-		{
-			bool pending = false;
-			AnimatedDrainHold() = default;
-			AnimatedDrainHold(const AnimatedDrainHold&) = delete;
-			AnimatedDrainHold& operator=(const AnimatedDrainHold&) = delete;
-			~AnimatedDrainHold()
-			{
-				if (pending)
-					DropAnimatedDrain();
-			}
-		};
-
 		/** @brief What a frame's kick hands its producer. It holds no engine references. */
 		struct CpuStageInput
 		{
@@ -73,13 +59,11 @@ namespace DCLF::Features::Fades
 			std::shared_ptr<const SceneTables> tables;
 			std::shared_ptr<const EntrySpace> candidates;
 			std::shared_ptr<FadeScene> scene;
-			// The producer fills in the animated fields before reading them. Nothing else reads them.
-			mutable FadeFrame frame{};
+			FadeFrame frame{};
 			ShadowCameras::Planes camera;  // no active planes when there is no camera
 			std::array<float, 4> fadeEye{};
 			std::array<float, 2> treeHeight{};
-			mutable std::vector<AnimatedFadeRoot> animatedRoots;
-			mutable AnimatedDrainHold animatedDrain;
+			std::shared_ptr<const AnimatedBatch> animated;                   // the animation job's fade updates to step, or null
 			std::shared_ptr<const std::vector<std::uint32_t>> rootPrograms;  // by root slot
 			std::vector<std::uint32_t> programs;
 			// Set on GPU-driven frames. The stage then only reads and steps routedRoots. FadeStateCS stays in charge of fades.
@@ -187,46 +171,22 @@ namespace DCLF::Features::Fades
 			return m.programs;
 		}
 
-		/** @brief An invalid batch means no updates. */
-		void SetAnimated(const CpuStageInput& a_input, const AnimatedFadeInputs& anim)
+		/**
+		 * @brief Render thread. An observer steps the batch FadeStateCS's commit kept last frame. Otherwise the stage takes the ticket's
+		 * batch, which its producer reads in place.
+		 */
+		void TakeAnimated(CpuStageInput& a_input)
 		{
-			auto& roots = a_input.animatedRoots;
+			auto observed = TakeObserverAnimatedBatch();
+			a_input.animated = a_input.observer ? std::move(observed) : TakeAnimatedBatch();
+			const AnimatedFadeInputs anim = a_input.animated ? a_input.animated->inputs : AnimatedFadeInputs{};
 			std::copy_n(anim.eye, 3, a_input.frame.animEye);
 			a_input.frame.animLodAdjust = anim.lodAdjust;
 			a_input.frame.animCounter = anim.counter;
 			a_input.frame.animDeltaTime = anim.deltaTime;
+			// An invalid batch means no updates.
 			if (!anim.valid)
-				roots.clear();
-		}
-
-		/**
-		 * @brief Render thread. An observer leaves the batch to FadeStateCS and steps a copy. Otherwise the producer drains it,
-		 * which keeps a copy of about 1,400 updates off the render thread.
-		 */
-		void TakeAnimated(CpuStageInput& a_input)
-		{
-			AnimatedFadeInputs anim{};
-			TakeObserverAnimatedBatch(a_input.animatedRoots, anim);
-			if (a_input.observer) {
-				SetAnimated(a_input, anim);
-				return;
-			}
-			a_input.animatedRoots.clear();
-			HandAnimatedDrainToWorker();
-			a_input.animatedDrain.pending = true;
-		}
-
-		/** @brief Producer. Must run before anything reads the animated fields. */
-		void TakeAnimatedOnWorker(const CpuStageInput& a_input)
-		{
-			if (!a_input.animatedDrain.pending)
-				return;
-			DCLF_ZONE("CS.DCLF.FadeCpuStage.TakeAnimated");
-			AnimatedFadeInputs anim{};
-			TakeAnimatedBatchOnWorker(a_input.animatedRoots, anim);
-			a_input.animatedDrain.pending = false;
-			SetAnimated(a_input, anim);
-			ZoneValue(a_input.animatedRoots.size());
+				a_input.animated = nullptr;
 		}
 
 		/** @brief Sorted root slots the set's lanes name, cached per set. */
@@ -314,7 +274,8 @@ namespace DCLF::Features::Fades
 			animatedSlots.clear();
 			if (animatedCounts.size() < a_list.rows.size())
 				animatedCounts.resize(a_list.rows.size(), 0);
-			for (const auto& root : a_input.animatedRoots) {
+			const std::span<const AnimatedFadeRoot> batch = a_input.animated ? std::span<const AnimatedFadeRoot>(a_input.animated->roots) : std::span<const AnimatedFadeRoot>{};
+			for (const auto& root : batch) {
 				if (root.slot >= a_list.rows.size() || root.slot >= a_list.nodes.size() || a_list.nodes[root.slot] != root.node ||
 					a_list.rows[root.slot].generation != root.generation)
 					continue;
@@ -529,7 +490,6 @@ namespace DCLF::Features::Fades
 				return;
 			}
 			DCLF_ZONE("CS.DCLF.FadeCpuStage");
-			TakeAnimatedOnWorker(*input);
 			TracyCZoneN(fPrep, "CS.DCLF.FadeCpuStage.Prepare", true);
 			const bool observer = input->observer;
 			if (!observer)
