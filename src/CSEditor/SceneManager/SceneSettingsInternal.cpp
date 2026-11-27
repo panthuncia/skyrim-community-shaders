@@ -880,9 +880,10 @@ namespace SceneSettingsInternal
 
 	RE::FormID GetActiveRegionId(RE::TESObjectCELL* cell)
 	{
-		return cell && cell->IsExteriorCell() && CS_ENGINE_READ(Sky, Other, globals::game::sky) && CS_ENGINE_READ(Sky, Other, globals::game::sky)->region ?
-		           CS_ENGINE_READ(Sky, Other, globals::game::sky)->region->GetFormID() :
-		           0;
+		if (!cell || !cell->IsExteriorCell())
+			return 0;
+		auto* sky = CS_ENGINE_READ(Sky, Other, globals::game::sky);
+		return sky && sky->region ? sky->region->GetFormID() : 0;
 	}
 
 	std::string GetSceneSettingDisplayName(const std::string& featureShortName,

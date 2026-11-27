@@ -193,8 +193,7 @@ void VolumetricLighting::Capture(Snapshot::Builder& a_builder)
 void VolumetricLighting::EarlyPrepass()
 {
 	// The adopted snapshot's block; nothing before the first.
-	const auto& snapshot = Snapshot::Current();
-	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* frame = Snapshot::CurrentBlock<Block>();
 	if (!frame)
 		return;
 	int32_t width = frame->screenWidth;

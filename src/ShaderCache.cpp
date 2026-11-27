@@ -2117,10 +2117,10 @@ namespace SIE
 		// A clear asks for shaders to be built from what is on disk now, so the store must read the files again.
 		Util::BeginShaderStoreGeneration();
 		auto* state = globals::state;
-		if (CS_ENGINE_READ(Shaders, Other, globals::game::currentVertexShader) && *CS_ENGINE_READ(Shaders, Other, globals::game::currentVertexShader) == state->customVertexShader)
-			*globals::game::currentVertexShader = nullptr;
-		if (CS_ENGINE_READ(Shaders, Other, globals::game::currentPixelShader) && *CS_ENGINE_READ(Shaders, Other, globals::game::currentPixelShader) == state->customPixelShader)
-			*globals::game::currentPixelShader = nullptr;
+		if (auto* currentVertexShader = CS_ENGINE_READ(Shaders, Other, globals::game::currentVertexShader); currentVertexShader && *currentVertexShader == state->customVertexShader)
+			*currentVertexShader = nullptr;
+		if (auto* currentPixelShader = CS_ENGINE_READ(Shaders, Other, globals::game::currentPixelShader); currentPixelShader && *currentPixelShader == state->customPixelShader)
+			*currentPixelShader = nullptr;
 		state->customVertexShader = nullptr;
 		state->customPixelShader = nullptr;
 		{

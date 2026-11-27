@@ -330,8 +330,10 @@ void CSEditor::RenderWeatherDetailsWindow(bool* open, bool showSectionHeaders)
 	if (Util::BeginWithRoundedClose("Weather Details##Popup", open, ImGuiWindowFlags_None)) {
 		// Enable interactive elements when a menu is open
 		auto shouldEnableInteractiveElements = []() -> bool {
-			return (Menu::GetSingleton()->ShouldSwallowInput() ||
-					(CS_ENGINE_READ(UI, RecordTime, globals::game::ui) && CS_ENGINE_READ(UI, RecordTime, globals::game::ui)->IsMenuOpen(RE::CursorMenu::MENU_NAME)));
+			if (Menu::GetSingleton()->ShouldSwallowInput())
+				return true;
+			auto* ui = CS_ENGINE_READ(UI, RecordTime, globals::game::ui);
+			return ui && ui->IsMenuOpen(RE::CursorMenu::MENU_NAME);
 		};
 
 		RenderCoreWeatherDetails(shouldEnableInteractiveElements(), showSectionHeaders);

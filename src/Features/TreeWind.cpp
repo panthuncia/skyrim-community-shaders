@@ -317,8 +317,7 @@ void TreeWind::Reset()
 {
 	ZoneScoped;
 	// The adopted snapshot is the frame's only game input. Before the first there is no wind.
-	const auto& snapshot = Snapshot::Current();
-	const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* block = Snapshot::CurrentBlock<Block>();
 	float windSpeed = 0.0f;
 	float windAngle = 0.0f;
 	float storminess = 0.0f;
@@ -338,10 +337,7 @@ void TreeWind::Reset()
 
 	// The clock steps once per new snapshot, by the game time it stands for (0 while paused), so a repeated snapshot holds the
 	// trees still. Capped so a hitch or a load does not jump the trees.
-	const bool newSnapshot = snapshot && snapshot->id != steppedSnapshot;
-	const double deltaTime = newSnapshot ? std::min(static_cast<double>(snapshot->events.gameDelta), 0.25) : 0.0;
-	if (newSnapshot)
-		steppedSnapshot = snapshot->id;
+	const double deltaTime = std::min(static_cast<double>(Snapshot::StepOnce(steppedSnapshot)), 0.25);
 	prevPhase = phase;
 	phase += deltaTime * (settings.BaseSpeed + settings.WindSpeedGain * std::clamp(windSpeed, 0.0f, 1.0f));
 	// Wraps at 200 pi, a whole number of cycles for every sway frequency in TreeWind.hlsli, and keeps float
@@ -354,6 +350,7 @@ void TreeWind::Reset()
 
 	// The map menus draw the LOD too, and it should stand still there. While off, the draws skip all
 	// per-draw work; both buffers then read as off, whatever is still bound at VS b3.
+	const auto& snapshot = Snapshot::Current();
 	swayActive = settings.Enabled && !(snapshot && snapshot->menus.map);
 
 	WindCB data{};

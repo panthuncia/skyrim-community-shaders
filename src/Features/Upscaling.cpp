@@ -1595,7 +1595,7 @@ void UpdateCameraData()
 
 void Upscaling::PostDisplay()
 {
-	// Writes engine state: the undo of the jitter and dynamic resolution ConfigureUpscaling wrote (render-owned jitter, phase 2).
+	// Writes engine state: undoes the jitter and dynamic resolution ConfigureUpscaling wrote.
 	auto viewport = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState);
 
 	viewport->projectionPosScaleX = projectionPosScaleX;
@@ -1874,7 +1874,7 @@ void Upscaling::PerformUpscaling()
 	// CS_ORG_UPSCALING: the copy into kMAIN and the depth upscale queued above.
 	ORGUpscaling::Get().RunUpscale();
 
-	// Writes engine state (phase 2's render-owned jitter removes it).
+	// Writes engine state: locks dynamic resolution after the upscale.
 	auto& runtimeData = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->GetRuntimeData();
 
 	runtimeData.dynamicResolutionLock = 1;
@@ -2219,7 +2219,7 @@ void Upscaling::Main_RenderPrecipitation::thunk()
 		CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->GetRuntimeData().dynamicResolutionLock = 0;
 		return;
 	}
-	// Writes engine state around an engine render function (goes with phase 3's port of it).
+	// Guest: locks dynamic resolution in engine state around the engine's precipitation render.
 	auto& runtimeData = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->GetRuntimeData();
 	runtimeData.dynamicResolutionLock = 1;
 	func();
@@ -2228,7 +2228,7 @@ void Upscaling::Main_RenderPrecipitation::thunk()
 
 void Upscaling::BSFaceGenManager_UpdatePendingCustomizationTextures::thunk()
 {
-	// Writes engine state around an engine render function (goes with phase 3's port of it).
+	// Writes engine state: locks dynamic resolution around the engine's face texture update.
 	auto& runtimeData = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->GetRuntimeData();
 	runtimeData.dynamicResolutionLock = 1;
 	func();

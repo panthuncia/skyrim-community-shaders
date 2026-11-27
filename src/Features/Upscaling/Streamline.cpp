@@ -827,8 +827,8 @@ static sl::Result cs_DiscardFSRFrameGenerationPreparedFrame(const sl::ViewportHa
 // PCL markers, tags and constants must all agree on one index per frame, or Reflex never sees a frame
 // close and its frame limiter falls back to open-loop sleeping.
 //
-// The simulation markers' frame id: the render frame that first renders the snapshot this game update publishes. Until the
-// render thread exists that is the next Renderer::Begin, so the newest adoption's render frame plus one. BeginRenderFrame takes
+// The simulation markers' frame id: the newest adoption's render frame plus one (Snapshot::LastRenderFrame, any thread). It stands
+// for the render frame that first renders the snapshot this game update publishes: the next adoption. BeginRenderFrame takes
 // the render frame's own identity, so both sides read one counter and cannot drift (they once came from separate counters
 // and were off by one on 92-98% of frames).
 static uint32_t SimFrameId()

@@ -158,8 +158,7 @@ ProceduralSun::PerFrameData ProceduralSun::GetCommonBufferData() const
 		.haloFalloff = settings.haloFalloff,
 		.cloudOcclusionStrength = settings.cloudOcclusionStrength
 	};
-	const auto& snapshot = Snapshot::Current();
-	if (const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr; settings.enabled && frame) {
+	if (const Block* frame = Snapshot::CurrentBlock<Block>(); settings.enabled && frame) {
 		const float radius = frame->sunModelRadius;
 		if (std::isfinite(radius) && radius > 0.0f)
 			data.sunQuadModelRadius = radius;

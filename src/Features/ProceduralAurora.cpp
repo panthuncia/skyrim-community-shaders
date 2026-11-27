@@ -324,7 +324,7 @@ ProceduralAurora::CommonBufferData ProceduralAurora::PackCommonBufferData()
 	data.RayDetail = settings.RayDetail;
 	data.Softness = settings.Softness;
 	// Ease toward the vanilla visibility so the aurora never pops; snap on the first frame and after time jumps
-	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* frame = Snapshot::CurrentBlock<Block>();
 	float vanilla = frame ? frame->vanillaVisibility : 0.0f;
 	if (!std::isfinite(vanilla) || vanilla < kMinVisibility)
 		vanilla = 0.0f;

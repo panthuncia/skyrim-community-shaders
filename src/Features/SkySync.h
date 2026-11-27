@@ -159,9 +159,6 @@ public:
 	/** @brief Fills the block from Sky Sync's last update and the sky. Registered with Snapshot::RegisterCapture in PostPostLoad. Game thread. */
 	static void Capture(Snapshot::Builder& a_builder);
 
-	/** @brief The adopted snapshot's block, or null before the first or while Sky Sync is not loaded. Render thread. */
-	static const Block* Frame();
-
 private:
 	enum class CellFlagExt : uint16_t
 	{

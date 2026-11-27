@@ -107,7 +107,8 @@ void Border::ClearMotionVectorsForFrameGen()
 	auto renderer = CS_ENGINE_READ(Renderer, Other, globals::game::renderer);
 	auto context = globals::d3d::context;
 
-	float2 screenSize{ (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState)->screenHeight };
+	const auto* graphicsState = CS_ENGINE_READ(GraphicsState, Other, globals::game::graphicsState);
+	float2 screenSize{ (float)graphicsState->screenWidth, (float)graphicsState->screenHeight };
 	auto dynResDim = Util::ConvertToDynamic(screenSize, true);
 
 	borderCB->Update(Constants(dynResDim));

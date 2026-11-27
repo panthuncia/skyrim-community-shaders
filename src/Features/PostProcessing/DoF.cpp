@@ -654,7 +654,7 @@ DoF::Frame DoF::PrepareFrame(float a_width, float a_height)
 	bool noTarget = false;
 
 	// The focus targets come from the adopted snapshot (PostProcessing::Block).
-	const auto* focus = owner ? PostProcessing::FrameBlock() : nullptr;
+	const auto* focus = owner ? Snapshot::CurrentBlock<PostProcessing::Block>() : nullptr;
 	const auto* cam = focus && focus->cameraValid ? &focus->camera : nullptr;
 	if (focus && focus->consoleRefSet)
 		currentRef = focus->consoleRef;

@@ -616,7 +616,7 @@ PhysicalLens::FocusInputs PhysicalLens::FocusInputsFor(const CinematicCamera::Ph
 	FocusInputs data{ camera.ScreenPointUV, camera.ManualDistanceM * .001f, camera.TransitionSpeed,
 		camera.Mode == CinematicCamera::FocusMode::ScreenPoint, reset };
 	// The focus targets come from the adopted snapshot (PostProcessing::Block).
-	const auto* focus = PostProcessing::FrameBlock();
+	const auto* focus = Snapshot::CurrentBlock<PostProcessing::Block>();
 	if (!focus)
 		return data;
 	if (camera.Mode == CinematicCamera::FocusMode::Target) {

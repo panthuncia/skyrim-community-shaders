@@ -300,7 +300,7 @@ void TerrainBlending::BlendPrepassDepths()
 	auto context = globals::d3d::context;
 	context->OMSetRenderTargets(0, nullptr, nullptr);
 
-	// Writes: the engine re-binds its targets (goes with the engine's depth pass, phase 3).
+	// Writes: the dirty render-target flag, so the engine re-binds its targets.
 	auto stateUpdateFlags = CS_ENGINE_READ(Shaders, Other, globals::game::stateUpdateFlags);
 
 	// The ORG path: the DepthDone anchor's pass blends and writes the mask (ORGTerrainBlending).
@@ -498,7 +498,7 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 
 	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
 	auto context = globals::d3d::context;
-	// Writes: the blend and depth modes of the engine's terrain draws, and their dirty flags (goes with phase 3).
+	// Writes: the blend and depth modes of the engine's terrain draws, and their dirty flags.
 	auto shadowState = CS_ENGINE_READ(ShadowState, Other, globals::game::shadowState);
 	auto stateUpdateFlags = CS_ENGINE_READ(Shaders, Other, globals::game::stateUpdateFlags);
 

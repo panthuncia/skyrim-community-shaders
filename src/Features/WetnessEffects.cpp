@@ -916,11 +916,7 @@ void WetnessEffects::Reset()
 {
 	// Not in GetCommonBufferData: the feature buffer is rebuilt several times per frame (see Deferred). The clock steps once
 	// per new snapshot by the game time it stands for (0 while paused): a repeated snapshot holds the rain still.
-	const auto& snapshot = Snapshot::Current();
-	if (snapshot && snapshot->id != steppedSnapshot) {
-		steppedSnapshot = snapshot->id;
-		rainTimer += (size_t)(snapshot->events.gameDelta * 1000000);
-	}
+	rainTimer += (size_t)(Snapshot::StepOnce(steppedSnapshot) * 1000000);
 }
 
 void WetnessEffects::Capture(Snapshot::Builder& a_builder)
@@ -1014,8 +1010,7 @@ WetnessEffects::PerFrame WetnessEffects::GetCommonBufferData() const
 	data.Wetness = 0.0f;
 	data.PuddleWetness = 0.0f;
 
-	const auto& snapshot = Snapshot::Current();
-	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* frame = Snapshot::CurrentBlock<Block>();
 	if (settings.EnableWetnessEffects && frame && frame->sky) {
 		if (frame->fullSky) {
 			if (frame->precipitation) {

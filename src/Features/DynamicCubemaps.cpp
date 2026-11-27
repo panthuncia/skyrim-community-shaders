@@ -980,8 +980,7 @@ void DynamicCubemaps::Reset()
 	activeReflections = globals::state->activeReflections;
 
 	// The adopted snapshot's sky: the game state after the update this frame rendered, as the live sky was here.
-	const auto& snapshot = Snapshot::Current();
-	const Block* block = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* block = Snapshot::CurrentBlock<Block>();
 	fakeReflections = activeReflections && block && block->skyHidden;
 
 	if (!activeReflections && !Util::IsInterior()) {

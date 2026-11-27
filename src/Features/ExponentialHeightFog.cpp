@@ -350,7 +350,8 @@ void ExponentialHeightFog::ClearShaderCache()
 ExponentialHeightFog::GridSizes ExponentialHeightFog::ComputeGridSizes() const
 {
 	const auto& quality = globals::features::viewAtmosphere.settings;
-	float2 screenSz{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight };
+	const auto* graphicsState = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
+	float2 screenSz{ (float)graphicsState->screenWidth, (float)graphicsState->screenHeight };
 	return GridSizesFor(Util::ConvertToDynamic(screenSz), quality.nearPixelSize, quality.nearSlices, quality.middlePixelSize, quality.middleSlices);
 }
 

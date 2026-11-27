@@ -353,8 +353,7 @@ void Skylighting::Prepass()
 		return;
 
 	// Probes update under a full sky only, as the capture found it.
-	const auto& snapshot = Snapshot::Current();
-	const Block* frame = snapshot ? snapshot->Block<Block>() : nullptr;
+	const Block* frame = Snapshot::CurrentBlock<Block>();
 	if (!frame || !frame->fullSky)
 		return;
 
@@ -841,16 +840,38 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	}
 }
 
+namespace
+{
+	/** @brief The frame's precipitation for the occlusion maps: native reads the capture's precipitation block, guest the sky. */
+	struct OcclusionPrecipitation
+	{
+		const Snapshot::PrecipitationOcclusion::Block* block = nullptr;  // native only
+		RE::Sky* sky = nullptr;                                          // guest only
+		bool present = false;                                            // native: the block has precipitation; guest: there is a sky
+	};
+
+	OcclusionPrecipitation ReadOcclusionPrecipitation(bool a_native)
+	{
+		OcclusionPrecipitation result;
+		if (a_native) {
+			result.block = Snapshot::PrecipitationOcclusion::Current();
+			result.present = result.block && result.block->precipitation;
+		} else {
+			result.sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
+			result.present = result.sky != nullptr;
+		}
+		return result;
+	}
+}
+
 void Skylighting::RenderOcclusionAtShadowMaps()
 {
 	auto& dclf = globals::features::drawcallLimitFix;
 	if (!loaded || !dclf.loaded || !globals::shaderCache->IsEnabled() || Util::IsInterior())
 		return;
-	// Native reads the capture's precipitation block, guest the sky.
 	const bool native = RenderGraph::Engine::Native::Active();
-	const auto* block = native ? Snapshot::PrecipitationOcclusion::Current() : nullptr;
-	auto* sky = native ? nullptr : CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-	if (!(native ? block && block->precipitation : sky != nullptr))
+	const auto [block, sky, present] = ReadOcclusionPrecipitation(native);
+	if (!present)
 		return;
 	ZoneScoped;
 
@@ -916,10 +937,8 @@ void Skylighting::RenderOcclusion()
 		return;
 	}
 
-	// Native reads the capture's precipitation block, guest the sky.
-	const auto* block = native ? Snapshot::PrecipitationOcclusion::Current() : nullptr;
-	auto* sky = native ? nullptr : CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-	if (!(native ? block && block->precipitation : sky != nullptr) || Util::IsInterior())
+	const auto [block, sky, present] = ReadOcclusionPrecipitation(native);
+	if (!present || Util::IsInterior())
 		return;
 
 	// The maps Drawcall Limit Fix drew in its shadow epoch (RenderOcclusionAtShadowMaps) are done: the engine renders the others

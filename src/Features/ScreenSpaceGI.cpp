@@ -749,7 +749,8 @@ void ScreenSpaceGI::UpdateSB()
 
 ScreenSpaceGI::DispatchSizes ScreenSpaceGI::GetDispatchSizes() const
 {
-	float2 size = Util::ConvertToDynamic(float2{ (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenWidth, (float)CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState)->screenHeight });
+	const auto* graphicsState = CS_ENGINE_READ(GraphicsState, RecordTime, globals::game::graphicsState);
+	float2 size = Util::ConvertToDynamic(float2{ (float)graphicsState->screenWidth, (float)graphicsState->screenHeight });
 	auto resolution = std::array{ (uint)size.x, (uint)size.y };
 	auto resChoices = std::array{
 		resolution, std::array{ resolution[0] >> 1, resolution[1] >> 1 }, std::array{ resolution[0] >> 2, resolution[1] >> 2 }
@@ -822,7 +823,7 @@ void ScreenSpaceGI::DrawSSGI()
 {
 	auto context = globals::d3d::context;
 
-	// A write: the vanilla SSAO's toggle (goes with phase 5's ImageSpace port). Only CS writes it. The blur shader is made with the
+	// A write: the vanilla SSAO's toggle on the ImageSpace manager's SAO blur shader. Only CS writes it. The blur shader is made with the
 	// ImageSpace manager and never replaced, so it is read once.
 	static std::remove_cvref_t<decltype(std::declval<RE::ImageSpaceManager&>().GetRuntimeData().BSImagespaceShaderISSAOBlurH)> saoBlur = nullptr;
 	if (!saoBlur)
