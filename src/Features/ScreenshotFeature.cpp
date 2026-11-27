@@ -923,8 +923,9 @@ void ScreenshotFeature::ProcessCaptureRequest()
 	if (!captureDeferred) {
 		captureOutputPath.clear();
 		std::lock_guard lock(requestedPathsMutex);
-		if (!requestedPaths.empty()) {
-			captureOutputPath = std::move(requestedPaths.front());
+		// A request waits for a frame that renders the snapshot it names.
+		if (!requestedPaths.empty() && Snapshot::CurrentId() >= requestedPaths.front().minSnapshot) {
+			captureOutputPath = std::move(requestedPaths.front().path);
 			requestedPaths.pop();
 			captureRequested = true;
 		}
@@ -1225,10 +1226,10 @@ void ScreenshotFeature::Capture()
 	pendingReadbacks.push_back(std::move(screenshot));
 }
 
-void ScreenshotFeature::RequestCapture(std::filesystem::path a_outputPath)
+void ScreenshotFeature::RequestCapture(std::filesystem::path a_outputPath, std::uint64_t a_minSnapshot)
 {
 	std::lock_guard lock(requestedPathsMutex);
-	requestedPaths.push(std::move(a_outputPath));
+	requestedPaths.push({ std::move(a_outputPath), a_minSnapshot });
 	scriptedInFlight.fetch_add(1, std::memory_order_acq_rel);
 }
 #undef I18N_KEY_PREFIX

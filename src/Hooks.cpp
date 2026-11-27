@@ -532,6 +532,20 @@ struct IDXGISwapChain_Present
 {
 	static HRESULT WINAPI thunk(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 	{
+		const HRESULT retval = RenderFrameEnd(This, SyncInterval, Flags);
+		// The game side of the Present point: the test runner's milestones and steps read and queue game work. Phase 7 runs it at the
+		// game thread's publish; RenderFrameEnd moves to the render thread.
+		Testing::OnGamePresent();
+		return retval;
+	}
+
+	/**
+	* @brief The render side's frame end: the UI stage, DCLF's frame end, the present, the seal, pacing, metrics, the features' Reset,
+	* the test runner's shots and exit. It reads only the adopted snapshot, CS's frame and render-owned state (the live-read
+	* detector's Half::FrameEnd scope), so the render thread can call it. Today on the thread that presents.
+	*/
+	static HRESULT RenderFrameEnd(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
+	{
 		// Nsight Perf passes span one frame's rendering: ended before the overlay and Present, begun after.
 		GpuCounters::OnPresentBegin();
 		// A feature or the engine writing a target field is fatal in graph modes.
@@ -742,8 +756,9 @@ struct IDXGISwapChain_Present
 			GpuEventTimers::PassSkipAfterPresent();
 			globals::state->Reset();
 		}
-		// The test runner: milestones, steps, the status file. Not a feature's: it runs with every feature off.
-		Testing::OnPresent();
+		// The test runner's render side: the render frame count, the live-image shots, the exit. Not a feature's: it runs with every
+		// feature off.
+		Testing::OnFrameEnd();
 
 		FrameRecorder::OnPresentEnd();
 

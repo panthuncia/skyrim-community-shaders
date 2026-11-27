@@ -37,12 +37,19 @@ namespace RenderGraph::Engine::Native::WaterEffects
 namespace RenderGraph::Engine::ImageSpace
 {
 	struct GameInputs;
+	struct WorldSettings;
 
 	/**
 	* @brief Native mode: the adopted snapshot's ImageSpace inputs, which the native post chain draws from, so the frame's description
 	* at Begin reads the same values. Null in guest mode and before the first snapshot. Render owner.
 	*/
 	const GameInputs* SnapshotInputs();
+
+	/**
+	* @brief Native mode: the adopted snapshot's world settings (the RenderWorld scopes' INI values, switches and portal fog), which
+	* the native scopes draw from, so the frame's description at Begin reads the same values. Null as SnapshotInputs. Render owner.
+	*/
+	const WorldSettings* SnapshotWorld();
 
 	/**
 	* @brief Native mode: whether this render frame applies a TAA history reset the game asked for (the loading menu's flag, taken in

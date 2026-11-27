@@ -395,10 +395,79 @@ namespace RenderGraph::Frame::PostChain
 		state.haveSlot[a_frame.slot] = true;
 	}
 
+	namespace
+	{
+		/** @brief The first SAO level that draws with the contrast form: the first whose height is at most 16 (heights halve from kMAIN's). */
+		std::uint8_t SaoContrastLevel(std::uint32_t a_levels)
+		{
+			// A static object, not the pointer CommonLib's GetSingleton reads.
+			static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> targets{ REL::RelocationID(524970, 411451) };
+			const auto height = targets.get()->renderTargetData[RE::RENDER_TARGET::kMAIN].height;
+			for (std::uint32_t level = 1; level < a_levels; ++level)
+				if ((height >> (level - 1)) <= 16)
+					return static_cast<std::uint8_t>(level);
+			return 0;
+		}
+
+		/** @brief The SAO parity: RenderSSAO increments its counter (helper +0x54) and wraps it at 2 before drawing. Render state. */
+		std::uint8_t SaoParity()
+		{
+			const auto* manager = RE::ImageSpaceManager::GetSingleton();
+			const auto sao = manager ? Member<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(manager), kSao) : 0;
+			if (!sao)
+				return 0;
+			const auto counter = Member<std::int32_t>(sao, 0x54) + 1;
+			return static_cast<std::uint8_t>(counter > 1 ? 0 : counter);
+		}
+
+		/** @brief ReadWorld from the snapshot's world settings and frame counter (native). */
+		WorldFields ReadWorldFrom(Scope a_scope, WorldFields a_fields, const Engine::ImageSpace::WorldSettings& a_world, std::uint32_t a_frameCounter)
+		{
+			a_fields.read = true;
+			a_fields.normals = static_cast<std::uint8_t>(a_world.ssrOn ? ((~a_frameCounter & 1u) | 4u) : 4u);
+			a_fields.ssrBlur = a_world.ssrBlur;
+			a_fields.saoHalf = a_world.saoHalf;
+			switch (a_scope) {
+			case Scope::Reflections:
+				a_fields.ssr = a_world.ssrOn;
+				a_fields.ssrDownsample = 0;
+				if (a_world.ssrDownsample && a_world.ssrDivider > 1)
+					a_fields.ssrDownsample = a_world.ssrDivider == 4 ? 2 : 1;
+				break;
+			case Scope::Ssao:
+				a_fields.saoLevels = static_cast<std::uint8_t>(a_world.saoLevels);
+				a_fields.saoTemporal = a_world.saoTemporal;
+				a_fields.saoParity = SaoParity();
+				a_fields.saoContrast = a_world.saoContrastOn ? SaoContrastLevel(a_world.saoLevels) : std::uint8_t(0);
+				break;
+			case Scope::Snow:
+				a_fields.snow = a_world.improvedSnow && a_world.snowOn;
+				break;
+			case Scope::SsaoComposite:
+				{
+					const bool fog = a_world.saoFog && a_world.portalFog;
+					a_fields.saoForm = static_cast<std::uint8_t>(a_world.saoOn ? (fog ? 1 : 0) : (fog ? 2 : 3));
+					break;
+				}
+			case Scope::WaterBlend:
+				a_fields.waterHistory = static_cast<std::uint8_t>(a_frameCounter & 1u);
+				break;
+			default:
+				break;
+			}
+			return a_fields;
+		}
+	}
 
 	WorldFields ReadWorld(Scope a_scope, const WorldFields& a_base)
 	{
 		WorldFields fields = a_base;
+		// Native: the snapshot's values, which the native scopes draw from. Only the SAO counter and kMAIN's height, render state, are
+		// read from the engine there.
+		if (const auto* world = Engine::ImageSpace::SnapshotWorld()) {
+			if (const auto* inputs = Engine::ImageSpace::SnapshotInputs(); inputs && inputs->read)
+				return ReadWorldFrom(a_scope, fields, *world, inputs->frameCounter);
+		}
 		auto* manager = CS_ENGINE_READ(ImageSpace, RecordTime, RE::ImageSpaceManager::GetSingleton());
 		if (!manager)
 			return fields;
@@ -421,23 +490,9 @@ namespace RenderGraph::Frame::PostChain
 			{
 				fields.saoLevels = static_cast<std::uint8_t>(Global<std::uint32_t>(kSaoLevels));
 				fields.saoTemporal = Global<bool>(kSaoTemporal);
-				// RenderSSAO increments its counter and wraps it at 2 before drawing. The raw AO target is 62 + 2 * counter.
-				if (const auto sao = Member<std::uintptr_t>(base, kSao)) {
-					const auto counter = Member<std::int32_t>(sao, 0x54) + 1;
-					fields.saoParity = static_cast<std::uint8_t>(counter > 1 ? 0 : counter);
-				}
-				// The first level whose height is at most 16 draws with the contrast form. Heights halve from kMAIN's.
-				fields.saoContrast = 0;
-				if (Global<bool>(kSaoContrast)) {
-					// A static object, not the pointer CommonLib's GetSingleton reads.
-					static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> targets{ REL::RelocationID(524970, 411451) };
-					const auto height = targets.get()->renderTargetData[RE::RENDER_TARGET::kMAIN].height;
-					for (std::uint32_t level = 1; level < fields.saoLevels; ++level)
-						if ((height >> (level - 1)) <= 16) {
-							fields.saoContrast = static_cast<std::uint8_t>(level);
-							break;
-						}
-				}
+				// The raw AO target is 62 + 2 * the parity.
+				fields.saoParity = SaoParity();
+				fields.saoContrast = Global<bool>(kSaoContrast) ? SaoContrastLevel(fields.saoLevels) : std::uint8_t(0);
 				break;
 			}
 		case Scope::Snow:

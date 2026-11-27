@@ -470,8 +470,12 @@ namespace Testing
 			directory = directory.empty() ? logger::log_directory().value_or(std::filesystem::path{}) / "dclf-shots" : directory / "shots";
 			std::error_code error;
 			std::filesystem::create_directories(directory, error);
-			globals::features::screenshotFeature.RequestCapture(directory / (a_arg + ".png"));
-			logger::info("[TEST] shot {} asked at snapshot {} (render frame {})", a_arg, Snapshot::CurrentId(), Snapshot::Render().frame);
+			// Decision 51: inside a game update the shot renders the next update's snapshot, the first with this step's work in it (the
+			// steps' game work runs after the update). A repeated or older snapshot is not shot. Outside an update (the main menu, a
+			// loading screen), the next frame.
+			const std::uint64_t minSnapshot = Snapshot::InGameUpdate() ? Snapshot::LastGameId() + 1 : 0;
+			globals::features::screenshotFeature.RequestCapture(directory / (a_arg + ".png"), minSnapshot);
+			logger::info("[TEST] shot {} asked at game snapshot {}: renders snapshot {} or newer", a_arg, Snapshot::LastGameId(), minSnapshot);
 			auto& run = Run();
 			std::scoped_lock lock(run.mutex);
 			run.shots.push_back(a_arg);
