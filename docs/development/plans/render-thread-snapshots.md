@@ -347,3 +347,20 @@ references are folded into the tables above. Per-feature live-read counts (raw g
 Effects11 133, PostProcessing 66, PhysicalSky 52, Upscaling 50, WetnessEffects 34, LightLimitFix 25, SkySync 24,
 TerrainBlending 20, HDR 18, GrassOptimizations 17, ExponentialHeightFog 16, Skylighting 15, UnifiedWater 13,
 ViewAtmosphere 12. DCLF's are mostly at capture points by design.
+
+## After phase 7 (user, 2026-11-27)
+
+These follow the thread split, in this order.
+
+1. **Cleanup pass over the render-thread work.** Review every change made for this roadmap (the snap0-* to snap7-*
+   branches; `render-thread-decisions.md` names them). Find code that is suboptimal, and code with the same intent added
+   in more than one place, and consolidate it. Remove the migration's remaining switches, observe or diagnostic
+   scaffolding that is no longer needed, temporary code and dead paths. Keep the detectors that guard the result (the
+   live-read and engine-render detectors, shot references).
+2. **Performance investigation.** Confirm that the render-thread route reaches its goal: fully asynchronous rendering,
+   where the render thread never waits on the game and the game never waits on the render thread. Measure both threads
+   (waits, stalls, pacing, frame times under the update-rate cap at 30, 60 and 240, GPU-bound and CPU-bound scenes, in
+   Release where timing matters). Fix clear issues; record larger design decisions in the decision log for later.
+3. **Summary and handoff document** for future agents starting from this work: what the architecture is now (snapshots,
+   capture and publish, the render thread, the retire queue, the native drivers), where each part lives, how to test it,
+   the decisions that matter, and what is left.

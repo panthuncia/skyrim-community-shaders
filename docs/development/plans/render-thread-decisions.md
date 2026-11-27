@@ -1019,3 +1019,10 @@ pushes until the user is back.
      precipitation occlusion (`Skylighting.cpp`, `OccluderRules.cpp`, `WetnessEffects.cpp`) needs the engine's
      `ComputeProjection` ported; ImageSpace's step-lag check, Begin's reads and ApplyReflections' `active` write; the frame
      end's LODBlendRingFix and SunShadowMaskFix updates, the SSS settings write and the harness's player read.
+
+## 2026-11-27: steps after phase 7 (user)
+
+213. **Three steps follow the thread split** (roadmap section "After phase 7"): a cleanup pass over all render-thread
+     changes (suboptimal code, duplicate-intent code consolidated, migration switches and temporary code removed); a
+     performance investigation confirming fully asynchronous rendering (neither thread waits on the other), fixing clear
+     issues and logging larger design decisions; a summary and handoff document for future agents.
