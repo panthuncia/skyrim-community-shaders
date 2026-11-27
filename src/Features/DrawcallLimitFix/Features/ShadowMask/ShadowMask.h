@@ -118,9 +118,13 @@ namespace DCLF::Features::ShadowMask
 		/**
 		 * @brief Render thread, at a view's shadow mask call, after the engine's open technique ended. The draws of every light in the
 		 * view's caster array, in the engine's order, computed from the light, its maps and the camera. a_lights gets the lights.
-		 * False, with a_why, when a light cannot be computed (the engine then draws the batch).
+		 * False, with a_why, when a light cannot be computed (the engine then draws the batch). a_menuEye, for a menu scene CS renders
+		 * natively: the menu camera's eye, and the draws start from CS's own states rather than the engine's.
 		 */
-		bool Build(View a_view, Run& a_run, std::vector<RE::BSShadowLight*>& a_lights, std::string& a_why);
+		bool Build(View a_view, Run& a_run, std::vector<RE::BSShadowLight*>& a_lights, std::string& a_why, const RE::NiPoint3* a_menuEye = nullptr);
+
+		/** @brief FUN_1415221e0: the vertex descriptor of a raw Utility technique (the technique less 0x2B). */
+		std::uint32_t VertexDescriptorOf(std::uint32_t a_raw);
 
 		/** @brief The lights of a_view's caster array in the masks' loop order (each takes as many slots as it has maps). */
 		std::vector<RE::BSShadowLight*> Lights(View a_view);
@@ -139,6 +143,13 @@ namespace DCLF::Features::ShadowMask
 	 * logged once per reason and only cleared. Render owner, in a native world frame.
 	 */
 	void DrawWorldMasks(const float a_clear[4]);
+
+	/**
+	 * @brief Native: a menu scene's shadow masks (UI3DSceneManager::Render's call of SE 51856 / AE 52728) for a render CS draws itself, with
+	 * no engine function called. kSHADOW_MASK is cleared, the draws are built from the menu scene node's kept shadow lights with the menu
+	 * camera's eye a_eye, and they run at the anchor. Fatal when they cannot be built. Render owner.
+	 */
+	void DrawMenuMasks(const RE::NiPoint3& a_eye);
 
 	/** @brief The view's name for logs and client ids. */
 	const char* NameOf(View a_view);

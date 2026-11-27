@@ -271,6 +271,20 @@ namespace DCLF::Features::MenuViews::Scenes
 			draw.viewport = Family::LatchViewport(engine.depthBias);
 			Observe::State(a_capture.pass, engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra, engine.depthMode, engine.stencilMode, engine.stencilRef,
 				engine.fill, engine.cull, engine.depthBias, rss.alphaTestEnabled ? rss.alphaTestRef : -1.0f, draw.viewport, static_cast<std::int32_t>(((rss.renderTargets[0] + 1) & 0xFF) | (((rss.renderTargets[1] + 1) & 0xFF) << 8) | (((rss.renderTargets[2] + 1) & 0xFF) << 16) | (((rss.renderTargets[3] + 1) & 0xFF) << 24)));
+			if (Observe::Enabled()) {
+				float frame[kFrameRows][4]{};
+				std::memcpy(frame, run.latch.data() + draw.frameOffset, kFrameBytes);
+				const Native::DrawState drawState{ .blend = engine.blendMode,
+					.write = engine.writeMode,
+					.depth = engine.depthMode,
+					.cull = engine.cull,
+					.depthBias = engine.depthBias,
+					.stencil = engine.stencilMode,
+					.stencilRef = engine.stencilRef,
+					.alphaRef = constants.alphaTestRef };
+				Observe::Utility(a_capture.pass, constants, frame, descriptor, draw.depthSlice, drawState, draw.viewport, Unwrap(rss.PSTexture[0]), rss.PSTextureAddressMode[0].underlying(),
+					rss.PSTextureFilterMode[0].underlying());
+			}
 
 			for (auto& owner : owners)
 				if (owner)
@@ -626,7 +640,9 @@ namespace DCLF::Features::MenuViews::Scenes
 		{
 			static void thunk(void* a_manager, RE::NiCamera* a_camera)
 			{
+				Observe::Begin(View::MenuShadow, a_camera);
 				RunBatch<View::MenuShadow>([&] { func(a_manager, a_camera); });
+				Observe::End();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};

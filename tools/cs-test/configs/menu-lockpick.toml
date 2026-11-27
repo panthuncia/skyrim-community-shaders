@@ -1,0 +1,39 @@
+# The lockpicking menu's 3D lock (UI3DSceneManager's scheme 7): `lockpick` locks the nearest door or container and activates it
+# as the player; a shot of the lock. Compose it: native-vulkan+menu-lockpick, guest+menu-lockpick.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "lockpick"
+
+[[steps]]
+at = "previous"
+frames = 150
+do = "shot"
+arg = "lockpick"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "Lockpicking Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["lockpick"]
+shot_refs = ["lockpick"]

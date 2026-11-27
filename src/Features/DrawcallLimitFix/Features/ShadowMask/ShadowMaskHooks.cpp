@@ -181,6 +181,28 @@ namespace DCLF::Features::ShadowMask
 			Shadows::Native::ReturnShadowmaps(*light);
 	}
 
+	void DrawMenuMasks(const RE::NiPoint3& a_eye)
+	{
+		DCLF_ZONE("CS.DCLF.ShadowMask.Native");
+		Family::BeginBatch();
+		// SetCurrentRenderTarget(0, kSHADOW_MASK, SRTM_CLEAR): each light then writes its own channel, the only one its passes read.
+		constexpr float kClear[4]{ 1.0f, 1.0f, 1.0f, 1.0f };
+		if (!::RenderGraph::Engine::Skeleton::ClearColour(RE::RENDER_TARGET::kSHADOW_MASK, kClear))
+			::RenderGraph::Fatal("shadow masks", "kSHADOW_MASK's clear at a native menu scene render was not taken");
+		if (!ShadowMaskDraws::Available() || !ShadowMaskDraws::CanTake(View::Menu))
+			return;
+		auto run = std::make_shared<Run>();
+		run->view = View::Menu;
+		std::vector<RE::BSShadowLight*> lights;
+		std::string why;
+		if (!Native::Build(View::Menu, *run, lights, why, &a_eye))
+			::RenderGraph::Fatal("shadow masks", std::format("a native menu scene's masks cannot be built: {}", why));
+		if (run->draws.empty())
+			ShadowMaskDraws::Keep(std::move(run->owners));
+		else
+			ShadowMaskDraws::Submit(std::move(run));
+	}
+
 	void PreflightHooks()
 	{
 		if (!Enabled())

@@ -237,8 +237,11 @@ namespace DCLF::Features::Shadows::Engine
 			std::memcpy(&descriptor.lightTransform, transform.data(), sizeof(transform));
 		}
 
-		/** @brief The light's Render in full, without drawing. Its writes to the descriptors come first, as in each Render. */
-		void Render(RE::BSShadowLight& a_light, Kind a_kind, const std::vector<Draw>& a_draws, std::uint32_t& a_index)
+		/**
+		 * @brief The light's Render in full, without drawing. Its writes to the descriptors come first, as in each Render. a_leaveState
+		 * leaves the camera state, accumulator and render mode the last draw sets, which the world's later passes read.
+		 */
+		void Render(RE::BSShadowLight& a_light, Kind a_kind, const std::vector<Draw>& a_draws, std::uint32_t& a_index, bool a_leaveState)
 		{
 			auto& data = a_light.GetRuntimeData();
 			auto* descriptors = data.shadowmapDescriptors.data();
@@ -270,6 +273,8 @@ namespace DCLF::Features::Shadows::Engine
 			if (a_kind == Kind::Frustum && data.drawFocusShadows)
 				for (std::uint32_t i = 0; i < FocusCount() && i < std::size(data.focusShadowmapDescriptors); ++i)
 					data.focusShadowmapDescriptors[i].renderTarget = static_cast<RE::RENDER_TARGET_DEPTHSTENCIL>(DepthTarget::kSHADOWMAPS);
+			if (!a_leaveState)
+				return;
 			// The last draw leaves its camera state, SubmitAccumulator's camera, accumulator and render mode set, and a paraboloid's Render
 			// resets the radius.
 			const auto& last = *a_draws.back().descriptor;
@@ -305,7 +310,7 @@ namespace DCLF::Features::Shadows::Engine
 							draw.view, draw.mode);
 					return Fallback::Capture;
 				}
-			Render(a_light, a_kind, draws, a_index);
+			Render(a_light, a_kind, draws, a_index, true);
 			return Fallback::None;
 		}
 
@@ -339,6 +344,16 @@ namespace DCLF::Features::Shadows::Engine
 		for (const auto& draw : draws)
 			a_index += draw.counts ? 1u : 0u;
 		return false;
+	}
+
+	void RenderMenuLight(RE::BSShadowLight& a_light, std::uint32_t& a_index)
+	{
+		const auto kind = a_light.GetIsParabolicLight() ? Kind::Parabolic : Kind::Frustum;
+		thread_local std::vector<Draw> draws;
+		draws.clear();
+		ListDraws(a_light, kind, draws);
+		if (!draws.empty())
+			Render(a_light, kind, draws, a_index, false);
 	}
 
 	void SetShadowMapsOpen(bool a_open)
