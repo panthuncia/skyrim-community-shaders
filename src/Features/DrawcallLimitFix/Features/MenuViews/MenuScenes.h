@@ -477,6 +477,12 @@ namespace DCLF::Features::MenuViews::Scenes
 		const char* AddUtility(const UtilityView& a_view, const RE::BSGeometry& a_geometry, Run& a_run, std::string& a_detail);
 		/** @brief Whether a draw's refusal only leaves it out of this render: a program still building, no buffers yet, a streaming texture. */
 		bool LeftOut(const char* a_why);
+		/**
+		 * @brief A draw's refusal (decision 149): one that only leaves it out of this render (LeftOut) is logged when a_leftOut counts its
+		 * first, any other is fatal. a_scene names the scene for the log, a_batch the draw's batch.
+		 */
+		void Refuse(const char* a_scene, std::string_view a_batch, const RE::BSGeometry& a_geometry, const char* a_why, const std::string& a_detail,
+			std::uint64_t& a_leftOut);
 
 		/** @brief FrameBuffer rows for a camera: SetCameraData's camera rows, no previous camera, the frame's ratios. */
 		void UtilityFrameRows(const RE::NiCamera& a_camera, float (*a_out)[4]);
@@ -533,6 +539,11 @@ namespace DCLF::Features::MenuViews::Scenes
 		void Keep(Family::Owners&& a_owners);
 		/** @brief Runs a_run's view at the anchor. True when submitted. */
 		bool Submit(std::shared_ptr<Run> a_run);
+		/**
+		 * @brief Hands a run to its view's client, or keeps its imports alive when the client cannot take it now. A run past its view's
+		 * draw limit is fatal. True when submitted.
+		 */
+		bool Hand(std::shared_ptr<Run> a_run);
 		std::string Status();
 	}
 }
