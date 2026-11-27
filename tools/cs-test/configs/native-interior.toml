@@ -2,8 +2,15 @@
 # Lighting's size changes (a custom interior size, a coc back out) with a shot after each, exit. Native Vulkan.
 extends = ["native-vulkan"]
 
+# God mode first: a hostile NPC in the save can kill the player before the shots.
 [[steps]]
 at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
 frames = 30
 do = "console"
 arg = "coc WhiterunDragonsreach"
