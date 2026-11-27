@@ -1135,3 +1135,19 @@ pushes until the user is back.
      (guest too); a menu-scene draw whose shader is not compiled yet is left out of that render instead of failing.
      Open: membership (CS draws 174 passes the engine does not and misses 2), the frozen-world copy, the explored-area
      difference against D3D11 that predates this, SE untested.
+
+## 2026-11-27: the native render thread (snap7-thread; director accepted)
+
+226. **Native renders on a CS render thread** (`Native/RenderThread.{h,cpp}`; design and decisions TH-a..TH-q in
+     `snap7-thread.md`). Routed updates (native, World, unpaused, no map, not the debug camera path) no longer call
+     Main::DrawFrame: the game thread runs DrawFrame's game items, publishes the snapshot with its ticket (which now
+     carries DCLF's newest fragment, adopted exactly by the render side) and returns at `PaceGameUpdate`. The render thread
+     renders the newest snapshot or repeats the current one and never waits on the game. Unrouted frames (pausing menus,
+     the map, main menu, loading screen, Bink) render on their producing thread with the render thread parked; parking at
+     route changes is the only wait. The update-rate cap is always on with the thread (`CS_UPDATE_RATE_CAP` removed). The
+     UI producer records into the update's snapshot and is replayed at the render side's UI point. About 15 DCLF states
+     the halves shared became immutable copies in the ticket or light set. Accepted as proposed: TH-a..TH-q, U-a..d, P-a..e.
+     Frame rates (Dev-Fast, one sample): perf-dragonsreach 181 -> 224 fps, perf-taa 139 -> ~146 fps at 60 updates/s.
+     Full suite on the merge: 21/23; window-resize-stress-taa loses the device (passes single-threaded) and native-interior
+     lost the device once at a load's held frame (rerun passed). Both go to snap7-thread2 with the shared-state, parity
+     buffer, update-dip and frame-start-read items.
