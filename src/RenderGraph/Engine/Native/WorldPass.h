@@ -134,6 +134,9 @@ namespace RenderGraph::Engine::Native::WorldPass
 	*/
 	bool WaterBlendRuns(std::uint32_t a_flags);
 
+	/** @brief TESWaterSystem's state from the adopted snapshot (ImageSpace's inputs): 1 or 2 under water, else 0. Render owner. */
+	std::int32_t Underwater();
+
 	/** @brief The driver's water blend test for this render (WaterBlendRuns), kept until the next: the water surface's raw-water flag. */
 	void SetRawWater(bool a_raw);
 

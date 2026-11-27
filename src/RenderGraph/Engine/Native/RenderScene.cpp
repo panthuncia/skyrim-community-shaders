@@ -292,6 +292,16 @@ namespace RenderGraph::Engine::Native::Scene
 			auto* splatter = RE::ScreenSplatter::GetSingleton();
 			auto* splatterRoot = splatter ? Field<std::byte*>(splatter, 0x8) : nullptr;
 			p.splatter = splatterRoot && Field<std::uint16_t>(splatterRoot, 0x124) != 0;
+			p.sceneShadows = Global<const bool>(513204, 390933);
+			p.keptCasters = Global<const std::int32_t>(528090, 415035);
+			p.sunShadowsOff = Global<const bool>(528095, 415040);
+			p.postResolveFlag = Global<const bool>(513335, 391110);
+			if (auto* manager = RE::ImageSpaceManager::GetSingleton())
+				if (auto* taa = Field<std::byte*>(manager, 0x1f0))
+					p.taaWaterHistory = Field<bool>(taa, 0x38);
+			if (auto* water = RE::TESWaterSystem::GetSingleton())
+				p.waterHeight = Field<float>(water, 0xc0);
+			p.localMapPasses = Global<const bool>(527793, 414746);
 			if (auto* dofCamera = Global<RE::NiCamera*>(528062, 415007)) {
 				const auto& frustum = dofCamera->GetRuntimeData2().viewFrustum;
 				p.dofCamera = true;

@@ -3,6 +3,8 @@
 #include "RenderGraph/Engine/Native/WorldPass.h"
 
 #include "Deferred.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpaceBlock.h"
 #include "RenderGraph/Engine/Native/EngineAccess.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/RenderScene.h"
@@ -192,28 +194,28 @@ namespace RenderGraph::Engine::Native::WorldPass
 
 	bool WaterBlendRuns(std::uint32_t a_flags)
 	{
-		// ImageSpaceManager +0x1f0 is TAA's helper: +0x38 its water history. Its form is CS's (TaaForm), 1 after the water mask point.
-		const auto* manager = RE::ImageSpaceManager::GetSingleton();
-		const auto taa = manager ? *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(manager) + 0x1f0) : 0;
-		if (!taa || *reinterpret_cast<const bool*>(taa + 0x38) || taaForm != 1)
+		// TAA's water history (ImageSpaceManager +0x1f0 +0x38) off; TAA's form is CS's (TaaForm), 1 after the water mask point.
+		const auto& frame = Scene::Current();
+		if (!frame.valid || frame.taaWaterHistory || taaForm != 1)
 			return false;
 		if ((a_flags & 0x280) || (a_flags & 10))
 			return false;
-		// 1 or 2 under water (TESWaterSystem's state). At 1 the blend runs only with the camera above the water's height (+0xc0).
-		const auto underwater = Global<std::int32_t>(513267, 391008);
+		// 1 or 2 under water. At 1 the blend runs only with the camera above the water's height.
+		const auto underwater = Underwater();
 		if (underwater == 2)
 			return false;
 		if (underwater == 1) {
-			const auto* water = RE::TESWaterSystem::GetSingleton();
 			const auto& snapshot = Snapshot::Current();
-			if (!water || !snapshot)
-				return false;
-			const float height = *reinterpret_cast<const float*>(reinterpret_cast<std::uintptr_t>(water) + 0xc0);
-			if (snapshot->cameras.Current(Snapshot::ViewId::Main).position.z <= height)
+			if (!snapshot || snapshot->cameras.Current(Snapshot::ViewId::Main).position.z <= frame.waterHeight)
 				return false;
 		}
-		// The local map's passes.
-		return !Global<bool>(527793, 414746);
+		return !frame.localMapPasses;
+	}
+
+	std::int32_t Underwater()
+	{
+		const auto* inputs = ImageSpace::SnapshotInputs();
+		return inputs && inputs->read ? inputs->underwater : 0;
 	}
 
 	ShiftWindow::ShiftWindow() { shiftWindow = true; }

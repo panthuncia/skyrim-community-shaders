@@ -65,6 +65,17 @@ namespace RenderGraph::Engine::Native::Scene
 		bool dofCamera = false;
 		float dofNear = 0.0f;
 		float dofFar = 0.0f;
+		// The masks: the scene's shadows (390933), a caster kept last frame (415035), and the sun's shadows off (415040), which picks
+		// the masks' clear.
+		bool sceneShadows = false;
+		std::int32_t keptCasters = 0;
+		bool sunShadowsOff = false;
+		// RenderWorld: its post-resolve flag 1 (391110), and what the water blend tests: TAA's water history (ImageSpaceManager +0x1f0
+		// +0x38), the water's height (TESWaterSystem +0xc0) and the local map's passes (414746).
+		bool postResolveFlag = false;
+		bool taaWaterHistory = false;
+		float waterHeight = 0.0f;
+		bool localMapPasses = false;
 		// The shadow casters' light set (phase 7 item 2): what the shadow maps, masks and lens flares draw from. Null without DCLF.
 		std::shared_ptr<const DCLF::Features::Shadows::Native::LightSet> shadowLights;
 		// Light Limit Fix's scene lights, taken after the queued lights and the casters. Null without Light Limit Fix.
