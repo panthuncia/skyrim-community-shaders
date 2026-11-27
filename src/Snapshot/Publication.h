@@ -71,6 +71,13 @@ namespace Snapshot
 	/** @brief The adopted snapshot's id, 0 before the first. Any thread (for the test runner's status and logs). */
 	std::uint64_t CurrentId();
 
+	/**
+	* @brief The newest game update's snapshot Capture() built, for the game half's readers. Null before the first. Game thread. Today it
+	* is what the render side adopts in the same update: a cadence repeat renders it again, a dropped update's is never adopted, and a
+	* frame-only snapshot (CaptureFrame) never replaces it. Its id is LastGameId().
+	*/
+	const std::shared_ptr<const FrameSnapshot>& Building();
+
 	/** @brief Render identity, separate from the snapshot's game identity. */
 	struct RenderIdentity
 	{

@@ -84,6 +84,7 @@ namespace Snapshot
 			std::vector<UnrenderedFn> unrendered;
 			std::vector<UpdateEndFn> updateEnds;
 			std::shared_ptr<const FrameSnapshot> previous;  // the last published, adopted or not
+			std::shared_ptr<const FrameSnapshot> building;  // the newest game update's (Capture), never a frame-only one
 			std::uint64_t nextId = 1;
 			RE::FormID previousCell = 0;  // the player's cell at the previous update, by form id (an address can be reused)
 			RE::NiPoint3 previousPlayer{};
@@ -505,6 +506,7 @@ namespace Snapshot
 		const bool firstAfterLoad = fresh->events.Has(Event::FirstAfterLoad);
 		const bool first = fresh->id == 1;
 		g_lastGameId.store(fresh->id, std::memory_order_release);
+		Retire::LetGo(std::exchange(game.building, fresh));
 		Publish(fresh);
 		if (first || firstAfterLoad)
 			LogStats(*game.previous, first ? "first snapshot" : "load ended");
@@ -593,6 +595,11 @@ namespace Snapshot
 	std::uint64_t CurrentId()
 	{
 		return g_currentId.load(std::memory_order_acquire);
+	}
+
+	const std::shared_ptr<const FrameSnapshot>& Building()
+	{
+		return Game().building;
 	}
 
 	const RenderIdentity& Render()
