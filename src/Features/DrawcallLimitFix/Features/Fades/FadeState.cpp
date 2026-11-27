@@ -5,7 +5,10 @@
 #include "Features/DrawcallLimitFix/Features/Fades/FadesAddresses.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Snapshot/Publication.h"
 
 #include <algorithm>
@@ -28,9 +31,28 @@ namespace DCLF::FadeState
 		constexpr std::size_t kSceneGraphCamera = 0x128;
 		constexpr std::size_t kCameraLodAdjust = 0x184;
 
-		// Render thread, captured in BeginFrame.
-		std::array<float, 4> fadeEye{};
-		std::array<float, 2> treeHeight{ 0.0f, std::numeric_limits<float>::infinity() };
+		/** @brief The ticket's fade inputs (TicketPart::Fades), taken in the game half. */
+		struct TicketFades
+		{
+			std::array<float, 4> eye{};
+			std::array<float, 2> treeHeight{ 0.0f, std::numeric_limits<float>::infinity() };
+			FadeFrame frame{};  // the engine's values, the step for one update; no camera, no tree height
+			bool camera = false;
+			ShadowCameras::Planes frustum{};
+		};
+
+		/** @brief The rendered ticket's fade inputs, or null before the first ticket. */
+		const TicketFades* Ticketed()
+		{
+			return static_cast<const TicketFades*>(TicketPartOf(TicketPart::Fades));
+		}
+
+		/** @brief The world scene graph's main camera, read now. Null when there is none. */
+		const RE::NiCamera* MainCameraNow()
+		{
+			const auto* sceneGraph = Global<const std::byte*>(Engine::Address::kWorldSceneGraph);
+			return sceneGraph ? At<const RE::NiCamera*>(sceneGraph, kSceneGraphCamera) : nullptr;
+		}
 
 		/** @brief MINSS a, b: a when a < b, else b (b when either is NaN). */
 		float MinSS(float a_a, float a_b) { return a_a < a_b ? a_a : a_b; }
@@ -292,82 +314,125 @@ namespace DCLF::FadeState
 		return verdict | (drawn ? kFadeVerdictDrawn : 0u);
 	}
 
+	namespace
+	{
+		/** @brief The engine's fade values, read now: the step for one update, no camera and no tree height. */
+		FadeFrame EngineFrame()
+		{
+			FadeFrame frame;
+			frame.counter = Global<std::int32_t>(Features::Fades::Address::kFadeFrameCounter);
+			frame.deltaTime = Global<float>(Features::Fades::Address::kFadeStepTime);
+			frame.fadesOn = Global<std::uint8_t>(Engine::Address::kFadesOn) ? 1u : 0u;
+			frame.lodUpdates = Global<std::uint8_t>(Engine::Address::kFadeLodUpdates) ? 1u : 0u;
+			frame.fadeInTime = Global<float>(Features::Fades::Address::kFadeStepDivisor);
+			frame.fadeOutTime = Global<float>(Features::Fades::Address::kFadeOutTime);
+			frame.fadeInAbove = Global<float>(Features::Fades::Address::kFadeInAbove);
+			frame.fadeOutBelow = Global<float>(Engine::Address::kFadeOutThreshold);
+			frame.blendTime = Global<float>(Features::Fades::Address::kFadeBlendTime);
+			frame.distanceMult = Global<float>(Engine::Address::kFadeDistanceMult);
+			frame.stepMax = Global<float>(Features::Fades::Address::kFadeStepMax);
+			frame.amountTime = Global<float>(Features::Fades::Address::kFadeAmountTime);
+			frame.metricScale = Global<float>(Engine::Address::kMetricScale);
+			frame.defaultScale = Global<float>(Engine::Address::kFadeDefaultScale);
+			frame.metricOverride = Global<float>(Engine::Address::kFadeSpecialA);
+			frame.overridden = UnorderedEqual(Global<float>(Engine::Address::kFadeSpecialA), Global<float>(Engine::Address::kFadeSpecialB)) ? 0u : 1u;
+			frame.lodFar = Global<float>(Features::Fades::Address::kLodFadeFar);
+			frame.lodNear = Global<float>(Features::Fades::Address::kLodFadeNear);
+			frame.treeLodFar = Global<float>(Features::Fades::Address::kTreeLodFadeFar);
+			frame.treeLodNear = Global<float>(Features::Fades::Address::kTreeLodFadeNear);
+			frame.lodMinimum = Global<float>(Features::Fades::Address::kLodFadeMinimum);
+			frame.one = Global<float>(Features::Fades::Address::kFloatOne);
+			frame.amountSnapAbove = Global<float>(Features::Fades::Address::kFadeAmountSnapAbove);
+			frame.amountSnapOffset = Global<float>(Features::Fades::Address::kFadeAmountSnapOffset);
+			frame.snapRadiusLimit = Global<float>(Features::Fades::Address::kFadeSnapRadiusLimit);
+			for (std::uint32_t type = 0; type < 16; ++type)
+				frame.divisors[type] = Global<float>(Engine::Address::kFadeTypeDivisors + type * 4);
+			return frame;
+		}
+	}
+
 	FadeFrame SampleFrame(const RE::NiCamera* a_camera)
 	{
-		FadeFrame frame;
+		const auto* ticket = Ticketed();
+		// Native reads only the ticket: before the first one a zero LOD factor updates nothing.
+		FadeFrame frame = ::RenderGraph::Engine::Native::Active() ? (ticket ? ticket->frame : FadeFrame{}) : EngineFrame();
 		if (a_camera) {
 			frame.eye[0] = a_camera->world.translate.x;
 			frame.eye[1] = a_camera->world.translate.y;
 			frame.eye[2] = a_camera->world.translate.z;
 			frame.lodAdjust = At<float>(a_camera, 0x184);
 		}
-		frame.counter = Global<std::int32_t>(Features::Fades::Address::kFadeFrameCounter);
 		// The engine steps a visible root's fade once per game update by that update's step. The render steps it once by the sum of
 		// the updates the adopted snapshot stands for, and not at all on a repeated render (the cadence test mode's drop and repeat).
 		const auto& snapshot = Snapshot::Current();
 		const float updates = !snapshot ? 1.0f : Snapshot::Render().repeat ? 0.0f :
 		                                                                     static_cast<float>(snapshot->events.gameUpdates);
-		frame.deltaTime = Global<float>(Features::Fades::Address::kFadeStepTime) * updates;
-		frame.fadesOn = Global<std::uint8_t>(Engine::Address::kFadesOn) ? 1u : 0u;
-		frame.lodUpdates = Global<std::uint8_t>(Engine::Address::kFadeLodUpdates) ? 1u : 0u;
-		frame.fadeInTime = Global<float>(Features::Fades::Address::kFadeStepDivisor);
-		frame.fadeOutTime = Global<float>(Features::Fades::Address::kFadeOutTime);
-		frame.fadeInAbove = Global<float>(Features::Fades::Address::kFadeInAbove);
-		frame.fadeOutBelow = Global<float>(Engine::Address::kFadeOutThreshold);
-		frame.blendTime = Global<float>(Features::Fades::Address::kFadeBlendTime);
-		frame.distanceMult = Global<float>(Engine::Address::kFadeDistanceMult);
-		frame.stepMax = Global<float>(Features::Fades::Address::kFadeStepMax) * updates;  // each update's step is clamped on its own
-		frame.amountTime = Global<float>(Features::Fades::Address::kFadeAmountTime);
-		frame.metricScale = Global<float>(Engine::Address::kMetricScale);
-		frame.defaultScale = Global<float>(Engine::Address::kFadeDefaultScale);
-		frame.metricOverride = Global<float>(Engine::Address::kFadeSpecialA);
-		frame.overridden = UnorderedEqual(Global<float>(Engine::Address::kFadeSpecialA), Global<float>(Engine::Address::kFadeSpecialB)) ? 0u : 1u;
-		frame.lodFar = Global<float>(Features::Fades::Address::kLodFadeFar);
-		frame.lodNear = Global<float>(Features::Fades::Address::kLodFadeNear);
-		frame.treeLodFar = Global<float>(Features::Fades::Address::kTreeLodFadeFar);
-		frame.treeLodNear = Global<float>(Features::Fades::Address::kTreeLodFadeNear);
-		frame.lodMinimum = Global<float>(Features::Fades::Address::kLodFadeMinimum);
-		frame.one = Global<float>(Features::Fades::Address::kFloatOne);
-		frame.amountSnapAbove = Global<float>(Features::Fades::Address::kFadeAmountSnapAbove);
-		frame.amountSnapOffset = Global<float>(Features::Fades::Address::kFadeAmountSnapOffset);
-		frame.snapRadiusLimit = Global<float>(Features::Fades::Address::kFadeSnapRadiusLimit);
+		frame.deltaTime *= updates;
+		frame.stepMax *= updates;  // each update's step is clamped on its own
+		const auto treeHeight = TreeHeightTest();
 		frame.treeHeightBase = treeHeight[0];
 		frame.treeHeightLimit = treeHeight[1];
-		for (std::uint32_t type = 0; type < 16; ++type)
-			frame.divisors[type] = Global<float>(Engine::Address::kFadeTypeDivisors + type * 4);
 		return frame;
 	}
 
-	void BeginFrame()
+	std::shared_ptr<const void> TakeTicketPart()
 	{
-		const auto* sceneGraph = Global<const std::byte*>(Engine::Address::kWorldSceneGraph);
-		const auto* camera = sceneGraph ? At<const RE::NiCamera*>(sceneGraph, kSceneGraphCamera) : nullptr;
-		fadeEye = {};
-		if (camera)
-			fadeEye = { camera->world.translate.x, camera->world.translate.y, camera->world.translate.z, At<float>(camera, kCameraLodAdjust) };
+		auto t = std::make_shared<TicketFades>();
+		if (const auto* camera = MainCameraNow()) {
+			t->eye = { camera->world.translate.x, camera->world.translate.y, camera->world.translate.z, At<float>(camera, kCameraLodAdjust) };
+			ShadowCameras::Camera matrices;
+			ShadowCameras::CameraMatrices(*camera, matrices);
+			t->camera = true;
+			t->frustum = matrices.frustum;
+		}
 		// Match the list processes' height test. Their +0x121 byte is only written by constructors, so it is 0.
 		const std::uint32_t count = Global<std::uint32_t>(Engine::Address::kSceneListCount);
 		auto** processes = Global<RE::NiCullingProcess**>(Engine::Address::kListProcesses);
 		const bool heightTest = processes && count && processes[0] && At<std::uint8_t>(processes[0], Features::Fades::Address::kProcessTreeHeightTest) &&
 		                        Global<std::uint8_t>(Features::Fades::Address::kTreeHeightTestOn);
-		treeHeight = { Global<float>(Features::Fades::Address::kTreeHeightBase),
+		t->treeHeight = { Global<float>(Features::Fades::Address::kTreeHeightBase),
 			heightTest ? Global<float>(Features::Fades::Address::kTreeHeightLimit) : std::numeric_limits<float>::infinity() };
+		t->frame = EngineFrame();
+		return t;
 	}
 
-	const RE::NiCamera* MainCamera()
+	std::array<float, 4> FadeEye()
 	{
-		const auto* sceneGraph = Global<const std::byte*>(Engine::Address::kWorldSceneGraph);
-		return sceneGraph ? At<const RE::NiCamera*>(sceneGraph, kSceneGraphCamera) : nullptr;
+		const auto* ticket = Ticketed();
+		return ticket ? ticket->eye : std::array<float, 4>{};
 	}
 
-	std::array<float, 4> FadeEye() { return fadeEye; }
-	std::array<float, 2> TreeHeightTest() { return treeHeight; }
+	std::array<float, 2> TreeHeightTest()
+	{
+		const auto* ticket = Ticketed();
+		return ticket ? ticket->treeHeight : TicketFades{}.treeHeight;
+	}
 
 	void LatchGlobals(float (&a_eye)[4], float (&a_treeHeight)[2])
 	{
-		std::copy(fadeEye.begin(), fadeEye.end(), a_eye);
+		const auto eye = FadeEye();
+		const auto treeHeight = TreeHeightTest();
+		std::copy(eye.begin(), eye.end(), a_eye);
 		a_treeHeight[0] = treeHeight[0];
 		a_treeHeight[1] = treeHeight[1];
+	}
+
+	bool MainCameraFrustum(ShadowCameras::Planes& a_out)
+	{
+		if (::RenderGraph::Engine::Native::Active()) {
+			const auto* ticket = Ticketed();
+			if (!ticket || !ticket->camera)
+				return false;
+			a_out = ticket->frustum;
+			return true;
+		}
+		const auto* camera = MainCameraNow();
+		if (!camera)
+			return false;
+		ShadowCameras::Camera matrices;
+		ShadowCameras::CameraMatrices(*camera, matrices);
+		a_out = matrices.frustum;
+		return true;
 	}
 
 	FadeNodeState ReadNode(const RE::NiAVObject& a_node)

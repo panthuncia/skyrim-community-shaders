@@ -20,6 +20,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -391,12 +392,12 @@ namespace DCLF::LoadHold
 				LogMapCensus(mapFrames, "the map closed");
 				mapFrames = 0;
 				// The world's objects are not in the set culled with the map camera.
-				BeginReentry("the map menu closed (a camera cut back: the world is not in the set culled with the map camera)");
+				BeginReentry("the map menu closed (a camera cut back: the world is not in the set culled with the map camera)", Snapshot::Building().get());
 				return;
 			}
 			mapFrames = 0;
 			PassCapture::Get().SetMapCensus(true);
-			BeginReentry("the map menu opened (a camera cut: the map's LOD is not in the set culled with the world camera)");
+			BeginReentry("the map menu opened (a camera cut: the map's LOD is not in the set culled with the world camera)", Snapshot::Building().get());
 		}
 
 		void WatchMap()
@@ -405,6 +406,20 @@ namespace DCLF::LoadHold
 				LogMapCensus(mapFrames, "the map open");
 				mapFrames = 0;
 			}
+		}
+	}
+
+	namespace
+	{
+		/**
+		* @brief The hold's state is written by the game half (the frame start, the map's re-entry) and by the render side (held views,
+		* the occlusion re-entry, the frame end), which run on two threads once native renders on its own thread. Held only for the
+		* entry's own work.
+		*/
+		std::recursive_mutex& HoldLock()
+		{
+			static std::recursive_mutex lock;
+			return lock;
 		}
 	}
 
@@ -420,6 +435,7 @@ namespace DCLF::LoadHold
 
 	void NoteHeld(View a_view)
 	{
+		const std::lock_guard lock(HoldLock());
 		if (!Active())
 			return;
 		++(a_view == View::Sun ? hold.heldSun : a_view == View::Occlusion ? hold.heldOcclusion : hold.heldShadow);
@@ -428,18 +444,19 @@ namespace DCLF::LoadHold
 		hold.heldThisFrame = true;
 	}
 
-	void BeginReentry(const char* a_why)
+	void BeginReentry(const char* a_why, const Snapshot::FrameSnapshot* a_frame)
 	{
+		const std::lock_guard lock(HoldLock());
 		reentryThisFrame = true;
 		const auto now = state.load(std::memory_order_acquire);
 		// The first world frames after a load's hold can still need a re-entry, because the graph rebuilds for re-made targets
 		// and shadow views and occlusion maps are not DCLF's for a frame.
 		if ((now == HoldState::Idle || now == HoldState::Releasing) && !reentryBlocked && !Scene::FrameView::Get().NotDrawingYet() &&
-			!Scene::FrameView::LoadShown()) {
+			!Scene::FrameView::LoadShownIn(a_frame)) {
 			hold = {};
 			hold.start = hold.progress = std::chrono::steady_clock::now();
 			hold.reentry = a_why;
-			hold.loadEpoch = Snapshot::Current() ? Snapshot::Current()->loadEpoch : Snapshot::LoadEpoch();
+			hold.loadEpoch = a_frame ? a_frame->loadEpoch : Snapshot::LoadEpoch();
 			withMenu.store(false, std::memory_order_relaxed);
 			StoreState(HoldState::Holding);
 			logger::info("[DCLF] load hold: started (a re-entry: {}): the presents held, the last frame stays on screen", a_why);
@@ -449,6 +466,7 @@ namespace DCLF::LoadHold
 
 	void NoteUndrawable(View a_view, std::string_view a_why)
 	{
+		const std::lock_guard lock(HoldLock());
 		if (Active()) {
 			NoteHeld(a_view);
 			return;
@@ -463,6 +481,7 @@ namespace DCLF::LoadHold
 
 	void OnFrameStart()
 	{
+		const std::lock_guard lock(HoldLock());
 		WatchMapStart();
 		// The render side's measurement of the actors still loading, counted on the game side.
 		if (::RenderGraph::Engine::Native::Active())
@@ -480,6 +499,7 @@ namespace DCLF::LoadHold
 
 	void OnFrameEnd()
 	{
+		const std::lock_guard lock(HoldLock());
 		WatchMap();
 		const auto now = state.load(std::memory_order_acquire);
 		if (now == HoldState::Releasing) {
@@ -560,8 +580,10 @@ namespace DCLF::LoadHold
 		{
 			static void thunk(bool a_active)
 			{
-				if (a_active)
+				if (a_active) {
+					const std::lock_guard lock(HoldLock());
 					OnLoadBegin();
+				}
 				func(a_active);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;

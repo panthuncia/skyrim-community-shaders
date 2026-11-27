@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -76,8 +77,13 @@ namespace DCLF
 		 */
 		void SelectNative();
 
-		/** @brief This frame's selection, or null before CalculateActiveShadowCasterLights has run this frame. */
-		const Frame* Current(std::uint32_t a_sceneFrame) const { return frame.valid && frame.sceneFrame == a_sceneFrame ? &frame : nullptr; }
+		/**
+		 * @brief This frame's selection, or null before CalculateActiveShadowCasterLights has run this frame. Native's render side reads
+		 * the copy its light set carries (the selection its game half made), whatever a_sceneFrame.
+		 */
+		const Frame* Current(std::uint32_t a_sceneFrame) const;
+		/** @brief Native's game half, at the light set: a copy of the selection's frame for the render side, or null. */
+		std::shared_ptr<const Frame> CopyFrame() const { return frame.valid ? std::make_shared<const Frame>(frame) : nullptr; }
 
 	private:
 		LightSelection() = default;

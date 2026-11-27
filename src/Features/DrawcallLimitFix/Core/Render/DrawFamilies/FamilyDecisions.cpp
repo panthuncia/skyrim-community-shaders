@@ -75,8 +75,8 @@ namespace DCLF
 			if (scene && Draws::FamilySetUp(*scene, family) && Extensions::DrawFamilyOn(family) && !Scene::FrameView::Get().NotDrawingYet() &&
 				(!Direct::CpuFrame() || entry.contribution.main.direct))
 				owned = entry.contribution.frame.decide({ a_frame, scene, family, &waits });
-			impl->familyOwned[f] = owned;
-			impl->familyWaiting[f] = !owned && waits;
+			impl->familyOwned[f].store(owned, std::memory_order_release);
+			impl->familyWaiting[f].store(!owned && waits, std::memory_order_release);
 			// The engine passes the family replaces are withheld whether it is owned or still waiting.
 			PassCapture::Get().SetFamilyWithheld(family, owned || waits);
 			if (entry.contribution.frame.owned)
@@ -86,11 +86,16 @@ namespace DCLF
 
 	bool IndirectDraws::DrawFamilyOwned(Api::DrawFamily a_family) const
 	{
-		return impl && impl->familyOwned[static_cast<std::size_t>(a_family)];
+		return impl && impl->familyOwned[static_cast<std::size_t>(a_family)].load(std::memory_order_acquire);
 	}
 
 	std::uint32_t IndirectDraws::DrawFamiliesWaiting() const
 	{
-		return impl ? static_cast<std::uint32_t>(std::ranges::count(impl->familyWaiting, true)) : 0u;
+		if (!impl)
+			return 0u;
+		std::uint32_t waiting = 0;
+		for (const auto& family : impl->familyWaiting)
+			waiting += family.load(std::memory_order_acquire) ? 1u : 0u;
+		return waiting;
 	}
 }

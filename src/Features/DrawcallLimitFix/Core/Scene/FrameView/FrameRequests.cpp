@@ -566,7 +566,9 @@ namespace DCLF::Scene
 			CaptureMirrorRequests();
 			Diagnostics::Notify<Diagnostics::ScenePoint::MirrorProbePoint>();
 		}
-		Extensions::ServeDrawFamilies(sceneStep);
+		// Native's game half leaves the draw families' mirrors to its renders (FrameDriver::BeginFrame): their commits read them.
+		if (!t_gameHalf)
+			Extensions::ServeDrawFamilies(SceneStep());
 	}
 
 	void FrameView::ServeFadeNodeRequests()

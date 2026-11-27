@@ -445,10 +445,13 @@ namespace DCLF
 		void RequestLighting(const PipelineKey& a_key, std::uint32_t a_slot);
 		/** @brief Scene lane only. The newest catalog since the last call, or null if none is newer. */
 		std::shared_ptr<const PipelineCatalog> TakeCatalog();
-		/** @brief Render thread, frame start. Holds the catalog the installed publication was resolved from, for the frame. */
-		void HoldCatalog(std::shared_ptr<const PipelineCatalog> a_catalog) { heldCatalog = std::move(a_catalog); }
-		/** @brief The frame's catalog, or null before the first. */
-		const std::shared_ptr<const PipelineCatalog>& HeldCatalog() const { return heldCatalog; }
+		/**
+		 * @brief Frame start. Holds the catalog the installed publication was resolved from, for the frame: native's game half its own
+		 * (a_gameHalf), the render side the one its ticket carries.
+		 */
+		void HoldCatalog(std::shared_ptr<const PipelineCatalog> a_catalog, bool a_gameHalf) { (a_gameHalf ? gameCatalog : heldCatalog) = std::move(a_catalog); }
+		/** @brief The frame's catalog of the asking half, or null before the first. */
+		const std::shared_ptr<const PipelineCatalog>& HeldCatalog(bool a_gameHalf) const { return a_gameHalf ? gameCatalog : heldCatalog; }
 
 		/**
 		 * @brief Any thread. Asks the lane for a shadow view key's pipeline. Shadow pipelines are a separate set, depth only, with the
@@ -535,6 +538,7 @@ namespace DCLF
 		std::unique_ptr<Impl> impl;
 		TargetFormats targets;
 		std::shared_ptr<const PipelineCatalog> heldCatalog;
+		std::shared_ptr<const PipelineCatalog> gameCatalog;  // native's game half
 		Stats stats;
 
 		friend struct IndirectState GetIndirectState(const PipelineCatalog&);
@@ -544,9 +548,12 @@ namespace DCLF
 		friend struct ShadowIndirectState GetShadowIndirectState(const PipelineCatalog&, DXGI_FORMAT);
 	};
 
-	/** @brief Render thread. The frame's catalog, which every pipeline lookup in the frame resolves from. */
+	/** @brief Whether this thread is inside native's game half (Scene::FrameView::InGameHalf). */
+	bool InNativeGameHalf();
+
+	/** @brief The frame's catalog of the asking half, which every pipeline lookup in the frame resolves from. */
 	inline const PipelineCatalog* FrameCatalog()
 	{
-		return DrawPipelines::Get().HeldCatalog().get();
+		return DrawPipelines::Get().HeldCatalog(InNativeGameHalf()).get();
 	}
 }

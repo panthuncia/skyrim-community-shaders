@@ -9,12 +9,13 @@ namespace DCLF::Api
 	// Defined in Core/Extensions/Views.h.
 	class ViewPointContext;
 
-	/** @brief The engine points a view's work runs at, on the render thread while DCLF runs. */
+	/** @brief The engine points a view's work runs at while DCLF runs: the render half's on the render thread, FrameStartGame in the game half. */
 	enum class ViewPoint : std::uint8_t
 	{
-		FrameStartBeforeCoverage,  // frame start, before coverage is decided
-		FrameStartAfterTreeLod,    // frame start, after the draw families decide and before FrameValues::Kick
+		FrameStartBeforeCoverage,  // the render half's frame start, before coverage is decided
+		FrameStartAfterTreeLod,    // the render half's frame start, after the draw families decide and before FrameValues::Kick
 		DepthCommitted,            // inside the depth commit, before its epoch is submitted, or after the depth epoch if it did not commit
+		FrameStartGame,            // the game half's frame start (engine reads; values go to the render half in a ticket part)
 		Count,
 	};
 

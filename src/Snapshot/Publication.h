@@ -71,6 +71,13 @@ namespace Snapshot
 	/** @brief The adopted snapshot's id, 0 before the first. Any thread (for the test runner's status and logs). */
 	std::uint64_t CurrentId();
 
+	/**
+	* @brief The newest game update's snapshot Capture() built, for the game half's readers. Null before the first. Game thread. Today it
+	* is what the render side adopts in the same update: a cadence repeat renders it again, a dropped update's is never adopted, and a
+	* frame-only snapshot (CaptureFrame) never replaces it. Its id is LastGameId().
+	*/
+	const std::shared_ptr<const FrameSnapshot>& Building();
+
 	/** @brief Render identity, separate from the snapshot's game identity. */
 	struct RenderIdentity
 	{
@@ -129,8 +136,8 @@ namespace Snapshot
 	std::uint64_t LastRenderFrame();
 
 	/**
-	* @brief Game thread, after the update's render half: waits for the next slot of the update-rate cap (State::updateRateCap,
-	* decision 2). Only with CS_UPDATE_RATE_CAP=1 until phase 7, while the engine's Present still paces the game.
+	* @brief Game thread, after a routed update's publish while the render thread renders: waits for the next slot of the update-rate cap
+	* (State::updateRateCap, decision 2). Updates the game thread renders itself are paced by their own Present.
 	*/
 	void PaceGameUpdate();
 

@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Features/Fades/FadesInternal.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadeRoots.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadeState.h"
@@ -67,7 +68,6 @@ namespace DCLF::Features::Fades
 				.test = &RootTest,
 				.globalsKey = &RootGlobalsKey,
 				.kick = &KickFadeWriteBack,
-				.frameStart = &FadeState::BeginFrame,
 				.latchGlobals = &FadeState::LatchGlobals });
 		}
 
@@ -78,6 +78,8 @@ namespace DCLF::Features::Fades
 			RegisterEngine(a_context, Scene::fadeSnaps, Scene::fadeAmounts);
 			RegisterRender(a_context);
 			RegisterRootStates(a_context);
+			// The fade update's engine inputs, taken in the game half for the render half.
+			RegisterTicketPart(TicketPart::Fades, &FadeState::TakeTicketPart);
 			RegisterDiagnostics(a_context);
 			// Last, so the writer stores run after the other observers at Main::Update's entry.
 			RegisterWriters(a_context);

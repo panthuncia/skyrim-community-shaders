@@ -112,8 +112,8 @@ namespace DCLF
 		void NoteMemberLost(const RE::BSGeometry* a_geometry);
 		/** @brief Render thread. Every entry is walked until the next snapshot. */
 		void NoteAllMembersLost();
-		/** @brief Render thread. Samples MembershipWitness once so binding and the frame agree. */
-		std::uint32_t SampleMembershipWitness();
+		/** @brief Samples MembershipWitness of a_globals (the frame's capture) once so binding and the frame agree. */
+		std::uint32_t SampleMembershipWitness(const FrameGlobals& a_globals);
 		/** @brief Render thread, on install. A joined member's entry is checked for admission, a left member's entry is walked. */
 		void NoteSetChanges(const std::vector<const RE::BSGeometry*>& a_joined, const std::vector<const RE::BSGeometry*>& a_left);
 		/**

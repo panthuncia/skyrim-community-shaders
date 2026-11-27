@@ -9,16 +9,22 @@
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/NativeCasters.h"
 
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightSelection.h"
+#include "Features/DrawcallLimitFix/Features/Portals/PortalViews.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/FocusViews.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Local/LightViews.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LocalCameras.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/SunCamera.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Sun/SunViews.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/ShadowEpochs.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/RenderScene.h"
 #include "Snapshot/EngineReads.h"
@@ -213,6 +219,9 @@ namespace DCLF::Features::Shadows::Native
 
 	void SelectCasters()
 	{
+		// A frame the engine's own skeleton draws selects on the render owner: the last render's boards are not this frame's.
+		if (!Scene::FrameView::InGameHalf())
+			AdoptSet(nullptr);
 		auto* node = SceneNode();
 		auto* world = WorldCamera();
 		if (!node || !world)
@@ -279,7 +288,30 @@ namespace DCLF::Features::Shadows::Native
 			DCLF::Engine::At<std::uint8_t>(mainBytes, 0x5C) = 1;
 			DCLF::Engine::At<RE::NiCamera*>(mainBytes, 0x10) = WorldCamera();
 		}
+		// Native's game half: the selection's working storage stays here; the render side reads copies.
+		if (Scene::FrameView::InGameHalf()) {
+			set->boards.views = std::make_shared<const ShadowViews>(ShadowViews::Get());
+			set->boards.selection = LightSelection::Get().CopyFrame();
+			set->boards.sun = std::make_shared<const Sun::SunFrame>(Sun::SunBoard());
+			set->boards.lights = std::make_shared<const Local::LightFrame>(Local::LightsBoard());
+			set->boards.focus = std::make_shared<const Local::FocusFrame>(Local::FocusBoard());
+			set->boards.portals = PortalViews::Get().MainContext();
+		}
 		MadeSet(std::move(set));
+	}
+
+	void AdoptShadowViews()
+	{
+		// Only the native driver's render half draws from a game half's set.
+		const auto* set = RenderSet();
+		if (!::RenderGraph::Engine::Native::Scene::Current().valid || !set || !set->boards.views)
+			return;
+		auto& views = ShadowViews::Get();
+		views.AdoptList(*set->boards.views);
+		views.SetViewCapacity(IndirectDraws::Get().ShadowViewCapacity());
+		if (const auto* epochs = Extensions::ShadowEpochs())
+			epochs->beforeShadowCasters();
+		views.CoverAdopted();
 	}
 
 	void RenderShadowMaps()

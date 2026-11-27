@@ -8,6 +8,10 @@ namespace DCLF::Features::Shadows::Native
 {
 	struct LightSet;
 }
+namespace Snapshot
+{
+	struct FrameSnapshot;
+}
 struct LightLimitFixLights;
 
 /**
@@ -41,6 +45,9 @@ namespace RenderGraph::Engine::Native::Scene
 	struct Prepared
 	{
 		bool valid = false;          // a world frame's game half ran
+		RE::NiCamera* camera = nullptr;  // the world camera, only for the engine's RenderSaoCs
+		// A routed update's DCLF frame ticket (a DCLF::FrameTicket): its render renders it. Null when both halves run at once.
+		std::shared_ptr<const void> sceneTicket;
 		bool firstPerson = false;    // the first-person view is drawn
 		bool controlDriven = false;  // the movement controller's vfunc +0x78: RenderDepth's and RenderFirstPersonView's second argument
 		bool menuMode = false;       // UI +0x160 above 0: RenderWorld's and RenderFirstPersonView's first argument
@@ -76,9 +83,24 @@ namespace RenderGraph::Engine::Native::Scene
 	/** @brief Native only: Main::DrawFrame's world call of Main::RenderScene goes to CS's driver. */
 	void InstallHooks();
 
+	/**
+	* @brief A routed update's game half (Native/RenderThread.h), on the game thread in place of Main::DrawFrame's world call: the driver's
+	* game half, with DCLF's frame start making its ticket only. Fatal without the player or the world camera.
+	*/
+	Prepared PrepareRouted(RE::Main* a_main, const Snapshot::FrameSnapshot& a_snapshot);
+
+	/** @brief A routed render's world: DCLF's render half from the ticket, the water work, then the driver's render half. Render owner. */
+	void RecordRouted(const Prepared& a_frame);
+
+	/** @brief Whether this thread runs a routed update's game half (PrepareRouted). */
+	bool InGameHalf();
+
 	/** @brief Whether native's world frames run CS's driver in place of Main::RenderScene. */
 	bool Owns();
 
-	/** @brief The current world frame's game half, for its render half. Render side. Invalid outside a native world frame's render half. */
+	/**
+	* @brief The game half's values the render half records from: the Prepared handed to the driver's render half, while it records.
+	* Render side only; invalid outside a native world frame's render half (the game half never sees its own values here).
+	*/
 	const Prepared& Current();
 }

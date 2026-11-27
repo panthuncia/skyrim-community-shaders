@@ -21,13 +21,13 @@ namespace DCLF
 
 	void EngineReadWindow::NoteClose(std::uint32_t a_before)
 	{
-		++closes;
+		closes.fetch_add(1, std::memory_order_relaxed);
 		if (!(a_before & kLeases))
 			return;
-		++closesWaited;
-		const double us = DrainLeases();
-		waitedUs += us;
-		waitedMaxUs = (std::max)(waitedMaxUs, us);
+		closesWaited.fetch_add(1, std::memory_order_relaxed);
+		const auto ns = static_cast<std::uint64_t>(DrainLeases() * 1000.0);
+		waitedNs.fetch_add(ns, std::memory_order_relaxed);
+		for (auto max = waitedMaxNs.load(std::memory_order_relaxed); ns > max && !waitedMaxNs.compare_exchange_weak(max, ns, std::memory_order_relaxed);) {}
 	}
 
 	void EngineReadWindow::Close()
@@ -40,7 +40,7 @@ namespace DCLF
 
 	void EngineReadWindow::CloseAtPresent()
 	{
-		if (Snapshot::InGameUpdate() && FrameAnchors::IsMainThread())
+		if (Snapshot::InGameUpdate())
 			Close();
 	}
 
@@ -115,16 +115,13 @@ namespace DCLF
 		c.suspendWaitedMaxUs = static_cast<double>(suspendWaitedMaxUs.exchange(0, std::memory_order_relaxed));
 		c.mainThreadLeases = mainThreadLeases.exchange(0, std::memory_order_relaxed);
 		c.renderSideJobLeases = renderSideJobLeases.exchange(0, std::memory_order_relaxed);
-		if (!closes && !c.unleased && !c.suspends && !c.mainThreadLeases && !c.renderSideJobLeases)
-			return c;
-		c.any = true;
-		c.closes = closes;
-		c.closesWaited = closesWaited;
-		c.waitedUs = waitedUs;
-		c.waitedMaxUs = waitedMaxUs;
-		c.refused = refused.exchange(0, std::memory_order_relaxed);
-		closes = closesWaited = 0;
-		waitedUs = waitedMaxUs = 0.0;
+		c.closes = closes.exchange(0, std::memory_order_relaxed);
+		c.closesWaited = closesWaited.exchange(0, std::memory_order_relaxed);
+		c.waitedUs = static_cast<double>(waitedNs.exchange(0, std::memory_order_relaxed)) / 1000.0;
+		c.waitedMaxUs = static_cast<double>(waitedMaxNs.exchange(0, std::memory_order_relaxed)) / 1000.0;
+		c.any = c.closes || c.unleased || c.suspends || c.mainThreadLeases || c.renderSideJobLeases;
+		if (c.any)
+			c.refused = refused.exchange(0, std::memory_order_relaxed);
 		return c;
 	}
 }

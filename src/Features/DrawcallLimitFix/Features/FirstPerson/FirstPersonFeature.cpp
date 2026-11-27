@@ -2,6 +2,8 @@
 
 #include "Features/DrawcallLimitFix/Features/FirstPerson/FirstPerson.h"
 
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+
 #include <string>
 
 namespace DCLF::Features::FirstPerson
@@ -47,7 +49,9 @@ namespace DCLF::Features::FirstPerson
 		void Install(Api::InstallContext& a_context)
 		{
 			a_context.RegisterView(Contribution());
-			// Must run before the coverage, which decides whether the members are withheld.
+			// The game half reads the engine; the render half's start must run before the coverage, which decides whether the members are withheld.
+			a_context.RegisterViewWork({ .view = Api::EngineView::FirstPerson, .point = Api::ViewPoint::FrameStartGame, .run = &BeginGameFrame });
+			RegisterTicketPart(TicketPart::FirstPerson, &TakeTicketPart);
 			a_context.RegisterViewWork({ .view = Api::EngineView::FirstPerson, .point = Api::ViewPoint::FrameStartBeforeCoverage, .run = &BeginFrame });
 			a_context.RegisterViewWork({ .view = Api::EngineView::FirstPerson, .point = Api::ViewPoint::DepthCommitted, .run = &ExecuteDepth });
 			a_context.RegisterCullHiddenSource({ .bit = Api::CullHiddenBit::Hidden, .nodes = &CullHiddenSkeleton });

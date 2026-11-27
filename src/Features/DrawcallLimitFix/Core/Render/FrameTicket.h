@@ -4,11 +4,13 @@
 
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
+#include "RenderGraph/Frame/Revision.h"
 
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace DCLF
@@ -40,5 +42,15 @@ namespace DCLF
 		std::shared_ptr<const FrameGlobals> globals;
 		std::shared_ptr<const LatePoses::FramePlan> latePlan;  // every render of the ticket uses it
 		std::array<std::shared_ptr<const void>, kTicketParts> parts;  // the features' values (RegisterTicketPart)
+		// Native's routed updates: the scene fragment the game half took out of the post and installed the claims of. The ticket's first
+		// render hands it to the frame revision at its Begin (FrameDriver::ExpectTicket); a repeat hands nothing. Render side only.
+		mutable std::optional<RenderGraph::Frame::Revision::Fragment> scene;
+		mutable std::atomic<bool> rendered{ false };  // a render took the ticket
+		// The scene went to a render's Begin, or on to the next ticket: whichever side exchanges it first owns the fragment.
+		mutable std::atomic<bool> sceneHanded{ false };
+		// Native: the game half's end confirmed the late-pose plan (LatePoses::ConfirmFrame). Written once before the ticket is published.
+		mutable bool latePosesConfirmed = false;
+		// Native's game half: what its frame start installed (Scene::FrameView::InstalledFrame), which its renders adopt. Null in guest.
+		std::shared_ptr<const void> installed;
 	};
 }

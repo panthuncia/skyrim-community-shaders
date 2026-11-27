@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 
 #include "State.h"
 
@@ -42,9 +43,12 @@ namespace DCLF::Features::Shadows::Local
 
 	void FocusCamera(Api::ShadowSourceCamera& a_camera)
 	{
-		const auto& board = FocusBoard();
-		a_camera.camera = board.CascadeOf(a_camera.light, a_camera.descriptor, a_camera.sceneFrame);
-		a_camera.focusTarget = board.TargetOf(a_camera.descriptor, a_camera.sceneFrame);
+		// Native's render side reads the copy its light set carries.
+		const auto* boards = Native::AdoptedBoards();
+		const auto& board = boards && boards->focus ? *boards->focus : FocusBoard();
+		const std::uint32_t frame = boards && boards->focus ? board.sceneFrame : a_camera.sceneFrame;
+		a_camera.camera = board.CascadeOf(a_camera.light, a_camera.descriptor, frame);
+		a_camera.focusTarget = board.TargetOf(a_camera.descriptor, frame);
 	}
 
 	FocusViews& FocusViews::Get()

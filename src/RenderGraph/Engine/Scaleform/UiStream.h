@@ -20,9 +20,10 @@ namespace RE
  * @brief The UI command stream: GFx's calls on the renderer in call order, with what they point at copied.
  *
  * The recorder (Renderer.cpp's hooks, native mode) appends one command per GRenderer call. The replay applies each command to a
- * RendererState, the renderer's state as CS keeps it, and turns the draws into graph draws. Each display is replayed at its
- * EndDisplay. A stream is finished at the end of MenuManager::DrawInterface and is immutable from then on; a game update's stream
- * goes into its frame snapshot (Snapshot/UiCommandStream.h). Each stream starts with a state header, the renderer state the
+ * RendererState, the renderer's state as CS keeps it, and turns the draws into graph draws. A record-only DrawInterface (an
+ * unpaused world frame) is replayed whole at the UI point (ReplaySnapshotUi); other frames replay each display at its EndDisplay.
+ * A stream is finished at the end of MenuManager::DrawInterface and is immutable from then on; it goes into its frame snapshot
+ * (Snapshot/UiCommandStream.h). Each stream starts with a state header, the renderer state the
  * streams before it left, so it replays the same alone, again or after skipped streams.
  */
 namespace RenderGraph::Engine::Scaleform
@@ -180,8 +181,7 @@ namespace RenderGraph::Engine::Scaleform
 	class UiStream
 	{
 	public:
-		std::uint64_t frame = 0;     // the present it was recorded for (FrameClock::PresentSerial)
-		std::uint64_t sequence = 0;  // one more per stream; uploads are applied by it (UiResources)
+		std::uint64_t sequence = 0;  // one more per stream, the stream's identity; uploads are applied by it (UiResources)
 		StreamHeader header;
 		std::vector<UiCommand> commands;
 		std::vector<std::byte> payload;

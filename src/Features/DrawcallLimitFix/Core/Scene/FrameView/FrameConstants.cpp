@@ -35,7 +35,7 @@ namespace DCLF::Scene
 		const bool pipelineInputsMoved = portFrame.sun && (!geometryPortFrame || !portFrame.SamePipelineInputs(*geometryPortFrame));
 		if (portFrame.sun) {
 			geometryPortFrame = portFrame;
-			geometryPortFrameNumber = sceneStep;
+			geometryPortFrameNumber = renderStep;
 			PostPipelineFrame(portFrame);
 		}
 		// Versioned only when it differs.

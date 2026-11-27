@@ -107,16 +107,23 @@ namespace DCLF
 
 		/** @brief Game half of the frame start (FrameDriver::GameFrameStart), once per game update. The update's capture. */
 		static std::shared_ptr<const FrameGlobals> Capture();
-		/** @brief Render half of the frame start. The ticket's capture, which Current() hands the render thread from now on. */
+		/** @brief Render half of the frame start. The ticket's capture, which Current() hands the render owner from now on. */
 		static void Adopt(std::shared_ptr<const FrameGlobals> a_globals);
 		/**
 		 * @brief Render thread, at RenderDepth's first-person draw. Records every node's hidden bit under a_root as the engine's culls saw them.
 		 * The next frame's capture uses these instead of the frame start's bits.
 		 */
 		static void NoteFirstPersonCulled(const RE::NiAVObject* a_root);
-		/** @brief The capture this thread reads: its Scope's, or the latest on the render thread. */
+		/**
+		 * @brief Native, game thread: binds the update's capture to the rest of the driver's game half (the light walk, the shadow
+		 * casters, Light Limit Fix's lights), from DCLF's frame start until EndGameHalf. A repeated render binds its ticket's again.
+		 */
+		static void BeginGameHalf(std::shared_ptr<const FrameGlobals> a_globals);
+		/** @brief Native, game thread: the end of the driver's game half. */
+		static void EndGameHalf();
+		/** @brief The capture this thread reads: its Scope's, the game half's on the game thread, or the latest adopted on the thread that owns rendering. */
 		static const FrameGlobals& Current();
-		/** @brief Reads since the last call from a thread with neither a scope nor the render thread's identity. The live-read detector's FrameGlobals site holds the count. */
+		/** @brief Reads since the last call from a thread with neither a scope nor render ownership. The live-read detector's FrameGlobals site holds the count. */
 		static std::uint64_t TakeUnscopedReads();
 
 		/** @brief Binds a capture to this thread for the scene work's frame. Engine reads inside it count as captures (Snapshot/EngineReads.h). */

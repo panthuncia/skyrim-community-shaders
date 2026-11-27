@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <utility>
 
 namespace DCLF::Features::Fades
@@ -50,6 +51,9 @@ namespace DCLF::Features::Fades
 		// The first caller claims and publishes them. Later callers compare and set animatedVaried if they differ.
 		RenderGraph::Frame::EventQueue<AnimatedFadeRoot> animatedNodes;
 		std::vector<AnimatedFadeRoot> animatedBatch;  // render thread
+		// The batch and its counts are prepared by the game half (before the list jobs' wait) and taken by the render side's commit,
+		// which run on two threads once native renders on its own thread. Held for the hand-off only, never across a drain wait.
+		std::mutex stampsLock;
 		enum : std::uint32_t
 		{
 			kAnimatedEmpty,
@@ -321,6 +325,7 @@ namespace DCLF::Features::Fades
 	void TakeAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs)
 	{
 		WaitAnimatedDrain();
+		const std::lock_guard lock(stampsLock);
 		a_roots.swap(animatedBatch);
 		animatedBatch.clear();
 		a_inputs = std::exchange(batchInputs, {});
@@ -350,7 +355,7 @@ namespace DCLF::Features::Fades
 		// Render thread. The batch's counts, made before the list jobs' wait.
 		AnimatedStamps preparedStamps;
 		bool stampsPrepared = false;
-		std::vector<std::uint32_t> stampScratch;  // per slot, zero between counts
+		thread_local std::vector<std::uint32_t> stampScratch;  // per slot, zero between counts
 	}
 
 	void CountAnimatedRoots(std::span<const AnimatedFadeRoot> a_roots, AnimatedStamps& a_stamps)
@@ -382,6 +387,7 @@ namespace DCLF::Features::Fades
 
 	bool TakeAnimatedStamps(AnimatedStamps& a_stamps)
 	{
+		const std::lock_guard lock(stampsLock);
 		if (!std::exchange(stampsPrepared, false))
 			return false;
 		std::swap(a_stamps, preparedStamps);
@@ -393,6 +399,7 @@ namespace DCLF::Features::Fades
 		// The producer owns the queue during a hand-off.
 		if (animatedDrainHanded.load(std::memory_order_acquire))
 			return;
+		const std::lock_guard lock(stampsLock);
 		DrainAnimatedFadesNow();
 		CountAnimatedRoots(animatedBatch, preparedStamps);
 		stampsPrepared = true;
@@ -403,6 +410,7 @@ namespace DCLF::Features::Fades
 		if (animatedDrainHanded.load(std::memory_order_acquire))
 			return;
 		// Nothing is expected here: the batch was taken before the wait. Late updates join it, and the commit counts it again.
+		const std::lock_guard lock(stampsLock);
 		const std::size_t late = animatedNodes.Drain([&](AnimatedFadeRoot&& a_root) { animatedBatch.push_back(a_root); });
 		const auto state = animatedState.load(std::memory_order_acquire);
 		if (!late && state == kAnimatedEmpty)

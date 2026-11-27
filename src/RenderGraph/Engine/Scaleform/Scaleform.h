@@ -1,5 +1,10 @@
 #pragma once
 
+namespace Snapshot
+{
+	struct FrameSnapshot;
+}
+
 /**
  * @brief Scaleform on the render graph, in graph mode (Engine::GraphMode).
  *
@@ -21,4 +26,39 @@ namespace RenderGraph::Engine::Scaleform
 	 * MenuManager::DrawInterface draws nothing itself: it is a game-side producer of the UI stream (decision 16). Any thread.
 	 */
 	bool OwnsRenderer();
+
+	/**
+	 * @brief Native mode, game thread, in a routed update before its snapshot is published (phase 7): MenuManager::DrawInterface's
+	 * display loop (SE 79947 / AE 82084) without its render state (the target binds, ApplyState, the viewports, the closing ISCopy).
+	 * Each shown menu's PostDisplay runs under the movie and menu stack locks; GFx's calls are only recorded, into
+	 * Snapshot::Building()'s UI stream holder. The render side draws the stream with ReplaySnapshotUi, which applies the target rule
+	 * the engine's binds made. Only for frames where GFx alone records inside DrawInterface (RecordsUiOnly).
+	 */
+	void ProduceUi(RE::UI* a_ui);
+
+	/**
+	 * @brief Game thread: whether this update's DrawInterface can be recorded alone (ProduceUi): an unpaused world frame without the
+	 * map, by the snapshot and by the UI asked now (a menu the update's UI jobs opened draws in this DrawInterface already), and no
+	 * offscreen PreDisplay due. A capture point.
+	 */
+	bool RecordsUiOnly(const Snapshot::FrameSnapshot& a_snapshot);
+
+	/**
+	 * @brief The UI point, native mode, render owner: DrawInterface's render-side work (Upscaling's PostDisplay, the clean-scene copy,
+	 * HDR's UI buffer, temporal off), then a_snapshot's UI stream replayed whole from its header, then temporal back. A repeated
+	 * render of the snapshot calls it again. Call it where Main::DrawFrame calls DrawInterface.
+	 */
+	void ReplaySnapshotUi(const Snapshot::FrameSnapshot& a_snapshot);
+
+	/**
+	 * @brief Whether DrawInterface's render-side work runs at CS's UI point (native, DrawInterface hooked). Then the features'
+	 * DrawInterface detours only call through. Any thread.
+	 */
+	bool OwnsUiPoint();
+
+	/**
+	 * @brief Engine render work other than GFx inside DrawInterface (a menu scene, an ImageSpace effect, the local map). In a
+	 * record-only DrawInterface it would draw out of order with the displays: counted and logged once. Any thread.
+	 */
+	void NoteOtherUiWork(const char* a_what);
 }

@@ -1,6 +1,10 @@
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
+
 #include "Snapshot/EngineReads.h"
 
+#include "Features/HDRDisplay.h"
+#include "Features/ScreenshotFeature.h"
+#include "Features/Upscaling.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -14,11 +18,11 @@
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
-#include "RenderGraph/FrameClock.h"
 #include "RenderGraph/Switches.h"
 #include "Snapshot/Publication.h"
 #include "Snapshot/Retire.h"
 #include "Snapshot/UiCommandStream.h"
+#include "Utils/Game.h"
 
 #include <algorithm>
 #include <array>
@@ -840,28 +844,34 @@ namespace RenderGraph::Engine::Scaleform
 			return ReadTargetViews(CurrentTarget(a_renderer), a_out);
 		}
 
+		/** @brief What ReadEngineTargets found. */
+		enum class EngineTargets : std::uint8_t
+		{
+			Read,      // the shadow state's target and depth
+			None,      // no renderer, or a target without a texture: the display has no targets
+			Renderer,  // the shadow state names no target with a view: GFx's current target stands in
+		};
+
 		/**
 		 * @brief The targets UI::DrawInterface bound, read from the engine's shadow state because the context's state is stale under
-		 * the flush latch. Render texture displays use GFx's current target. DrawInterface is a game-side producer (decision 16), so
-		 * these are capture-point reads.
+		 * the flush latch. At record time DrawInterface is a game-side producer (decision 16), so those are capture-point reads. A
+		 * record-only stream reads them at its replay instead (a_atReplay), on the render owner.
 		 */
-		bool ReadTargets(void* a_renderer, DisplayTargets& a_out, bool a_renderTexture)
+		EngineTargets ReadEngineTargets(DisplayTargets& a_out, bool a_atReplay)
 		{
-			if (a_renderTexture)
-				return ReadRendererTarget(a_renderer, a_out);
-			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
-			auto* shadow = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState);
+			auto* renderer = a_atReplay ? CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer) : CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
+			auto* shadow = a_atReplay ? CS_ENGINE_READ(ShadowState, RecordTime, globals::game::shadowState) : CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState);
 			if (!renderer || !shadow)
-				return false;
+				return EngineTargets::None;
 			const auto& rss = shadow->GetRuntimeData();
 			const auto index = static_cast<std::uint32_t>(rss.renderTargets[0]);
 			if (index >= static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL))
-				return ReadRendererTarget(a_renderer, a_out);
+				return EngineTargets::Renderer;
 			auto* rtv = renderer->GetRuntimeData().renderTargets[index].RTV;
 			if (!rtv)
-				return ReadRendererTarget(a_renderer, a_out);
+				return EngineTargets::Renderer;
 			if (!ViewTargets(rtv, nullptr, a_out))
-				return false;
+				return EngineTargets::None;
 			if (rss.depthStencil < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL)) {
 				const auto& depth = renderer->GetDepthStencilData().depthStencils[rss.depthStencil];
 				if (depth.texture) {
@@ -871,7 +881,23 @@ namespace RenderGraph::Engine::Scaleform
 					a_out.depthFormat = desc.Format;
 				}
 			}
-			return true;
+			return EngineTargets::Read;
+		}
+
+		/** @brief A display's targets at record time: the engine's, or GFx's current target for a render texture display. */
+		bool ReadTargets(void* a_renderer, DisplayTargets& a_out, bool a_renderTexture)
+		{
+			if (a_renderTexture)
+				return ReadRendererTarget(a_renderer, a_out);
+			switch (ReadEngineTargets(a_out, false)) {
+			case EngineTargets::Read:
+				return true;
+			case EngineTargets::Renderer:
+				return ReadRendererTarget(a_renderer, a_out);
+			case EngineTargets::None:
+				break;
+			}
+			return false;
 		}
 
 		/** @brief Makes a_targets the display's target and depth, each with a reference of its own. */
@@ -1688,12 +1714,32 @@ namespace RenderGraph::Engine::Scaleform
 		// ---------------------------------------------------------------------------------------------------------------------
 		// The replay: applies a UI stream's commands to the renderer state CS keeps and draws them through the translation above.
 
+		/**
+		 * @brief The cadence test mode's repeat check: each segment's hash (staging bytes, commands, textures, target, viewport) in a
+		 * stream's first render, compared with the same segment of each repeated render. Counted for the census. Cadence mode only.
+		 */
+		struct RepeatCheck
+		{
+			bool on = !::Switches::Value("CS_SNAPSHOT_CADENCE").empty();
+			std::vector<std::uint64_t> first;
+			std::size_t next = 0;
+			std::uint64_t same = 0, differ = 0, missing = 0;
+		};
+
+		RepeatCheck& Repeats()
+		{
+			static RepeatCheck s_check;
+			return s_check;
+		}
+
 		struct Replay
 		{
 			RendererState state;
 			std::unordered_map<const RE::GTexture*, std::uint32_t> textures;
 			std::shared_ptr<const UiStream> stream;
 			std::size_t cursor = 0;
+			bool again = false;  // this replay draws a stream drawn before: a repeated render of its snapshot
+			std::uint64_t repeatedRenders = 0;
 		};
 
 		Replay& Replayer()
@@ -1722,7 +1768,23 @@ namespace RenderGraph::Engine::Scaleform
 					Viewport viewport;
 					std::memcpy(&viewport, args.viewport, sizeof(viewport));
 					state.videoModeSet = c.b != 0;
-					(void)TranslateBeginDisplay(state, args.background, viewport, args.x0, args.x1, args.y0, args.y1, c.a >= 0 ? &a_stream.targets[c.a] : nullptr);
+					const DisplayTargets* targets = c.a >= 0 ? &a_stream.targets[c.a] : nullptr;
+					// A record-only stream reads the engine's targets here (c): its recorded entry is GFx's current target, for a
+					// shadow state that names none.
+					DisplayTargets engine;
+					if (c.c) {
+						switch (ReadEngineTargets(engine, true)) {
+						case EngineTargets::Read:
+							targets = &engine;
+							break;
+						case EngineTargets::None:
+							targets = nullptr;
+							break;
+						case EngineTargets::Renderer:
+							break;
+						}
+					}
+					(void)TranslateBeginDisplay(state, args.background, viewport, args.x0, args.x1, args.y0, args.y1, targets);
 					break;
 				}
 			case UiOp::EndDisplay:
@@ -1855,6 +1917,13 @@ namespace RenderGraph::Engine::Scaleform
 			}
 			// The stream replayed before goes to the retire queue: the GPU may still read the views it holds.
 			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::exchange(a_replay.stream, a_stream));
+			// The repeat check compares a repeated render's segments with the first render's.
+			auto& check = Repeats();
+			check.next = 0;
+			if (a_replay.again)
+				++a_replay.repeatedRenders;
+			else
+				check.first.clear();
 			a_replay.cursor = 0;
 			a_replay.textures.clear();
 			a_replay.state = a_stream->header.state;
@@ -1884,9 +1953,9 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		// ---------------------------------------------------------------------------------------------------------------------
-		// The recorder (native mode): every GRenderer call on the render owner becomes a UI stream command, with what it points at
-		// copied. Vertex and index arrays and the world matrix are copied at the first draw that reads them, since GFx's memory is
-		// valid while set and the D3D11 renderer reads it at the draw.
+		// The recorder (native mode): every GRenderer call on the thread that produces the UI becomes a UI stream command, with what
+		// it points at copied. Vertex and index arrays and the world matrix are copied at the first draw that reads them, since GFx's
+		// memory is valid while set and the D3D11 renderer reads it at the draw.
 
 		struct Recorder
 		{
@@ -1901,7 +1970,6 @@ namespace RenderGraph::Engine::Scaleform
 			float worldValues[16]{};
 			// A repeated render's stream (cadence repeat): GFx's calls are not recorded, and this stream is replayed in their place.
 			std::shared_ptr<const UiStream> repeat;
-			std::uint64_t repeatedRenders = 0;
 		};
 
 		Recorder& Rec()
@@ -1910,36 +1978,47 @@ namespace RenderGraph::Engine::Scaleform
 			return s_recorder;
 		}
 
-		/** @brief Whether GFx's setter calls update the recorder's mirror: native mode, on the render owner. */
+		/** @brief How the DrawInterface this thread runs is drawn (native mode). */
+		enum class UiMode : std::uint8_t
+		{
+			None,        // this thread produces no UI: GFx's calls are dropped
+			PerDisplay,  // the render owner records and replays each display at its EndDisplay
+			RecordOnly,  // recorded only: the UI point replays the whole stream (ReplaySnapshotUi)
+		};
+
+		thread_local UiMode t_uiMode = UiMode::None;
+
+		struct UiModeScope
+		{
+			explicit UiModeScope(UiMode a_mode) :
+				previous(std::exchange(t_uiMode, a_mode)) {}
+			~UiModeScope() { t_uiMode = previous; }
+			UiModeScope(const UiModeScope&) = delete;
+			UiModeScope& operator=(const UiModeScope&) = delete;
+			UiMode previous;
+		};
+
+		std::atomic<std::uint64_t> g_strayCalls{ 0 };  // GFx calls on the render owner outside DrawInterface
+		std::atomic<std::uint64_t> g_otherWork{ 0 };   // engine render work inside a record-only DrawInterface
+		std::atomic<std::uint64_t> g_recordOnly{ 0 }, g_perDisplay{ 0 };
+
+		/** @brief Whether GFx's setter calls update the recorder's mirror: native mode, inside a DrawInterface this thread produces. */
 		bool Mirroring()
 		{
-			return Native::Active() && FrameAnchors::IsRenderOwner();
+			if (!Native::Active())
+				return false;
+			if (t_uiMode != UiMode::None)
+				return true;
+			// The render owner's GFx calls all come through DrawInterface. One outside it would be lost.
+			if (FrameAnchors::IsRenderOwner() && g_strayCalls.fetch_add(1, std::memory_order_relaxed) == 0)
+				logger::warn("[ORG] Scaleform: GFx called the renderer on the render owner outside DrawInterface; the call is not drawn (counted in the census line)");
+			return false;
 		}
 
 		/** @brief Whether GFx's calls are recorded: mirroring, outside a repeated render. */
 		bool Recording()
 		{
 			return Mirroring() && !Rec().repeat;
-		}
-
-		std::shared_ptr<const UiStream> FinishStream();
-
-		/**
-		 * @brief The cadence test mode's repeat check: each segment's hash (staging bytes, commands, textures, target, viewport) in a
-		 * stream's first render, compared with the same segment of each repeated render. Counted for the census. Cadence mode only.
-		 */
-		struct RepeatCheck
-		{
-			bool on = !::Switches::Value("CS_SNAPSHOT_CADENCE").empty();
-			std::vector<std::uint64_t> first;
-			std::size_t next = 0;
-			std::uint64_t same = 0, differ = 0, missing = 0;
-		};
-
-		RepeatCheck& Repeats()
-		{
-			static RepeatCheck s_check;
-			return s_check;
 		}
 
 		std::uint64_t Fnv(std::uint64_t a_hash, const void* a_bytes, std::size_t a_size)
@@ -1968,7 +2047,7 @@ namespace RenderGraph::Engine::Scaleform
 			hash = Fnv(hash, &a_display.target, sizeof(a_display.target));
 			hash = Fnv(hash, a_display.viewport, sizeof(a_display.viewport));
 			hash = Fnv(hash, &a_display.scratch, sizeof(a_display.scratch));
-			if (!Rec().repeat) {
+			if (!Replayer().again) {
 				check.first.push_back(hash);
 				return;
 			}
@@ -1981,20 +2060,18 @@ namespace RenderGraph::Engine::Scaleform
 			++check.next;
 		}
 
-		/** @brief The open stream, opened with the header the last one left. A stream left open past its present is finished first. */
+		/**
+		 * @brief The open stream, opened with the header the last one left. Streams are per DrawInterface: its end finishes the one it
+		 * opened. UI producer.
+		 */
 		UiStream& Stream()
 		{
 			auto& recorder = Rec();
-			const auto serial = FrameClock::PresentSerial();
-			if (recorder.stream && recorder.stream->frame != serial)
-				Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, FinishStream());
 			if (!recorder.stream) {
 				recorder.stream = std::make_shared<UiStream>();
-				recorder.stream->frame = serial;
 				recorder.stream->sequence = ++recorder.sequence;
 				recorder.stream->header = recorder.next;
 				UiResources::OpenStream(recorder.stream->sequence);
-				Repeats().first.clear();
 				// The new stream carries its own copies.
 				recorder.vertexPending = recorder.mirror.vertexData != nullptr;
 				recorder.indexPending = recorder.mirror.indexData != nullptr;
@@ -2003,13 +2080,12 @@ namespace RenderGraph::Engine::Scaleform
 			return *recorder.stream;
 		}
 
-		/** @brief Finishes the open stream: its tail is replayed and it is immutable from here. Null when none is open. */
+		/** @brief Finishes the open stream: it is immutable from here. Null when none is open. UI producer; nothing is replayed. */
 		std::shared_ptr<const UiStream> FinishStream()
 		{
 			auto& recorder = Rec();
 			if (!recorder.stream)
 				return nullptr;
-			RunReplay(recorder.stream);
 			recorder.stream->named.clear();
 			recorder.next = recorder.stream->EndState();
 			UiResources::CloseStream(recorder.stream->sequence);
@@ -2108,7 +2184,12 @@ namespace RenderGraph::Engine::Scaleform
 			logger::info(
 				"[ORG] Scaleform: the game's renderer was called for {}; every other call was CS's; {} repeated renders replayed their snapshot's stream "
 				"(segments: {} as in the first render, {} differ, {} more than it had)",
-				calls.empty() ? "nothing" : calls, Rec().repeatedRenders, repeats.same, repeats.differ, repeats.missing);
+				calls.empty() ? "nothing" : calls, Replayer().repeatedRenders, repeats.same, repeats.differ, repeats.missing);
+			logger::info(
+				"[ORG] Scaleform: DrawInterface {} record-only (replayed at the UI point), {} per display; {} engine render calls inside a record-only "
+				"DrawInterface; {} GFx calls on the render owner outside DrawInterface",
+				g_recordOnly.load(std::memory_order_relaxed), g_perDisplay.load(std::memory_order_relaxed), g_otherWork.load(std::memory_order_relaxed),
+				g_strayCalls.load(std::memory_order_relaxed));
 			logger::info("[ORG] Scaleform: {}", UiResources::TakeStatsLine());
 		}
 
@@ -2138,7 +2219,10 @@ namespace RenderGraph::Engine::Scaleform
 				auto& stream = Stream();
 				DisplayTargets targets;
 				std::int32_t targetIndex = -1;
-				if (ReadTargets(a_renderer, targets, renderTexture)) {
+				// A record-only producer reads no engine state: the replay reads the engine's targets, and the stream keeps GFx's
+				// current target for a shadow state that names none.
+				const bool targetsAtReplay = !renderTexture && t_uiMode == UiMode::RecordOnly;
+				if (targetsAtReplay ? ReadRendererTarget(a_renderer, targets) : ReadTargets(a_renderer, targets, renderTexture)) {
 					targetIndex = static_cast<std::int32_t>(stream.targets.size());
 					stream.targets.push_back(std::move(targets));
 				}
@@ -2147,6 +2231,7 @@ namespace RenderGraph::Engine::Scaleform
 				auto& command = stream.Add(UiOp::BeginDisplay, &args, sizeof(args));
 				command.a = targetIndex;
 				command.b = videoMode;
+				command.c = targetsAtReplay;
 				return;
 			}
 			// Only the render owner captures. Another thread's display neither reads nor ends it.
@@ -2180,13 +2265,16 @@ namespace RenderGraph::Engine::Scaleform
 				if (!Mirroring())
 					return;
 				auto& recorder = Rec();
+				const bool perDisplay = t_uiMode == UiMode::PerDisplay;
 				if (recorder.repeat) {
 					// A repeated render draws the snapshot's display where GFx ends its own.
-					RunReplay(recorder.repeat, true);
+					if (perDisplay)
+						RunReplay(recorder.repeat, true);
 					return;
 				}
 				RecordPlain(UiOp::EndDisplay);
-				RunReplay(recorder.stream);
+				if (perDisplay)
+					RunReplay(recorder.stream);
 				return;
 			}
 			// Only the render owner captures. Another thread's display neither ends nor resets it.
@@ -2719,13 +2807,6 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief MenuManager::DrawInterface (SE 79947 / AE 82084), native mode: where a frame's UI stream is complete. It goes into the
-		 * snapshot the frame adopted: a game update's, or a frame-only one (a loading screen's on the serving thread, or a main-thread
-		 * frame outside Main::Update). A repeated render of the update (cadence repeat) lets GFx draw again but records nothing:
-		 * each of its displays is drawn from the snapshot's stream where GFx ends its own, the rest at the end. Menu scenes and the
-		 * interface's ImageSpace effect still run where DrawInterface calls them.
-		 */
-		/**
 		* @brief An offscreen menu's PreDisplay. Main::DrawFrame calls it before the world, through the offscreen menus' loop (SE 79948 /
 		* AE 82085). In graph mode, native and guest, it runs at DrawInterface's start instead, inside the UI stage, where its draws are
 		* CS's steps. Nothing in the world reads the targets they draw, so the move changes no image.
@@ -2779,43 +2860,149 @@ namespace RenderGraph::Engine::Scaleform
 		using BookPreDisplay = OffscreenPreDisplay<0>;
 		using MapPreDisplay = OffscreenPreDisplay<1>;
 
+		/**
+		 * @brief The UI point's render-side work, which the features' DrawInterface detours do outside native mode (in this order:
+		 * Upscaling's or HDR's detour, then Hooks.cpp's): Upscaling's PostDisplay (the jitter and dynamic resolution undone, the full
+		 * resolution camera), the clean-scene copy, HDR's UI buffer, then temporal off until the scope ends. Render owner.
+		 */
+		struct UiPoint
+		{
+			UiPoint()
+			{
+				auto& upscaling = globals::features::upscaling;
+				auto& hdr = globals::features::hdrDisplay;
+				if (upscaling.loaded) {
+					upscaling.PostDisplay();
+					globals::features::screenshotFeature.SnapshotCleanScene();
+					if (hdr.loaded)
+						hdr.SetUIBuffer();
+				} else if (hdr.loaded) {
+					globals::features::screenshotFeature.SnapshotCleanScene();
+					hdr.SetUIBuffer();
+				}
+				temporal = Util::GetTemporal();
+				Util::SetTemporal(false);
+			}
+			~UiPoint() { Util::SetTemporal(temporal); }
+			UiPoint(const UiPoint&) = delete;
+			UiPoint& operator=(const UiPoint&) = delete;
+			bool temporal = false;
+		};
+
+		/**
+		 * @brief Whether the render owner's DrawInterface for a_snapshot records only and the UI point replays after it: a game update's
+		 * unpaused world frame without the map, by the snapshot and by the UI at DrawInterface's start, and no offscreen PreDisplay due.
+		 * In those only GFx records inside DrawInterface. Other
+		 * frames (menus that pause, the map, the book, loading screens, frame-only snapshots) have menu scenes, ImageSpace effects or
+		 * PreDisplay draws recorded inline, so each display is replayed at its EndDisplay to keep their order.
+		 */
+		bool RecordOnlyFrame(const Snapshot::FrameSnapshot& a_snapshot);
+
 		struct DrawInterface
 		{
+			/**
+			 * @brief MenuManager::DrawInterface (SE 79947 / AE 82084), native mode. Its UI stream goes into the snapshot being built in a
+			 * game update (Snapshot::Building), else into the frame-only snapshot the frame adopted (a loading screen's on the serving
+			 * thread, a main-thread frame outside Main::Update).
+			 */
 			static void thunk(void* a_manager)
 			{
-				if (FrameAnchors::IsRenderOwner()) {
-					BookPreDisplay::RunDue();
-					MapPreDisplay::RunDue();
-				}
-				if (!NativeUi() || !FrameAnchors::IsRenderOwner())
+				if (!NativeUi()) {
+					if (FrameAnchors::IsRenderOwner()) {
+						BookPreDisplay::RunDue();
+						MapPreDisplay::RunDue();
+					}
 					return func(a_manager);
-				auto& recorder = Rec();
-				std::shared_ptr<const UiStream> repeat;
-				if (Snapshot::Render().repeat)
-					if (const auto& snapshot = Snapshot::Current(); snapshot && snapshot->ui)
-						repeat = snapshot->ui->Get();
-				if (repeat) {
-					Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, FinishStream());
-					recorder.repeat = repeat;
-					// The replay starts again from the stream's header.
-					Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::exchange(Replayer().stream, nullptr));
-					Repeats().next = 0;
-					func(a_manager);
-					RunReplay(repeat);
-					recorder.repeat.reset();
-					++recorder.repeatedRenders;
+				}
+				if (!FrameAnchors::IsRenderOwner())
+					return func(a_manager);
+				const auto snapshot = Snapshot::InGameUpdate() ? Snapshot::Building() : Snapshot::Current();
+				if (snapshot && RecordOnlyFrame(*snapshot)) {
+					RecordOnly(a_manager, *snapshot);
+					ReplaySnapshotUi(*snapshot);
 					return;
 				}
-				func(a_manager);
+				PerDisplay(a_manager, snapshot.get());
+			}
+
+			/**
+			 * @brief Records GFx's calls into a_snapshot's holder and replays nothing. A snapshot whose stream is set already is a
+			 * repeated render (cadence repeat): GFx draws again and nothing is recorded. UI producer.
+			 */
+			static void RecordOnly(void* a_manager, const Snapshot::FrameSnapshot& a_snapshot, void (*a_body)(void*) = nullptr)
+			{
+				const auto body = a_body ? a_body : func.get();
+				const auto& holder = a_snapshot.ui;
+				if (!holder)
+					RenderGraph::Fatal("Scaleform", "a record-only DrawInterface for a snapshot without a UI stream holder");
+				if (g_recordOnly.fetch_add(1, std::memory_order_relaxed) == 0)
+					logger::info("[ORG] Scaleform: first record-only DrawInterface (snapshot {}): GFx's calls are recorded, the UI point replays them after it",
+						a_snapshot.id);
+				auto& recorder = Rec();
+				const UiModeScope mode(UiMode::RecordOnly);
+				if (auto repeat = holder->Get()) {
+					recorder.repeat = std::move(repeat);
+					body(a_manager);
+					recorder.repeat.reset();
+					return;
+				}
+				body(a_manager);
+				if (auto finished = FinishStream())
+					holder->Set(std::move(finished));
+			}
+
+			/**
+			 * @brief The render owner records and replays each display at its EndDisplay, the tail at the end, inside the UI point. A
+			 * repeated render (the snapshot's stream is set) records nothing and draws each display from the snapshot's stream where GFx
+			 * ends its own. Menu scenes and the interface's ImageSpace effects run where DrawInterface calls them, between the displays.
+			 */
+			static void PerDisplay(void* a_manager, const Snapshot::FrameSnapshot* a_snapshot)
+			{
+				g_perDisplay.fetch_add(1, std::memory_order_relaxed);
+				const UiPoint point;
+				auto& recorder = Rec();
+				auto& replay = Replayer();
+				const Snapshot::UiCommandStream* holder = a_snapshot ? a_snapshot->ui.get() : nullptr;
+				const auto repeat = holder ? holder->Get() : nullptr;
+				replay.again = repeat != nullptr;
+				if (repeat) {
+					recorder.repeat = repeat;
+					// The replay starts again from the stream's header.
+					Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::exchange(replay.stream, nullptr));
+				}
+				{
+					const UiModeScope mode(UiMode::PerDisplay);
+					BookPreDisplay::RunDue();
+					MapPreDisplay::RunDue();
+					func(a_manager);
+				}
+				if (repeat) {
+					RunReplay(repeat);
+					recorder.repeat.reset();
+					return;
+				}
+				if (recorder.stream)
+					RunReplay(recorder.stream);
 				auto finished = FinishStream();
-				if (finished && !Snapshot::Render().repeat)
-					if (const auto& snapshot = Snapshot::Current(); snapshot && snapshot->ui)
-						snapshot->ui->Set(std::exchange(finished, nullptr));
+				if (finished && holder)
+					holder->Set(std::exchange(finished, nullptr));
 				// A stream no snapshot took still went to the GPU through its replay.
 				Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::move(finished));
 			}
+
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+
+		bool RecordOnlyFrame(const Snapshot::FrameSnapshot& a_snapshot)
+		{
+			if (!Snapshot::InGameUpdate() || a_snapshot.kind != Snapshot::FrameKind::World || a_snapshot.menus.paused || a_snapshot.menus.map ||
+				BookPreDisplay::due || MapPreDisplay::due)
+				return false;
+			// A menu the update's UI jobs opened after the capture draws in this DrawInterface already (its first frame), so the menus
+			// are asked again here. The UI is game state and DrawInterface's start is a capture point.
+			auto* ui = CS_ENGINE_READ(UI, CapturePoint, RE::UI::GetSingleton());
+			return ui && !ui->GameIsPaused() && !ui->IsMenuOpen(RE::MapMenu::MENU_NAME);
+		}
 
 		/** @brief Whether the object's vtable is GRendererD3D1x's, so the slots CS replaces are the expected functions. */
 		bool IsD3D1xRenderer(void* const* a_vtable)
@@ -2932,5 +3119,99 @@ namespace RenderGraph::Engine::Scaleform
 	bool OwnsRenderer()
 	{
 		return g_ownsRenderer.load(std::memory_order_acquire);
+	}
+
+	namespace
+	{
+		/**
+		* @brief MenuManager::DrawInterface's display loop (AE 0x140fa4f00) without its render state. The engine's loop: the TLS memory
+		* context 0x46, the movie lock, the menu stack lock (SE 525557 / AE 412033), then from the topmost menu that hides the ones below
+		* it (flag 0x200) or the bottom up to the top, each menu's PostDisplay (vfunc +0x30), then the render pass free list's returns
+		* (SE 100722 / AE 107502). Left out: the per-frame buffers, the target and depth binds, ApplyState, each menu's viewport, VParams
+		* at 1, and the ISCopy into the framebuffer when the bound target is not it (ReplaySnapshotUi ports the binds' rule).
+		*/
+		void DisplayMenus(void* a_ui)
+		{
+			auto* ui = static_cast<RE::UI*>(a_ui);
+			if (!*reinterpret_cast<const bool*>(reinterpret_cast<const std::byte*>(ui) + 0x1C0))
+				return;
+			static const REL::Relocation<std::uint32_t*> tlsIndex{ RELOCATION_ID(528600, 415542) };
+			auto* tls = reinterpret_cast<std::byte**>(__readgsqword(0x58));
+			auto* context = reinterpret_cast<std::uint32_t*>(tls[*tlsIndex.get()] + 0x768);
+			const auto savedContext = std::exchange(*context, 0x46u);
+			static const REL::Relocation<void (*)(void*)> lock{ RELOCATION_ID(80605, 82732) };
+			static const REL::Relocation<void (*)(void*)> unlock{ RELOCATION_ID(80606, 82733) };
+			static const REL::Relocation<RE::BSSpinLock*> stackLock{ RELOCATION_ID(525557, 412033) };
+			auto* movies = *reinterpret_cast<void**>(reinterpret_cast<std::byte*>(RE::BSScaleformManager::GetSingleton()) + 0x10);
+			lock(movies);
+			{
+				const RE::BSSpinLockGuard guard(*stackLock.get());
+				auto& stack = ui->menuStack;
+				if (!stack.empty()) {
+					std::uint32_t first = stack.size() - 1;
+					while (first > 0 && !(static_cast<std::uint32_t>(stack[first]->menuFlags.underlying()) & 0x200u))
+						--first;
+					for (std::uint32_t i = first; i < stack.size(); ++i)
+						if (const auto& menu = stack[i])
+							menu->PostDisplay();
+				}
+			}
+			unlock(movies);
+			static const REL::Relocation<void (*)()> returnPasses{ RELOCATION_ID(100722, 107502) };
+			returnPasses();
+			*context = savedContext;
+		}
+	}
+
+	void ProduceUi(RE::UI* a_ui)
+	{
+		if (!Native::Active())
+			RenderGraph::Fatal("Scaleform", "a game-side UI producer outside native mode");
+		const auto& snapshot = Snapshot::Building();
+		if (!snapshot)
+			RenderGraph::Fatal("Scaleform", "a game-side UI producer before the first game update's snapshot");
+		DrawInterface::RecordOnly(a_ui, *snapshot, &DisplayMenus);
+	}
+
+	bool RecordsUiOnly(const Snapshot::FrameSnapshot& a_snapshot)
+	{
+		return RecordOnlyFrame(a_snapshot);
+	}
+
+	void ReplaySnapshotUi(const Snapshot::FrameSnapshot& a_snapshot)
+	{
+		if (!FrameAnchors::IsRenderOwner())
+			RenderGraph::Fatal("Scaleform", "the UI point's replay off the render owner");
+		const UiPoint point;
+		// DrawInterface's binds before its displays: no bound target means kMAIN. The record-only stream reads the targets here.
+		if (auto* shadow = globals::game::shadowState) {
+			auto& rss = shadow->GetRuntimeData();
+			if (static_cast<std::int32_t>(rss.renderTargets[0]) == -1) {
+				rss.renderTargets[0] = static_cast<std::remove_cvref_t<decltype(rss.renderTargets[0])>>(RE::RENDER_TARGET::kMAIN);
+				rss.setRenderTargetMode[0] = RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR;
+				rss.stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
+			}
+		}
+		const auto stream = a_snapshot.ui ? a_snapshot.ui->Get() : nullptr;
+		if (!stream)
+			return;
+		auto& replay = Replayer();
+		replay.again = replay.stream == stream;
+		// The replay starts from the stream's header, a repeated render's too.
+		Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Render, std::exchange(replay.stream, nullptr));
+		RunReplay(stream);
+	}
+
+	bool OwnsUiPoint()
+	{
+		return Native::Active() && DrawInterface::func.address() != 0;
+	}
+
+	void NoteOtherUiWork(const char* a_what)
+	{
+		if (t_uiMode != UiMode::RecordOnly)
+			return;
+		if (g_otherWork.fetch_add(1, std::memory_order_relaxed) == 0)
+			logger::warn("[ORG] Scaleform: {} inside a record-only DrawInterface: it draws before the UI point's displays instead of between them (counted in the census line)", a_what);
 	}
 }

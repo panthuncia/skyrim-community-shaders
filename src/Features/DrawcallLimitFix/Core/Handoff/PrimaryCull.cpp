@@ -356,7 +356,7 @@ namespace DCLF
 		++cutStats.frames;
 		// A frame without FrameView's inputs samples the witness here.
 		if (sampledWitnessFrame != Scene::FrameView::Get().SceneStep())
-			SampleMembershipWitness();
+			SampleMembershipWitness(FrameGlobals::Current());
 		// A frame the cut skips drops the switch changes, so the next one reads every switch.
 		const bool switchResync = Scene::FrameView::Get().TakeSwitchChanges(switchChanges);
 		liveStale = switchResync || liveStale;
@@ -755,9 +755,9 @@ namespace DCLF
 		return (Scene::FrameView::Get().SetPhasesOf(a_object) & kSetMain) != 0;
 	}
 
-	std::uint32_t PrimaryCull::SampleMembershipWitness()
+	std::uint32_t PrimaryCull::SampleMembershipWitness(const FrameGlobals& a_globals)
 	{
-		sampledWitness = FrameGlobals::Current().membershipWitness;
+		sampledWitness = a_globals.membershipWitness;
 		sampledWitnessFrame = Scene::FrameView::Get().SceneStep();
 		return sampledWitness;
 	}

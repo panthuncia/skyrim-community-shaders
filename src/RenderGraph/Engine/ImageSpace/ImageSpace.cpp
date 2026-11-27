@@ -6,6 +6,7 @@
 #include "RenderGraph/Engine/Native/RenderScene.h"
 #include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
+#include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Switches.h"
@@ -2550,6 +2551,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(void* a_manager, std::uint32_t a_effect, std::uint64_t a_source, std::uint64_t a_destination, std::uint64_t a_param)
 			{
+				Scaleform::NoteOtherUiWork("an ImageSpace effect");
 				const MenuEffectCall call(a_effect, static_cast<std::int32_t>(a_source), static_cast<std::int32_t>(a_destination));
 				func(a_manager, a_effect, a_source, a_destination, a_param);
 			}
@@ -2564,6 +2566,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(void* a_manager, std::uint32_t a_effect, void* a_texture, std::uint64_t a_destination, std::uint64_t a_param)
 			{
+				Scaleform::NoteOtherUiWork("an ImageSpace texture effect");
 				const MenuEffectCall call(a_effect, kLoadedSource, static_cast<std::int32_t>(a_destination));
 				func(a_manager, a_effect, a_texture, a_destination, a_param);
 			}

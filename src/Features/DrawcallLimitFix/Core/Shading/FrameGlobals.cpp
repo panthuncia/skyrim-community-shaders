@@ -19,9 +19,12 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Scene/RootViewEvents.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "Utils/Game.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <string>
 
 #include <ankerl/unordered_dense.h>
@@ -238,11 +241,32 @@ namespace DCLF
 		std::shared_ptr<const FrameGlobals> latest = std::make_shared<FrameGlobals>();
 		std::array<std::shared_ptr<const FrameGlobals>, 8> recent;
 		std::uint32_t recentNext = 0;
-		std::atomic<std::uint32_t> renderThread{ 0 };
-		// A read off the render thread with no capture bound, counted by the live-read detector.
+		// A read off the render owner with no capture bound, counted by the live-read detector.
 		constinit Snapshot::EngineReads::Site unscopedRead{ Snapshot::EngineReads::Object::FrameGlobals, Snapshot::EngineReads::Category::RecordTime, std::source_location::current() };
 		std::uint64_t unscopedTaken = 0;
 		thread_local const FrameGlobals* scoped = nullptr;
+		// The driver's game half's capture (BeginGameHalf), on the game thread.
+		thread_local std::shared_ptr<const FrameGlobals> gameHalf;
+
+		/** @brief The first unscoped read's thread and callers, as module+offset, for the log line. */
+		std::string UnscopedReader()
+		{
+			std::array<void*, 8> frames{};
+			const auto count = ::RtlCaptureStackBackTrace(2, static_cast<DWORD>(frames.size()), frames.data(), nullptr);
+			std::string text = fmt::format("thread {}", ::GetCurrentThreadId());
+			for (std::uint16_t i = 0; i < count; ++i) {
+				HMODULE module = nullptr;
+				char path[MAX_PATH]{};
+				if (!::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCSTR>(frames[i]), &module) ||
+					!module || !::GetModuleFileNameA(module, path, MAX_PATH)) {
+					text += fmt::format(", {}", frames[i]);
+					continue;
+				}
+				const char* slash = std::strrchr(path, '\\');
+				text += fmt::format(", {}+{:#x}", slash ? slash + 1 : path, reinterpret_cast<std::uintptr_t>(frames[i]) - reinterpret_cast<std::uintptr_t>(module));
+			}
+			return text;
+		}
 	}
 
 	void FrameGlobals::NoteFirstPersonCulled(const RE::NiAVObject* a_root)
@@ -358,22 +382,40 @@ namespace DCLF
 
 	void FrameGlobals::Adopt(std::shared_ptr<const FrameGlobals> a_globals)
 	{
-		renderThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
 		if (!a_globals || a_globals == latest)
 			return;
-		recent[recentNext++ % recent.size()] = std::move(latest);
+		// Never empty in between: a reader on another thread (native's game thread outside a scope) may load it meanwhile.
+		auto previous = latest;
 		latest = std::move(a_globals);
+		recent[recentNext++ % recent.size()] = std::move(previous);
+	}
+
+	void FrameGlobals::BeginGameHalf(std::shared_ptr<const FrameGlobals> a_globals)
+	{
+		gameHalf = std::move(a_globals);
+	}
+
+	void FrameGlobals::EndGameHalf()
+	{
+		gameHalf.reset();
 	}
 
 	const FrameGlobals& FrameGlobals::Current()
 	{
 		if (scoped)
 			return *scoped;
-		if (::GetCurrentThreadId() == renderThread.load(std::memory_order_relaxed))
+		if (gameHalf)
+			return *gameHalf;
+		// The thread that owns rendering reads the latest adopted capture: the one that adopted it, or a loading screen's serving thread
+		// (its menu scene) or the main menu's frames, which take ownership inside Renderer::Lock after it.
+		if (::FrameAnchors::IsRenderOwner())
 			return *latest;
 		unscopedRead.Count();
 		if (unscopedRead.Live() == 1)
-			logger::error("[DCLF] the frame's engine globals were read off the render thread with no frame's capture bound (step 6e F2); it got the render thread's latest");
+			logger::error(
+				"[DCLF] the frame's engine globals were read off the render owner with no frame's capture bound (step 6e F2); it got the "
+				"latest adopted. Reader: {}",
+				UnscopedReader());
 		return *latest;
 	}
 

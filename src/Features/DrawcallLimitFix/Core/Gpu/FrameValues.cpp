@@ -359,9 +359,10 @@ namespace DCLF
 		{
 			for (std::size_t part = 0; part < kBuiltInPools; ++part)
 				pools[part].pool = MakePool(kPartNames[part]);
+			MakeRegistered();
 		}
 
-		/** @brief A registered pool and its Pool, made by the first Kick that leases it, whatever the install order. */
+		/** @brief A registered pool and its Pool, made with the built-in ones (the features' pools are all registered at install). */
 		struct Registered
 		{
 			const Extensions::FrameValuePoolEntry* entry = nullptr;
@@ -410,7 +411,7 @@ namespace DCLF
 		std::unordered_map<std::uint64_t, BackingOwners> backingFieldOwners;
 
 		std::unique_ptr<Registered[]> registered;
-		std::atomic<std::size_t> registeredMade{ 0 };
+		std::size_t registeredCount = 0;
 		std::vector<org::services::BackingLease> registeredFrameLeases;
 		std::vector<std::uint32_t> registeredIndex;
 		// Made once, on whichever thread first needs them. A pass's declaration may run on the graph host's thread.
@@ -497,6 +498,11 @@ namespace DCLF
 		KeptWholeArray<BindlessPlacement> rows;
 		KeptWholeArray<PaletteRow> palettes;
 		KeptWholeArray<BindlessShading> shading;
+		// The render's views of them, taken by its upload job before done. The render thread reads them once done reaches seq and lets
+		// them go at EndFrame; the next upload job replaces them only after the next Kick.
+		org::async::KeptElements<BindlessPlacement> renderRows;
+		org::async::KeptElements<PaletteRow> renderPalettes;
+		org::async::KeptElements<BindlessShading> renderShading;
 		// A registered pool's producer reads its frame's publication only while its Kick is the newest.
 		std::atomic<std::uint64_t> kickedSeq{ 0 };
 		std::vector<std::uint8_t> listed;
@@ -872,6 +878,9 @@ namespace DCLF
 		                   static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
 		for (auto max = maxTotalUs.load(std::memory_order_relaxed); total > max && !maxTotalUs.compare_exchange_weak(max, total, std::memory_order_relaxed);) {}
 		++frames;
+		renderRows = rows.Shared();
+		renderPalettes = palettes.Shared();
+		renderShading = shading.Shared();
 		done.store(a_job.seq, std::memory_order_release);
 		done.notify_all();
 		EndTurn(a_job.chain);
@@ -2419,8 +2428,6 @@ namespace DCLF
 
 	void FrameValues::Impl::MakeRegistered()
 	{
-		if (registered)
-			return;
 		const auto entries = Extensions::RegisteredPools();
 		registered = std::make_unique<Registered[]>(entries.size());
 		for (std::size_t i = 0; i < entries.size(); ++i) {
@@ -2429,13 +2436,14 @@ namespace DCLF
 		}
 		registeredFrameLeases.resize(entries.size());
 		registeredIndex.assign(entries.size(), 0u);
-		registeredMade.store(entries.size(), std::memory_order_release);
+		registeredCount = entries.size();
 	}
 
 	void FrameValues::Impl::KickRegistered(Job& a_job, const FrameGlobals* a_globals, bool a_perRender)
 	{
-		MakeRegistered();
-		const std::size_t count = registeredMade.load(std::memory_order_relaxed);
+		const std::size_t count = registeredCount;
+		if (count != Extensions::RegisteredPools().size())
+			::RenderGraph::Fatal("Drawcall Limit Fix", "the frame values were made before every feature registered its pools");
 		a_job.registered.resize(count);
 		const Api::FrameValuePoolKick kick{ a_job.seq, a_globals, a_job.shadingSlots };
 		for (std::size_t i = 0; i < count; ++i) {
@@ -2793,6 +2801,12 @@ namespace DCLF
 			return;
 		WaitSignalSubmitted();
 		s.kicked = false;
+		// The render is done reading its rows. A job still running keeps them; the next one replaces them after the next Kick.
+		if (s.done.load(std::memory_order_acquire) >= s.seq) {
+			s.renderRows.reset();
+			s.renderPalettes.reset();
+			s.renderShading.reset();
+		}
 		BindFrameLeases(s.frameLeases, s.registeredFrameLeases, s.boundPoints);
 		s.ReleaseLatePoses();
 		s.RetireFieldOwners();
@@ -2822,7 +2836,7 @@ namespace DCLF
 		++impl->refused;
 	}
 
-	const std::vector<BindlessPlacement>* FrameValues::RowsIfDone(bool a_wait) const
+	const org::async::KeptChunks<BindlessPlacement>* FrameValues::RowsIfDone(bool a_wait) const
 	{
 		auto& s = *impl;
 		if (!s.seq)
@@ -2832,7 +2846,7 @@ namespace DCLF
 				s.done.wait(finished, std::memory_order_acquire);
 		if (s.done.load(std::memory_order_acquire) < s.seq)
 			return nullptr;
-		return &s.rows.Get();
+		return s.renderRows.get();
 	}
 
 	bool FrameValues::ForwardRowsFilled(const std::vector<Direct::ForwardSortRow>* a_target) const
@@ -2842,7 +2856,7 @@ namespace DCLF
 		return a_target && s.seq && s.done.load(std::memory_order_acquire) >= s.seq && s.forwardRowsSeq == s.seq && s.forwardRowsTarget == a_target;
 	}
 
-	const std::vector<FrameValues::PaletteRow>* FrameValues::PalettesIfDone(bool a_wait) const
+	const org::async::KeptChunks<FrameValues::PaletteRow>* FrameValues::PalettesIfDone(bool a_wait) const
 	{
 		auto& s = *impl;
 		if (!s.seq)
@@ -2852,10 +2866,10 @@ namespace DCLF
 				s.done.wait(finished, std::memory_order_acquire);
 		if (s.done.load(std::memory_order_acquire) < s.seq)
 			return nullptr;
-		return &s.palettes.Get();
+		return s.renderPalettes.get();
 	}
 
-	const std::vector<BindlessShading>* FrameValues::ShadingIfDone(bool a_wait) const
+	const org::async::KeptChunks<BindlessShading>* FrameValues::ShadingIfDone(bool a_wait) const
 	{
 		auto& s = *impl;
 		if (!s.seq)
@@ -2865,7 +2879,7 @@ namespace DCLF
 				s.done.wait(finished, std::memory_order_acquire);
 		if (s.done.load(std::memory_order_acquire) < s.seq)
 			return nullptr;
-		return &s.shading.Get();
+		return s.renderShading.get();
 	}
 
 	FrameValues::Counters FrameValues::TakeCounters()
@@ -2955,7 +2969,7 @@ namespace DCLF
 	std::vector<FrameValues::PoolStats> FrameValues::TakePoolStats()
 	{
 		auto& s = *impl;
-		const std::size_t registered = s.registeredMade.load(std::memory_order_acquire);
+		const std::size_t registered = s.registeredCount;
 		std::vector<PoolStats> out(kBuiltInPools + registered);
 		for (std::size_t part = 0; part < out.size(); ++part) {
 			auto& pool = part < kBuiltInPools ? s.pools[part] : s.registered[part - kBuiltInPools].pool;

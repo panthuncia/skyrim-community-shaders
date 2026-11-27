@@ -11,8 +11,9 @@ namespace DCLF
 	 * @brief When a worker may touch the engine's scene graph: the game-side capture window (roadmap phase 6).
 	 *
 	 * It is open while the engine only reads its scene graph: from DCLF's game half (FrameDriver::GameFrameStart, at Main::Draw's
-	 * SetupSunAndSky, or a dropped update's game half) to the start of the engine's next update jobs (Present today, CloseAtPresent), and
-	 * at the latest to the end of Main::Update's call of Main::DrawFrame (Close). Before the game half, DrawFrame writes the scene graph
+	 * SetupSunAndSky, or a dropped update's game half) to the start of the engine's next update jobs: guest's Present (CloseAtPresent),
+	 * native's end of the update's renders, before CS raises the job stages (Close; phase 7 puts it at the publish), and at the latest the
+	 * end of Main::Update's call of Main::DrawFrame (Close). Before the game half, DrawFrame writes the scene graph
 	 * (the decal manager's attaches). The render side never takes a lease: it reads publications and DCLF's ticket. A worker takes a
 	 * Lease per item or bounded chunk, and a refused lease means the window closed, so it leaves the rest for the next window. Closing
 	 * waits for leases in flight, so the engine writes after it never run beside a worker in engine memory. One atomic word holds the
@@ -29,8 +30,8 @@ namespace DCLF
 		 */
 		static void Close();
 		/**
-		 * @brief Present: the engine's next update jobs start here. Closes as Close does, but only on the main thread inside a game
-		 * update (a loading screen's Present on the serving thread does nothing). Phase 7 moves this to the game thread's publish.
+		 * @brief Guest's Present: the engine's next update jobs start here. Closes as Close does, but only inside a game update (a
+		 * loading screen's Present on the serving thread is outside one). Native closes at the end of the update's renders instead.
 		 */
 		static void CloseAtPresent();
 		/** @brief Whether the window is open, suspended by a writer or not. */
@@ -89,7 +90,7 @@ namespace DCLF
 			const char* unleasedFirst = nullptr;
 			bool any = false;  // a close or an unleased access since the last Take
 		};
-		/** @brief Main thread. Takes and resets the counters. */
+		/** @brief Any thread (the reports). Takes and resets the counters. */
 		static Counters Take();
 
 	private:
@@ -115,9 +116,8 @@ namespace DCLF
 		// Leases asked for on a thread inside a RenderSideJob. Any is a defect.
 		static inline thread_local bool renderSideJob = false;
 		static inline std::atomic<std::uint64_t> renderSideJobLeases{ 0 };
-		// Main thread.
-		static inline std::uint64_t closes = 0, closesWaited = 0;
-		static inline double waitedUs = 0.0, waitedMaxUs = 0.0;
+		// The closing thread adds, the reports take. Waits in nanoseconds.
+		static inline std::atomic<std::uint64_t> closes{ 0 }, closesWaited{ 0 }, waitedNs{ 0 }, waitedMaxNs{ 0 };
 		// The writer's thread. Waits are in whole microseconds.
 		static inline std::atomic<std::uint64_t> suspends{ 0 }, suspendsWaited{ 0 }, suspendWaitedUs{ 0 }, suspendWaitedMaxUs{ 0 };
 	};

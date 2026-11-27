@@ -744,6 +744,12 @@ namespace DCLF
 		return impl && impl->adoptedSnapshot ? impl->adoptedSnapshot->publication : nullptr;
 	}
 
+	std::shared_ptr<const void> IndirectDraws::PublicationOf(const std::shared_ptr<const void>& a_scene)
+	{
+		const auto* snapshot = static_cast<const Impl::SceneSnapshot*>(a_scene.get());
+		return snapshot ? snapshot->publication : nullptr;
+	}
+
 	void IndirectDraws::SceneTaken(const std::shared_ptr<const void>& a_scene)
 	{
 		if (!impl)

@@ -8,6 +8,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Features/LocalLights/LightSelection.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 
 #include "State.h"
 
@@ -21,7 +22,11 @@ namespace DCLF::Features::Shadows::Local
 
 	void LightCamera(Api::ShadowSourceCamera& a_camera)
 	{
-		a_camera.camera = LightsBoard().CascadeOf(a_camera.light, a_camera.descriptor, a_camera.sceneFrame);
+		// Native's render side reads the copy its light set carries.
+		if (const auto* boards = Native::AdoptedBoards(); boards && boards->lights)
+			a_camera.camera = boards->lights->CascadeOf(a_camera.light, a_camera.descriptor, boards->lights->sceneFrame);
+		else
+			a_camera.camera = LightsBoard().CascadeOf(a_camera.light, a_camera.descriptor, a_camera.sceneFrame);
 	}
 
 	LightViews& LightViews::Get()

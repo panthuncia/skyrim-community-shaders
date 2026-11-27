@@ -33,6 +33,12 @@ namespace DCLF::Features::Shadows::Native
 	void RenderShadowMaps();
 
 	/**
+	 * @brief Render side, at the shadow maps' start (before DCLF's BeforeShadowMaps): the native driver's render half adopts its set's
+	 * shadow view list, sets this frame's capacity, decides whether DCLF draws the views and covers them. Nothing otherwise.
+	 */
+	void AdoptShadowViews();
+
+	/**
 	 * @brief Render side: whether this frame's RenderShadowMaps drew a_light's maps. A kept light it could not draw casts no shadow, so the
 	 * masks leave its channel lit; its descriptors may hold no target yet (a light first kept on a load's first world frame).
 	 */

@@ -111,6 +111,11 @@ namespace RenderGraph::Engine::Native::WorldPass
 		// Native's driver took it in its game half: the render half reads no engine state.
 		if (const auto& prepared = Scene::Current(); prepared.valid)
 			return prepared.normalsTarget;
+		return EngineNormalsTarget();
+	}
+
+	std::int32_t EngineNormalsTarget()
+	{
 		// ImageSpaceManager+0x1c0 is the reflections pass; +0x10 whether it runs. Its swap target alternates with the frame counter.
 		static REL::Relocation<const std::uint32_t*> frameCounter{ REL::RelocationID(525008, 411489) };
 		auto* manager = RE::ImageSpaceManager::GetSingleton();

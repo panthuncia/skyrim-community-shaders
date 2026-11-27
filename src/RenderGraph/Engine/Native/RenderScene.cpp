@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/LightLimitFix.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Fatal.h"
@@ -214,7 +215,7 @@ namespace RenderGraph::Engine::Native::Scene
 		void ClearWorldTargets(const Prepared& a_frame)
 		{
 			const float normals[4]{ a_frame.normalsClear, a_frame.normalsClear, 0.0f, 0.0f };
-			Untaken(Skeleton::ClearColour(static_cast<RE::RENDER_TARGET>(WorldPass::NormalsTarget()), normals), "the normals target");
+			Untaken(Skeleton::ClearColour(static_cast<RE::RENDER_TARGET>(a_frame.normalsTarget), normals), "the normals target");
 			const float main[4]{ a_frame.mainClear[0], a_frame.mainClear[1], a_frame.mainClear[2], 1.0f };
 			Untaken(Skeleton::ClearColour(RE::RENDER_TARGET::kMAIN, main), "kMAIN");
 			if (a_frame.snowClear) {
@@ -239,8 +240,10 @@ namespace RenderGraph::Engine::Native::Scene
 			return taken;
 		}
 
-		// The world frame's game half, for the render half that follows it.
-		Prepared g_current;
+		// The game half's values the render half is recording from (RecordFrame), null outside it. Only the render half reads it.
+		const Prepared* g_rendering = nullptr;
+		// Set while this thread runs a routed update's game half.
+		thread_local bool t_routedGameHalf = false;
 
 		/**
 		* @brief The driver's game half (decision 8), on the game thread, in the engine's order: the reflections' camera, the branches, the
@@ -253,8 +256,10 @@ namespace RenderGraph::Engine::Native::Scene
 		Prepared PrepareFrame(RE::Main* a_main, RE::PlayerCharacter& a_player, RE::NiCamera* a_camera, const Snapshot::FrameSnapshot& a_snapshot)
 		{
 			ZoneScopedN("CS.Native.RenderScene.Game");
+			globals::features::drawcallLimitFix.OnNativeGameHalfStart();
 			Prepared p;
 			p.valid = true;
+			p.camera = a_camera;
 			// The reflections' camera (SE 528353, AE 415299): the radial blur modifier's projection reads it on the game side (AE 107753).
 			Global<RE::NiCamera*>(528353, 415299) = a_camera;
 			const auto b = ReadBranches(a_player, a_snapshot);
@@ -265,6 +270,8 @@ namespace RenderGraph::Engine::Native::Scene
 			// +0xD3, Main::SetupSunAndSky: DCLF's frame start and the water render point. Its result (the capture's) holds the node the
 			// shadow casters skip in first person.
 			const auto sky = Point<std::uintptr_t (*)(RE::Main*)>(0xD3, 0xD3, "SetupSunAndSky")(a_main);
+			if (t_routedGameHalf)
+				p.sceneTicket = globals::features::drawcallLimitFix.NativeGameTicket();
 			if (b.firstPersonRoot)
 				Flags(b.firstPersonRoot) |= kHidden;
 			ProcessQueuedLights(b.firstPersonRoot);
@@ -290,7 +297,7 @@ namespace RenderGraph::Engine::Native::Scene
 			if (Global<const bool>(525010, 411491))
 				Field<std::array<float, 4>>(Global<RE::NiCamera*>(528062, 415007), 0x174) = Global<const std::array<float, 4>>(259744, 207173);
 			p.normalsClear = Global<const float>(230690, 187405);
-			p.normalsTarget = WorldPass::NormalsTarget();
+			p.normalsTarget = WorldPass::EngineNormalsTarget();
 			p.mainClear = Global<const std::array<float, 3>>(527696, 414618);
 			p.snowClear = Global<const bool>(513332, 391105);
 			if (b.firstPerson) {
@@ -329,8 +336,22 @@ namespace RenderGraph::Engine::Native::Scene
 		*/
 		void RecordFrame(const Prepared& a_frame, RE::NiCamera* a_camera, std::uint32_t a_target)
 		{
+			// A routed render: DCLF's frame start renders the game half's ticket, and the water work the capture queued draws, where
+			// Main::Draw's SetupSunAndSky point ran them.
+			if (a_frame.sceneTicket) {
+				globals::features::drawcallLimitFix.BeginNativeRenderHalf();
+				WaterEffects::Render();
+			}
 			ZoneScopedN("CS.Native.RenderScene.Render");
 			const Snapshot::EngineReads::RenderHalfScope half(Snapshot::EngineReads::Half::Record);
+			// The points below read a_frame through Current().
+			struct Rendering
+			{
+				explicit Rendering(const Prepared& a_frame) { g_rendering = &a_frame; }
+				~Rendering() { g_rendering = nullptr; }
+				Rendering(const Rendering&) = delete;
+				Rendering& operator=(const Rendering&) = delete;
+			} rendering(a_frame);
 			// The shadow maps, masks and lens flares draw from the game half's light set.
 			DCLF::Features::Shadows::Native::AdoptSet(a_frame.shadowLights);
 			// +0x2EC, the shadow maps.
@@ -369,14 +390,14 @@ namespace RenderGraph::Engine::Native::Scene
 			auto* camera = RE::Main::WorldRootCamera();
 			if (!player || !camera)
 				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran without the player or the world camera");
-			const auto& snapshot = Snapshot::Current();
+			// The game half reads the update's snapshot, not the render side's adopted one.
+			const auto& snapshot = Snapshot::Building();
 			if (!snapshot)
-				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran before any snapshot was adopted");
+				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran before any game update's snapshot");
 			ZoneScopedN("CS.Native.RenderScene");
 			globals::state->BeginPerfEvent("Player View");
-			g_current = PrepareFrame(a_main, *player, camera, *snapshot);
-			RecordFrame(g_current, camera, a_target);
-			g_current = {};
+			const auto prepared = PrepareFrame(a_main, *player, camera, *snapshot);
+			RecordFrame(prepared, camera, a_target);
 			globals::state->EndPerfEvent();
 		}
 
@@ -410,8 +431,34 @@ namespace RenderGraph::Engine::Native::Scene
 		return installed;
 	}
 
+	Prepared PrepareRouted(RE::Main* a_main, const Snapshot::FrameSnapshot& a_snapshot)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		auto* camera = RE::Main::WorldRootCamera();
+		if (!player || !camera)
+			RenderGraph::Fatal("native frame skeleton", "a routed update's game half ran without the player or the world camera");
+		const bool outer = std::exchange(t_routedGameHalf, true);
+		auto prepared = PrepareFrame(a_main, *player, camera, a_snapshot);
+		t_routedGameHalf = outer;
+		return prepared;
+	}
+
+	void RecordRouted(const Prepared& a_frame)
+	{
+		ZoneScopedN("CS.Native.RenderScene");
+		globals::state->BeginPerfEvent("Player View");
+		RecordFrame(a_frame, a_frame.camera, 0);
+		globals::state->EndPerfEvent();
+	}
+
+	bool InGameHalf()
+	{
+		return t_routedGameHalf;
+	}
+
 	const Prepared& Current()
 	{
-		return g_current;
+		static const Prepared none{};
+		return g_rendering ? *g_rendering : none;
 	}
 }

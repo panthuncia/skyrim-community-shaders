@@ -20,6 +20,7 @@
 #include "RenderGraph/Engine/Native/Native.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
+#include "Snapshot/Retire.h"
 
 namespace DCLF
 {
@@ -54,33 +55,45 @@ namespace DCLF::Scene
 	{
 		// Switch events are taken on the render thread only.
 		switchEventThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
-		++sceneStep;
+		gameStep = stepCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+		// Guest and native's frames on one thread render the step right after: their render half reads it before StepRender.
+		if (!t_gameHalf)
+			renderStep = gameStep;
 		// The frame's engine globals, before anything of the frame reads them.
 		const auto captureStart = std::chrono::steady_clock::now();
 		// The Lighting shader first, since the globals' material sources read it.
 		CaptureLightingShader();
 		frameGlobals = FrameGlobals::Capture();
 		SceneCapture::SetMainThread(::GetCurrentThreadId());
-		DCLF::SceneClock::Set(sceneStep);
+		if (!t_gameHalf)
+			DCLF::SceneClock::Set(gameStep);
 		captureNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - captureStart).count());
 		++captureFrames;
 		// Posted after the capture. The post wakes the pump.
 		PostFrameInputs();
 	}
 
-	void FrameView::StepRepeat()
+	void FrameView::StepRender(std::uint32_t a_ticketStep, bool a_first)
 	{
-		++sceneStep;
-		DCLF::SceneClock::Set(sceneStep);
+		std::uint32_t expected = a_ticketStep;
+		// A first render keeps its ticket's step only while the counter still stands there; a repeat, or a render after another step
+		// was taken, takes the next.
+		if (!a_first || !stepCounter.compare_exchange_strong(expected, a_ticketStep, std::memory_order_acq_rel))
+			renderStep = stepCounter.fetch_add(1, std::memory_order_acq_rel) + 1;
+		else
+			renderStep = a_ticketStep;
+		++renderSerial;
+		DCLF::SceneClock::Set(renderStep);
 	}
 
 	void FrameView::PostFrameInputs()
 	{
 		auto inputs = std::make_unique<FrameInputs>();
 		inputs->globals = frameGlobals;
-		inputs->frame = sceneStep;
+		inputs->frame = gameStep;
 		// Sampled here so PrimaryCull reads the same sample this frame.
-		inputs->membershipWitness = PrimaryCull::Get().SampleMembershipWitness();
+		// The frame's own capture: native's game half has bound none yet here, and the render owner's latest moves on its thread.
+		inputs->membershipWitness = PrimaryCull::Get().SampleMembershipWitness(*frameGlobals);
 		inputs->toggles = Toggles::Get().Active();
 		inputs->togglesGeneration = Toggles::Get().Generation();
 		inputs->verdictsGeneration = verdictsRequested;
@@ -88,8 +101,48 @@ namespace DCLF::Scene
 		WakeScenePass(SceneWake::FrameInput);
 	}
 
-	std::uint64_t FrameView::InstalledSequence() const { return installed ? installed->sequence : 0; }
-	std::shared_ptr<const void> FrameView::InstalledRetirement() const { return installed ? installed->retirementHold : nullptr; }
+	std::uint64_t FrameView::InstalledSequence() const
+	{
+		const auto* publication = InstalledPublication();
+		return publication ? publication->sequence : 0;
+	}
+
+	std::shared_ptr<const void> FrameView::InstalledRetirement() const
+	{
+		const auto* publication = InstalledPublication();
+		return publication ? publication->retirementHold : nullptr;
+	}
+
+	std::shared_ptr<const FrameView::InstalledFrame> FrameView::TakeInstalledFrame()
+	{
+		auto frame = std::make_shared<InstalledFrame>();
+		frame->publication = installed;
+		frame->tables = acceptedTables;
+		frame->lookups = frameLookups;
+		frame->catalog = frameCatalog;
+		frame->tablesGeneration = frameTablesGeneration;
+		frame->sunCandidates = frameSunCandidates;
+		frame->lightCandidates = frameLightCandidates;
+		frame->lightEntriesAppeared = frameLightEntriesAppeared;
+		frame->categoryNodes = frameCategoryNodes;
+		if (std::exchange(lightEntriesChanged, false) || !lightEntriesCopy)
+			lightEntriesCopy = std::make_shared<const ankerl::unordered_dense::set<const RE::NiAVObject*>>(frameLightEntrySet);
+		frame->lightEntries = lightEntriesCopy;
+		frame->claims = std::atomic_load(&frameClaims);
+		return frame;
+	}
+
+	void FrameView::AdoptInstalledFrame(std::shared_ptr<const InstalledFrame> a_frame)
+	{
+		if (!a_frame || a_frame == renderFrame)
+			return;
+		std::atomic_store(&renderClaims, a_frame->claims);
+		DrawPipelines::Get().HoldCatalog(a_frame->catalog, false);
+		// The replaced frame may hold the last reference to a publication: it goes through the engine lane, like the tickets.
+		if (renderFrame)
+			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::move(renderFrame));
+		renderFrame = std::move(a_frame);
+	}
 
 	void FrameView::HandOverAtFrameStart(std::shared_ptr<const void> a_adopted)
 	{
@@ -124,6 +177,7 @@ namespace DCLF::Scene
 					Extensions::ForwardClassMembers(static_cast<Api::EntryClass>(c), deltas.classMembers[c]);
 				deltas.classMembers[c].clear();
 			}
+			lightEntriesChanged = lightEntriesChanged || !deltas.lightEntries.empty();
 			for (const auto& change : deltas.lightEntries) {
 				if (change.kind > 0)
 					frameLightEntrySet.insert(change.node);
@@ -162,10 +216,10 @@ namespace DCLF::Scene
 			notesCursor = note;
 			if (oldestNs) {
 				const auto nowNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-				IndirectDraws::Get().NoteEventAdoption(nowNs > oldestNs ? static_cast<double>(nowNs - oldestNs) / 1.0e6 : 0.0, sceneStep >= oldestFrame ? sceneStep - oldestFrame : 0u);
+				IndirectDraws::Get().NoteEventAdoption(nowNs > oldestNs ? static_cast<double>(nowNs - oldestNs) / 1.0e6 : 0.0, SceneStep() >= oldestFrame ? SceneStep() - oldestFrame : 0u);
 			}
 			channels.publicationLog.Release(note);
-			TracyPlot("CS.DCLF.InstallDelayFrames", static_cast<std::int64_t>(sceneStep - adopted->commitFrame));
+			TracyPlot("CS.DCLF.InstallDelayFrames", static_cast<std::int64_t>(SceneStep() - adopted->commitFrame));
 			publicationStats.skipped += installed ? sequence - installed->sequence - 1 : 0;
 			ReturnPublication(std::move(installed));
 			installed = std::move(adopted);
@@ -179,7 +233,7 @@ namespace DCLF::Scene
 		frameLookups = installed ? installed->lookups : nullptr;
 		frameCatalog = installed ? installed->catalog : nullptr;
 		frameTablesGeneration = installed ? installed->tablesGeneration : 0u;
-		DrawPipelines::Get().HoldCatalog(frameCatalog);
+		DrawPipelines::Get().HoldCatalog(frameCatalog, t_gameHalf);
 		// A toggle takes effect for the frames with the first publication committed under it, which came with the adopted scene.
 		if (installed) {
 			Toggles::Get().InstallFrame(installed->toggles);
@@ -231,6 +285,7 @@ namespace DCLF::Scene
 				if (phases & kSetMain)
 					left.push_back(geometry);
 		PublishFrameClaims(nullptr);
+		std::atomic_store(&renderClaims, std::shared_ptr<const SetSnapshot>{});
 		if (!left.empty())
 			PrimaryCull::Get().NoteSetChanges({}, left);
 		installNotes.clear();
@@ -296,15 +351,24 @@ namespace DCLF::Scene
 
 	bool FrameView::LoadingScreenInFrame()
 	{
+		return LoadingScreenIn(Snapshot::Current().get());
+	}
+
+	bool FrameView::LoadingScreenIn(const Snapshot::FrameSnapshot* a_frame)
+	{
 		if (!::RenderGraph::Engine::Native::Active())
 			return IsLoadingScreenUp();
-		const auto& snapshot = Snapshot::Current();
-		return snapshot && snapshot->menus.loading && !LoadHold::MenuHeld();
+		return a_frame && a_frame->menus.loading && !LoadHold::MenuHeld();
 	}
 
 	bool FrameView::LoadShown()
 	{
-		return LoadingScreenInFrame() || LoadHold::Active() || LoadHold::MenuHeld();
+		return LoadShownIn(Snapshot::Current().get());
+	}
+
+	bool FrameView::LoadShownIn(const Snapshot::FrameSnapshot* a_frame)
+	{
+		return LoadingScreenIn(a_frame) || LoadHold::Active() || LoadHold::MenuHeld();
 	}
 
 	bool FrameView::LoadShownNow()
@@ -344,7 +408,16 @@ namespace DCLF::Scene
 
 	std::span<RE::BSGeometry* const> FrameView::NewestObjectGeometry() const
 	{
-		const Tables* source = installed ? installed->tables.get() : nullptr;
+		const auto* publication = InstalledPublication();
+		const Tables* source = publication ? publication->tables.get() : nullptr;
 		return source ? std::span<RE::BSGeometry* const>(source->objectGeometry) : std::span<RE::BSGeometry* const>{};
+	}
+}
+
+namespace DCLF
+{
+	bool InNativeGameHalf()
+	{
+		return Scene::FrameView::InGameHalf();
 	}
 }

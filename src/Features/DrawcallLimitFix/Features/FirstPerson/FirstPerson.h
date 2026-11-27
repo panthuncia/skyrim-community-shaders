@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace DCLF::Features::FirstPerson
@@ -21,6 +22,11 @@ namespace DCLF::Features::FirstPerson
 
 	Api::Feature Feature();
 
+	/** @brief The game half's frame start: the latch and the skeleton's walk, for TakeTicketPart. */
+	void BeginGameFrame(const Api::ViewPointContext& a_context);
+	/** @brief The game half, at the ticket: what BeginGameFrame took. */
+	std::shared_ptr<const void> TakeTicketPart();
+	/** @brief The render half's frame start, from the ticket's part: targets, pipelines and the target import. */
 	void BeginFrame(const Api::ViewPointContext& a_context);
 	bool Covered(const Api::ViewCoverage& a_coverage);
 	void CaptureRoot(Api::ViewRootCapture& a_capture);

@@ -15,6 +15,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneSet.h"
@@ -22,17 +23,21 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
 
+#include <memory>
+#include <utility>
+#include <vector>
+
 namespace DCLF::Features::FirstPerson
 {
 	namespace
 	{
-		// Recomputes Main::Draw's first-person flag (cVar23, AE 0x1406444b0). The root's bit is the snapshot's, taken before the water
-		// update hides the root (native runs that update in the capture). The camera check reads the current state at PlayerCamera
-		// +0x28, not the free camera at +0xD0.
+		// Recomputes Main::Draw's first-person flag (cVar23, AE 0x1406444b0). The root's bit is the update's snapshot's, taken before
+		// the water update hides the root (native runs that update in the capture). The camera check reads the current state at
+		// PlayerCamera +0x28, not the free camera at +0xD0. Game half.
 		bool FirstPersonLatch()
 		{
 			bool latch = false;
-			const auto& snapshot = Snapshot::Current();
+			const auto& snapshot = Snapshot::Building();
 			if (auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton()); player && snapshot && snapshot->firstPersonShown)
 				if (const auto* root = player->Get3D(true); root && root != player->Get3D(false)) {
 					auto* ui = CS_ENGINE_READ(UI, CapturePoint, RE::UI::GetSingleton());
@@ -63,14 +68,39 @@ namespace DCLF::Features::FirstPerson
 			return false;
 		}
 
-		void WalkFirstPersonSkeleton(FirstPersonFrame& a_f, const SceneTables& a_tables, std::uint32_t a_frame)
+		/** @brief The game half's walk of the skeleton, kept between updates (game thread only). */
+		struct SkeletonWalk
 		{
-			auto& f = a_f;
+			std::vector<std::uint8_t> slotsWanted;
+			std::uint32_t slotsFrame = 0;
+			std::uint32_t forwardMembersNow = 0;
+		};
+
+		SkeletonWalk& Walk()
+		{
+			static SkeletonWalk walk;
+			return walk;
+		}
+
+		/** @brief What the game half's frame start took, for the render half's (a ticket part). */
+		struct GamePart
+		{
+			bool latch = false;
+			std::vector<std::uint8_t> slotsWanted;
+			std::uint32_t forwardMembersNow = 0;
+		};
+
+		// Game thread: BeginGameFrame's part until the ticket takes it.
+		std::shared_ptr<const GamePart> pendingPart;
+
+		void WalkFirstPersonSkeleton(SkeletonWalk& a_walk, const SceneTables& a_tables, std::uint32_t a_frame)
+		{
+			auto& f = a_walk;
 			const auto& tables = a_tables;
 			f.slotsFrame = a_frame;
 			f.slotsWanted.assign(tables.pipelines.size(), 0);
 			std::vector<RE::BSGeometry*> geometry;
-			if (auto* player = CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()))
+			if (auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton()))
 				if (auto* root = player->Get3D(true); root && root != player->Get3D(false))
 					SceneTracker::CollectGeometry(root, geometry);
 			const ankerl::unordered_dense::set<const RE::BSGeometry*> skeleton(geometry.begin(), geometry.end());
@@ -86,6 +116,29 @@ namespace DCLF::Features::FirstPerson
 		}
 	}
 
+	void BeginGameFrame(const Api::ViewPointContext& a_context)
+	{
+		DCLF_ZONE("CS.DCLF.BeginFirstPersonGameFrame");
+		pendingPart = nullptr;
+		if (!Extensions::ViewRegistered(kView))
+			return;
+		auto part = std::make_shared<GamePart>();
+		part->latch = FirstPersonLatch();
+		// Walk the skeleton again every 16 frames or when the slot table grows. This runs before Main::Draw touches the root.
+		auto& walk = Walk();
+		const auto& tables = *a_context.tables;
+		if (a_context.frame - walk.slotsFrame >= 16 || walk.slotsWanted.size() != tables.pipelines.size())
+			WalkFirstPersonSkeleton(walk, tables, a_context.frame);
+		part->slotsWanted = walk.slotsWanted;
+		part->forwardMembersNow = walk.forwardMembersNow;
+		pendingPart = std::move(part);
+	}
+
+	std::shared_ptr<const void> TakeTicketPart()
+	{
+		return std::exchange(pendingPart, nullptr);
+	}
+
 	void BeginFrame(const Api::ViewPointContext& a_context)
 	{
 		DCLF_ZONE("CS.DCLF.BeginFirstPersonFrame");
@@ -98,10 +151,12 @@ namespace DCLF::Features::FirstPerson
 		const bool on = Extensions::ViewRegistered(kView);
 		f.latch = false;
 		f.latchFrame = frame;
-		if (!on)
+		// The ticket's game part: every render of the ticket draws from it.
+		const auto* part = static_cast<const GamePart*>(TicketPartOf(TicketPart::FirstPerson));
+		if (!on || !part)
 			return;
 		++f.frames;
-		f.latch = FirstPersonLatch();
+		f.latch = part->latch;
 		f.latched += f.latch ? 1 : 0;
 		const auto& state = *draws.ViewState(kView);
 		if (CaptureFirstPersonTargets(*formats)) {
@@ -114,16 +169,16 @@ namespace DCLF::Features::FirstPerson
 		DrawPipelines::Get().SetViewForwardTargets(Api::EngineView::FirstPerson, state.targets);
 		const auto* catalog = a_context.catalog;
 		const auto& tables = *a_context.tables;
-		// Walk the skeleton again every 16 frames or when the slot table grows. This runs before Main::Draw touches the root.
-		if (frame - f.slotsFrame >= 16 || f.slotsWanted.size() != tables.pipelines.size())
-			WalkFirstPersonSkeleton(f, tables, frame);
 		// The main set's forward pipelines can draw here only when this pass's depth format matches the main pass's.
 		const bool forwardCompatible = formats->depth != DXGI_FORMAT_UNKNOWN && formats->depth == state.targets.depth;
 		if (draws.ExchangeViewForwardCompatible(kView, forwardCompatible) != forwardCompatible)
 			logger::info("[DCLF] first-person forward part: the main depth format {} and kPOST_ZPREPASS_COPY's {}: {}", static_cast<int>(formats->depth),
 				static_cast<int>(state.targets.depth), forwardCompatible ? "drawn by DCLF" : "the engine's");
-		f.forwardMembers += f.forwardMembersNow;
-		const auto pipelines = draws.ResolveViewPipelines(kView, tables, catalog, f.slotsWanted);
+		f.forwardMembers += part->forwardMembersNow;
+		// A slot table that grew since the game half's walk wants none of its new slots yet.
+		std::vector<std::uint8_t> wanted = part->slotsWanted;
+		wanted.resize(tables.pipelines.size(), 0);
+		const auto pipelines = draws.ResolveViewPipelines(kView, tables, catalog, wanted);
 		f.slots = pipelines.slots;
 		f.pipelinesReady = pipelines.ready;
 		if (draws.SetUpView(kView))

@@ -97,7 +97,8 @@ namespace DCLF::Direct
 		struct Arm
 		{
 			std::shared_ptr<const ViewBatchSet> set;
-			std::uint32_t frame = 0, lastArmed = 0;
+			std::uint32_t frame = 0;
+			std::uint64_t lastRender = 0;  // FrameView::RenderSerial of the last armed render
 			bool armed = false, everArmed = false, observer = false;
 		};
 		Arm arm;  // render thread
@@ -565,9 +566,11 @@ namespace DCLF::Direct
 		// An observer's frame stays a GPU frame. The GPU's states stay bound, and the next CPU frame restarts visibility.
 		if (arm.observer)
 			return { std::move(arm.set), frame, false, true };
-		CpuFrameArm taken{ std::move(arm.set), frame, !arm.everArmed || arm.lastArmed + 1 != frame };
+		// Visibility restarts unless the last armed render was the one before. Steps skip the numbers native's game half takes.
+		const std::uint64_t render = Scene::FrameView::Get().RenderSerial();
+		CpuFrameArm taken{ std::move(arm.set), frame, !arm.everArmed || arm.lastRender + 1 != render };
 		arm.everArmed = true;
-		arm.lastArmed = frame;
+		arm.lastRender = render;
 		cpuStatesFrame.store(frame, std::memory_order_release);
 		return taken;
 	}

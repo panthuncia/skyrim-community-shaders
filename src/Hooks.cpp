@@ -31,6 +31,7 @@
 #include "Globals.h"
 #include "Menu.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderThread.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "TruePBR.h"
@@ -533,9 +534,10 @@ struct IDXGISwapChain_Present
 	static HRESULT WINAPI thunk(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 	{
 		const HRESULT retval = RenderFrameEnd(This, SyncInterval, Flags);
-		// The game side of the Present point: the test runner's milestones and steps read and queue game work. Phase 7 runs it at the
-		// game thread's publish; RenderFrameEnd moves to the render thread.
-		Testing::OnGamePresent();
+		// The game side of the Present point: the test runner's milestones and steps read and queue game work. A routed update runs it at
+		// its publish, so a routed render's Present has none.
+		if (!RenderGraph::Engine::Native::RenderThread::InRoutedRender())
+			Testing::OnGamePresent();
 		return retval;
 	}
 
@@ -1203,6 +1205,9 @@ namespace Hooks
 	{
 		static void thunk(int64_t a1)
 		{
+			// Native: CS's UI point turns it off around the UI's replay (Scaleform::ReplaySnapshotUi).
+			if (RenderGraph::Engine::Scaleform::OwnsUiPoint())
+				return func(a1);
 			const bool temporal = Util::GetTemporal();
 			Util::SetTemporal(false);
 			func(a1);

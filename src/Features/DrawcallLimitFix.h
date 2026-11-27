@@ -89,6 +89,18 @@ struct DrawcallLimitFix : Feature
 	/** @brief Called after the Lighting shader's SetupGeometry for every native lighting draw. */
 	void OnNativeLightingDraw(RE::BSRenderPass* a_pass, std::uint32_t a_renderFlags);
 
+	/** @brief Native, game thread: the start of the skeleton driver's game half (PrepareFrame), once per routed update. */
+	void OnNativeGameHalfStart();
+	/**
+	* @brief Native, render owner: a routed render's DCLF frame start, before the render's Renderer::Begin (ExpectTicket: the Begin's
+	* revision adopts the ticket's scene) and after it (the render half of a_ticket, a DCLF::FrameTicket made by the game half).
+	*/
+	void ExpectNativeTicket(std::shared_ptr<const void> a_ticket);
+	void BeginNativeRenderHalf();
+	/** @brief Native, game thread: the ticket the last game half made (a DCLF::FrameTicket), null without DCLF. */
+	std::shared_ptr<const void> NativeGameTicket() const;
+	/** @brief Native, game thread, at a publish: a_old's routed snapshot was never rendered; a_fresh's ticket takes its scene if it has none. */
+	void NativeTicketSuperseded(const std::shared_ptr<const void>& a_old, const std::shared_ptr<const void>& a_fresh);
 	/** @brief Native, main thread: the end of the skeleton driver's game half (before Main::Draw's tail), every render. */
 	void OnNativeGameHalfEnd();
 
