@@ -12,6 +12,7 @@
 // engine's batch, so they hold the camera the engine's draw would have read.
 // The world's CS features are off in this build: a menu scene has none of their frame inputs (light clusters, skylighting, the
 // cubemaps, the world's shadows, fog, wetness, Physical Sky's LUTs), so it shades as the vanilla shader with CS's material path.
+// LIGHTING_ORG_LINEAR (the local map's land) keeps Linear Lighting's pipeline, as the engine's own draw has it in plain D3D11.
 #	define LIGHTING_ORG
 #	undef LIGHT_LIMIT_FIX
 #	undef SKYLIGHTING
@@ -39,7 +40,9 @@
 #	undef LANDSCAPE_SEAMS
 #	undef GLINT
 #	undef LLFDEBUG
-#	undef ENABLE_LL
+#	if !defined(LIGHTING_ORG_LINEAR)
+#		undef ENABLE_LL
+#	endif
 #	define ORG_SHARED_CONSTANTS
 #	define ORG_HEADER_RESOURCES
 #	define ORG_LATCHED_BONES

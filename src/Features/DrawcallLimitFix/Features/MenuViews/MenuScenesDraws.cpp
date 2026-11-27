@@ -238,6 +238,14 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Vertex });
 		}
 
+		/** @brief ProgramKey::variant's defines for Lighting: LIGHTING_ORG_LINEAR for kLightingLinearVariant. */
+		Family::Defines LightingVariantDefines(std::uint32_t a_variant)
+		{
+			if (a_variant == kLightingLinearVariant)
+				return { { L"LIGHTING_ORG_LINEAR", L"" } };
+			return {};
+		}
+
 		/** @brief Render-thread state. */
 		struct DrawsState
 		{
@@ -250,7 +258,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			Family::EngineDrawPrograms lighting{ "menu scenes (Lighting)", { .source = "Lighting.hlsl",
 																			   .languageVersion = L"2018",  // FXC's semantics, as DCLF compiles it
 																			   .constantWords = ShaderBindings::Words<UtilityBlock>(),
-																			   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Lighting) } };
+																			   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Lighting),
+																			   .variantDefines = &LightingVariantDefines } };
 			Family::EngineDrawPrograms effect{ "menu scenes (Effect)", { .source = "Effect.hlsl",
 																		   .languageVersion = L"2018",
 																		   .constantWords = ShaderBindings::Words<UtilityBlock>(),
