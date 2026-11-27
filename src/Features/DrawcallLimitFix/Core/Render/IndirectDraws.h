@@ -184,7 +184,7 @@ namespace DCLF
 		/** @brief Records the age of the oldest event an installed publication carried, for the snapshot report. */
 		void NoteEventAdoption(double a_ms, std::uint32_t a_frames);
 		/**
-		 * @brief Render thread, main thread, at Begin. The frame revision took a_scene, a snapshot the builder posted (plan step 10b),
+		 * @brief Render thread, main thread, at Begin. The frame revision took a_scene, a snapshot the builder posted,
 		 * whether it adopts it or not. Opens the builder's publication gate.
 		 */
 		void SceneTaken(const std::shared_ptr<const void>& a_scene);
@@ -213,7 +213,7 @@ namespace DCLF
 		/** @brief Render thread, at Present. Ties the frame's pooled versions to its retirement point so they are not reused early. */
 		void BindAdopted();
 		/**
-		 * @brief Render thread. What DCLF's graphs and snapshots are built for changed after DCLF first drew (plan step 10a-0).
+		 * @brief Render thread. What DCLF's graphs and snapshots are built for changed after DCLF first drew.
 		 * No revision carries such a change, so it is a tap error (TapError::ClientInputChanged), fatal in development builds.
 		 */
 		static void NoteInputChanged(std::string_view a_what);

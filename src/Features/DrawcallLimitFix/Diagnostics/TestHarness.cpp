@@ -218,7 +218,7 @@ namespace DCLF
 	{
 		Testing::RegisterCommandPrefix("dclf:", [](const std::string& a_name, const std::string& a_arg, std::string& a_error) {
 			// A toggle command edits a copy of the requested set. Committing writes the toggles' setting, so it takes effect with its
-			// revision (plan step 10c). Other commands leave the set as it was, which is no event.
+			// revision. Other commands leave the set as it was, which is no event.
 			auto toggles = DCLF::Toggles::Get().Requested();
 			const bool ran = RunDclfCommand(a_arg.empty() ? a_name : a_name + "=" + a_arg, toggles, a_error);
 			DCLF::Toggles::Get().Commit(toggles, "cs-test");

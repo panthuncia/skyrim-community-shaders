@@ -311,7 +311,7 @@ namespace DCLF::Family
 	const char* ReasonOf(InputResult a_result);
 
 	/**
-	 * @brief Why the engine drew work a family should have taken (cleanup plan A3, step 6). Each reason is logged once. In graph
+	 * @brief Why the engine drew work a family should have taken. Each reason is logged once. In graph
 	 * mode CS_ORG_ENGINE_DRAW_TAP=1 makes a report a tap error (TapError::Refused); a texture a later batch takes is never one.
 	 */
 	class RefusalLog

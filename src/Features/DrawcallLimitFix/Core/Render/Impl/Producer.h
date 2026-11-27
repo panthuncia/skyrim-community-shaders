@@ -62,7 +62,7 @@ namespace DCLF
 			std::shared_ptr<const NamedVersions> versionsFragmentSet;  // the sealed set versionsFragment was made for
 			std::uint64_t graphBuilds = ~0ull;  // the build versionsFragment was made for (RevisionInputs::buildGeneration)
 			// The frame versions versionsFragment was made for (RevisionInputs::frameVersionsSerial). New ones make every epoch record
-			// again against them (plan step 10b).
+			// again against them.
 			std::uint64_t frameVersions = ~0ull;
 			std::uint64_t growthWaits = 0;  // makes whose set was pending on a growth, since the last report
 			std::uint64_t buildWaits = 0;  // makes that sealed nothing while waiting for a graph build
@@ -91,6 +91,8 @@ namespace DCLF
 			bool explicitBuilds = false;
 			// Uncovered frames happen only while DCLF does not draw or under a load screen.
 			std::uint64_t builds = 0, uncoveredFrames = 0, ticketsReleased = 0;
+			// The first uncovered frame since the last report and its CoverageState, for the report's line. Empty when none was.
+			std::string firstUncovered;
 			std::array<std::uint64_t, kMaxEpochs> uncovered{};
 			/** @brief What an epoch's recordings are for: exactly these fragments (the versions, the shape, then each hosted shape). */
 			struct RecordingInputs

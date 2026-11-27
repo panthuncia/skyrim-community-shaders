@@ -437,7 +437,7 @@ namespace DCLF
 		if (sameShape && !Scene::FrameView::Get().NotDrawingYet() &&
 			((pendingResources && followed(pendingResources->width, pendingResources->height)) || (sizing && followed(sizing->width, sizing->height))))
 			return true;
-		// Once DCLF draws, its graphs and snapshot hold these resources. Only a display size change carries new ones (plan step 10a-0).
+		// Once DCLF draws, its graphs and snapshot hold these resources. Only a display size change carries new ones.
 		// The colour epoch is skipped instead.
 		if (resources && Scene::FrameView::Get().EverDrew()) {
 			std::string what;

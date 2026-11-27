@@ -168,6 +168,9 @@ namespace DCLF
 								"colour {}, shadow {}{}\n",
 				std::exchange(rv.uncoveredFrames, 0), std::exchange(rv.builds, 0), std::exchange(rv.ticketsReleased, 0), uncovered, std::exchange(shadowUnrecorded, 0), std::exchange(occlusionUnrecorded, 0),
 				unbuilt[kAsyncZPrepass], unbuilt[kAsyncColour], shadowUnbuilt, unbuiltTotal ? " <- UNBUILT" : "");
+			// Why the first of those frames had no main recordings.
+			if (!rv.firstUncovered.empty())
+				text += fmt::format("[DCLF] the first frame without the main recordings since the last report, {}\n", std::exchange(rv.firstUncovered, {}));
 			unbuilt = {};
 			shadowUnbuilt = 0;
 		}

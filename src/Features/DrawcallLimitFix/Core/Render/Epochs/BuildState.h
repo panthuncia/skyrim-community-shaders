@@ -5,7 +5,7 @@
 // The render thread makes a new value when its live state changes and posts it with the revision inputs. Builds run on
 // the scene worker while the render thread keeps changing, so a build reads only this value, never the live resources.
 // Finished builds are staged. Once every one is, the value is the built one, and snapshots are made for it. The value is
-// the attached one from the Begin that adopts a snapshot made for it, with the staged builds (plan step 10a).
+// the attached one from the Begin that adopts a snapshot made for it, with the staged builds.
 //
 // Per-frame fields stay on the live resources, since only a pass's preparation or recording reads them. A pass takes the
 // conditions it needs from the state it was made with, never from the attached graphs' ones.

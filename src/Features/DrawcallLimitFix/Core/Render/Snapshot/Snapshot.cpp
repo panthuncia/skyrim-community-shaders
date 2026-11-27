@@ -1,5 +1,5 @@
 // The snapshot builder. It runs one pass at a time on DCLF's preparation pool. For each publication it builds the draws ahead,
-// makes and seals the revision, and posts a snapshot as the frame revision's scene fragment (plan step 10b). The frame revision
+// makes and seals the revision, and posts a snapshot as the frame revision's scene fragment. The frame revision
 // adopts it at a Begin, with the staged builds it was recorded on, alone or with the revision whose versions it recorded against.
 // A Begin never waits for one.
 
@@ -531,7 +531,7 @@ namespace DCLF
 				}
 				// Only deltas moved, so post the last snapshot again for this publication. The deltas still reach the frame through
 				// the change log. Not while the inputs name a build state whose builds are pending: the snapshot would carry that state
-				// and its conditions with recordings of the old builds, and the frame would run them together (plan step 10c).
+				// and its conditions with recordings of the old builds, and the frame would run them together.
 				const bool inputsBuilt = !producer.inputs.build || producer.inputs.build->serial <= Draws::BuiltBuildSerial();
 				if (b.stage == Stage::Make && std::exchange(b.fresh, false) && !snapshotInputsMoved.load(std::memory_order_acquire) && inputsBuilt &&
 					PassesThrough(b.posted, *b.work)) {
@@ -721,7 +721,7 @@ namespace DCLF
 		} else {
 			posted = {};
 		}
-		// The frame revision adopts it as its scene fragment (plan step 10b). Latest wins, and a replaced one is dropped here on the
+		// The frame revision adopts it as its scene fragment. Latest wins, and a replaced one is dropped here on the
 		// builder. Count after the post, because a waiting frame polls the count.
 		RenderGraph::Frame::Revision::Fragment posting;
 		posting.serial = snapshot->serial;
@@ -757,7 +757,7 @@ namespace DCLF
 		auto& s = *impl;
 		s.sceneTakenThisBegin = true;
 		const auto* snapshot = static_cast<const Impl::SceneSnapshot*>(a_scene.get());
-		// At Begin DCLF's scene step has not moved yet. The scene is for the step this frame runs (plan Q7).
+		// At Begin DCLF's scene step has not moved yet. The scene is for the step this frame runs.
 		const std::uint32_t frame = Scene::FrameView::Get().NextSceneStep();
 		// The post is free, so the builder may publish the next payload after this frame's scene pass. A failed feature's posts have
 		// no serial.
@@ -829,7 +829,7 @@ namespace DCLF
 		using Drop = RenderGraph::Frame::Revision::FragmentDrop;
 		auto& s = *impl;
 		auto snapshot = std::static_pointer_cast<const Impl::SceneSnapshot>(a_scene);
-		// A staged refusal at a scene's adoption is fatal, as it is for a frame revision (cleanup plan A3, step 10). DCLF's builds
+		// A staged refusal at a scene's adoption is fatal, as it is for a frame revision. DCLF's builds
 		// are made for the host's configuration, so a refusal is a schedule bug, not a reason to build again.
 		if (a_why == Drop::Refused) {
 			std::string epochs;
@@ -844,7 +844,7 @@ namespace DCLF
 			"superseded" };
 		if (++s.scenesDroppedLogged <= 16 || s.scenesDroppedLogged % 100 == 0)
 			logger::info("[DCLF] scene {} not adopted ({}): {} ({} not adopted)", snapshot->serial, kWhy[kind], a_text, s.scenesDroppedLogged);
-		// A build that is staged again and again and never switches in (the open item of plan step 10a, like the anchors' Starved).
+		// A build that is staged again and again and never switches in (like the anchors' Starved).
 		// A new build state is a new input. Without one, scenes dropped for their builds this often are a schedule bug.
 		if (a_why == Drop::BuildReplaced) {
 			const std::uint64_t stateSerial = s.buildState ? s.buildState->serial : 0;
@@ -867,7 +867,7 @@ namespace DCLF
 
 	void IndirectDraws::Impl::CheckSceneVersions(const SceneSnapshot& a_snapshot)
 	{
-		// Each epoch's recordings bind the versions the frame now reads, DCLF's buffers and the frame's textures (plan step 10b).
+		// Each epoch's recordings bind the versions the frame now reads, DCLF's buffers and the frame's textures.
 		// Checked when a scene or a frame revision was adopted, on each epoch's first recording and its first copy.
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host || !a_snapshot.revision) {
@@ -909,7 +909,7 @@ namespace DCLF
 		const auto& adopted = adoptedSnapshot;
 		if (!adopted || !adopted->revision || !adopted->drawsComplete || !installedPayload)
 			return false;
-		// Its main payloads are for the main resources the frame runs. Those change only before DCLF first draws (plan step 10a-0).
+		// Its main payloads are for the main resources the frame runs. Those change only before DCLF first draws.
 		for (const std::size_t j : { kAsyncZPrepass, kAsyncColour })
 			if (!adopted->draws || !adopted->draws->payloads[j] || adopted->draws->payloads[j]->inputs.addresses.identity != resources.get())
 				return false;
@@ -938,7 +938,7 @@ namespace DCLF
 	void IndirectDraws::Impl::UpdateConditionsAtAdoption()
 	{
 		// The graph conditions follow the variables this Begin's revision adopted, so their builds are asked for inside the adoption
-		// point, never in the frame (plan step 10c).
+		// point, never in the frame.
 		if (auto* host = RenderGraphRuntime::Get().Host(); host && RenderGraphRuntime::Get().IsActive()) {
 			RegisterGraphBuilds();
 			// A new display size's main resources are asked for and handed to the builds here too.

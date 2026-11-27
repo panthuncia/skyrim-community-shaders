@@ -28,9 +28,9 @@ namespace DCLF
 	struct FrameTicket;
 
 	/**
-	 * @brief Registers DCLF's scene as a fragment source of the frame revision (cleanup plan A5, step 4), like any other client.
-	 * Main thread, once, before the render graph initializes. The frame revision takes DCLF's newest snapshot at every main-thread
-	 * render-owner Begin, adopts it alone or with the revision it was recorded against, and BeginFrame hands its publication over.
+	 * @brief Registers DCLF's scene as a fragment source of the frame revision, like any other client. Main thread, once, before the
+	 * render graph initializes. The frame revision takes DCLF's scene at the render owner's Begins, as the source's take allows (it
+	 * can skip a Begin), adopts it alone or with the revision it was recorded against, and BeginFrame hands its publication over.
 	 */
 	void RegisterSceneSource();
 
@@ -197,6 +197,8 @@ namespace DCLF
 		 * frame's Begin.
 		 */
 		std::shared_ptr<const FrameTicket> GameFrameStart(std::uint64_t a_snapshot, bool a_takeScene);
+		/** @brief Render owner. Whether this render repeats the snapshot of the ticket it already renders. */
+		bool RepeatsTicket() const;
 		/** @brief Makes a_ticket the one the render side renders. */
 		void RenderTicket(std::shared_ptr<const FrameTicket> a_ticket);
 		/** @brief The render half, once per render: reads only the ticket, the snapshot and CS's frame. */
@@ -231,6 +233,5 @@ namespace DCLF
 		std::atomic<std::uint64_t> coveredLast{ 0 };
 		std::atomic<std::uint64_t> ticketsMade{ 0 }, ticketsUnrendered{ 0 }, ticketsRemade{ 0 }, ticketsUnpaired{ 0 }, ticketScenesCarried{ 0 };
 		std::uint32_t latePosesStep = ~0u;  // native, render side: the ticket whose late poses a depth pass used
-		bool inGameHalf = false;     // native: between GameHalfStart and GameHalfEnd (game thread)
 	};
 }

@@ -37,7 +37,7 @@ namespace DCLF
 		std::uint8_t cullMode = 0;
 
 		// The pipeline. CPU-driven means draws culled on the CPU and recorded as direct draws into DXVK's command buffer.
-		// Changing it changes the graph's conditions at the Begin that adopts it (plan step 10c). dclf:pipeline=auto|manual|gpu|cpu.
+		// Changing it changes the graph's conditions at the Begin that adopts it. dclf:pipeline=auto|manual|gpu|cpu.
 		PipelineMode pipelineMode = PipelineMode::Auto;
 		// Manual's choice for interiors and exteriors. true means CPU-driven.
 		bool interiorCpu = true;
@@ -101,7 +101,7 @@ namespace DCLF
 	std::span<const ToggleInfo> ToggleTable();
 
 	/**
-	 * @brief The requested, active and frame toggle sets (plan step 10c).
+	 * @brief The requested, active and frame toggle sets.
 	 * The requested set is a CS::Setting, the packed word. Writers edit a copy and Commit it, which writes the setting. The frame
 	 * revision that carries the new value adopts it, and the setting's adoption listener makes it the active set. The scene side commits
 	 * its next publication under the active set, and the graph conditions follow it. The frame set is the installed publication's, set

@@ -26,7 +26,7 @@ namespace DCLF
 			return;
 		auto& rv = impl->revisions;
 		// DCLF's builds are only staged here, so the graph a frame's revision was recorded on stays for the whole frame.
-		// A Begin attaches a staged build with the snapshot recorded on it (plan step 10a).
+		// A Begin attaches a staged build with the snapshot recorded on it.
 		rv.explicitBuilds = true;
 		impl->RegisterGraphBuilds();
 		// The graph conditions change at a Begin, with the revision that carried their variables, and ask for builds there (plan
@@ -127,7 +127,7 @@ namespace DCLF
 		next.scene = scene;
 		if (auto* host = RenderGraphRuntime::Get().Host()) {
 			// Each segment records on its staged build when one is staged, else on its attached one. The staged one attaches with the
-			// snapshot (plan step 10a). buildGeneration is their sum over DCLF's segments, so a staging makes every recording again.
+			// snapshot. buildGeneration is their sum over DCLF's segments, so a staging makes every recording again.
 			for (std::size_t segment = 0; segment < next.epochBuilds.size(); ++segment) {
 				const auto kind = static_cast<RenderGraphRuntime::Segment>(segment);
 				const auto epoch = RenderGraphRuntime::EpochOf(kind);
@@ -145,7 +145,7 @@ namespace DCLF
 		}
 		next.build = CurrentBuildState();
 		// The conditions of the build the recordings are of, not the attached ones: a scene recorded on staged builds is adopted with
-		// them, and the frame then runs their conditions. The view batches' kind and the recorded epochs follow these (plan step 10c).
+		// them, and the frame then runs their conditions. The view batches' kind and the recorded epochs follow these.
 		{
 			const auto& conditions = next.build->Conditions();
 			next.cpuPipeline = conditions.cpuPipeline;
@@ -155,7 +155,7 @@ namespace DCLF
 		next.mainKnown = mainEpochInputs.known;
 		next.viewport = mainEpochInputs.viewport;
 		next.blockSizes = mainEpochInputs.blockSizes;
-		// The frame's versions to record against: a frame revision's pending ones while its closure has DCLF epochs (plan step 10b).
+		// The frame's versions to record against: a frame revision's pending ones while its closure has DCLF epochs.
 		auto frameVersions = RenderGraph::Frame::Revision::FrameVersionsFor(SceneSource());
 		// Native: the main shapes draw into kMAIN's version in that revision, so their size is its shape there at the revision's
 		// dynamic resolution. The engine's live viewport takes a new window size before the frame's targets do (decision 112).
@@ -201,6 +201,8 @@ namespace DCLF
 			main = !EpochTraitsOf(e).claims || EpochTraitsOf(e).dormant || rv.covered[e];
 		rv.uncoveredFrames += main ? 0 : 1;
 		const std::uint32_t frame = Scene::FrameView::Get().SceneStep();
+		if (!main && rv.firstUncovered.empty())
+			rv.firstUncovered = fmt::format("frame {}: {}", frame, CoverageState());
 		// While DCLF draws, an epoch the recipe has it cover is covered or named the engine's. Anything else is a tap error. The claims
 		// epochs are checked whole by the frame driver, which also tells a lost device or a stopped graph apart.
 		if (main && !Scene::FrameView::Get().NotDrawingYet())

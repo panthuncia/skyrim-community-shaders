@@ -5,7 +5,7 @@
 // them to its build lane with the newest build state. Frames keep the attached graphs meanwhile, and no snapshot is made
 // for the new state until its builds are staged. Each finished build is staged at the next poll. Once none is pending,
 // the newest state is the built one, and the snapshot builder records on the staged graphs. A Begin that adopts that
-// snapshot attaches the staged graphs with it (plan step 10a). An epoch's first build goes the same way, and attaches when
+// snapshot attaches the staged graphs with it. An epoch's first build goes the same way, and attaches when
 // it is staged, since there is no graph to keep.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"

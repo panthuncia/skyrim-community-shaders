@@ -138,7 +138,8 @@ namespace DCLF::GeometryPort
 	PipelineFrame SamplePipelineFrame(bool a_eyeZero)
 	{
 		// The sun: ShadowSceneNode[0]->sunLight. SetupGeometry reads it through BSLight+0x48.
-		auto* sceneNode = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0] : nullptr;
+		const auto* shaderState = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState);
+		auto* sceneNode = shaderState ? shaderState->shadowSceneNode[0] : nullptr;
 		return SamplePipelineFrame(sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr, a_eyeZero);
 	}
 
