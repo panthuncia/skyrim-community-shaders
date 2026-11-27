@@ -137,6 +137,18 @@
     "run": "1127-171835-post-refs-native-vulkan-first-person-post-refs-n1-fp",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+lens/flat": {
+    "sha256": "e9ea6a9c82a7a9e6e58c095c03d90a851d080331446216f0ba9260754a805fbd",
+    "size": "1920x1080",
+    "run": "1127-172158-post-refs-native-vulkan-lens-post-refs-n1-lens",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+lens/lens": {
+    "sha256": "5d9f4466bf2b0587fc2a6b28088c714de0e9d4c0290f1645d2058136f932dbc5",
+    "size": "1920x1080",
+    "run": "1127-172158-post-refs-native-vulkan-lens-post-refs-n1-lens",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+map-local/localmap": {
     "sha256": "6234b7e578d4e82b56a0c11bbb38590969c66db6bc8799be8c174974498fe620",
     "size": "1920x1080",
@@ -431,6 +443,24 @@
     "run": "1127-180234-post-refs-native-vulkan-sky-native-post-refs-n1-sky",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+update-cap240/settled": {
+    "sha256": "c364efa82f7bfeca95a0907f3524d5c3cc0cc403d3ed3343d9ac671d01d254bf",
+    "size": "1920x1080",
+    "run": "1127-172744-post-refs-native-vulkan-update-cap240-post-refs-n1-uc240",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap240/start": {
+    "sha256": "4bffb52734abcc70d71068364fdaa1aa9dec377df376188b60b5ebb0ac0621a5",
+    "size": "1920x1080",
+    "run": "1127-172744-post-refs-native-vulkan-update-cap240-post-refs-n1-uc240",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap240/turn": {
+    "sha256": "981e4fb9407cde1512b1dd7858baaff9a19e03d38b36e40d94243087884235a8",
+    "size": "1920x1080",
+    "run": "1127-172744-post-refs-native-vulkan-update-cap240-post-refs-n1-uc240",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+update-cap30/settled": {
     "sha256": "97411bd87850e1c352a1c24ffe6dc28cee5ec7b8c96958cc823a3e923281b018",
     "size": "1920x1080",
@@ -447,6 +477,30 @@
     "sha256": "717a87000fd3e43c3073e8b77520924455a620dbda1d9a54aa7e76eee8d7c01c",
     "size": "1920x1080",
     "run": "1127-172648-post-refs-native-vulkan-update-cap30-post-refs-n1-uc30",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+upscalers/dlss": {
+    "sha256": "47e1418e1fba2f3eb5f81e9faaa8a19f618664337262371cd1f7221a612d4085",
+    "size": "1920x1080",
+    "run": "1127-172356-post-refs-native-vulkan-upscalers-post-refs-n1-up",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+upscalers/fsr": {
+    "sha256": "c83d29e82e7828a5a2fa2cf0b87cb0f2443a87d1f7e73ea9139d266cad3942ed",
+    "size": "1920x1080",
+    "run": "1127-172356-post-refs-native-vulkan-upscalers-post-refs-n1-up",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+upscalers/taa": {
+    "sha256": "1fe105b5f5f4d95894c0fc10de60ad0646db8b7a18d56e7ce1a21caddbb3fd29",
+    "size": "1920x1080",
+    "run": "1127-172356-post-refs-native-vulkan-upscalers-post-refs-n1-up",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+upscalers/xess": {
+    "sha256": "e6d2d0c3e9d41c688c387191a4b6ae7db7611baf7bfca92270f6a8d74c0aa1af",
+    "size": "1920x1080",
+    "run": "1127-172356-post-refs-native-vulkan-upscalers-post-refs-n1-up",
     "accepted": "2026-11-27"
   }
 }
