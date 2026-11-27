@@ -419,6 +419,18 @@
     "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+sky-native/river-noon": {
+    "sha256": "a566499f74b02f53620127b1977ae94b5791fe7b63dd317b55c571b3877734d9",
+    "size": "1920x1080",
+    "run": "1127-180234-post-refs-native-vulkan-sky-native-post-refs-n1-sky",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+sky-native/sky-night": {
+    "sha256": "1540a2f92b876ada169f02ffc00869b1e105971dcd4450540e2b600c3780d2ba",
+    "size": "1920x1080",
+    "run": "1127-180234-post-refs-native-vulkan-sky-native-post-refs-n1-sky",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+update-cap30/settled": {
     "sha256": "97411bd87850e1c352a1c24ffe6dc28cee5ec7b8c96958cc823a3e923281b018",
     "size": "1920x1080",
