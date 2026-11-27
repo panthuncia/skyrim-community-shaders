@@ -227,6 +227,9 @@ namespace DCLF
 			++ticketsRemade;
 			MakeTicket(Snapshot::LastGameId());
 		}
+		// Native: the rest of the driver's game half reads the update's globals, not the render side's adopted ones.
+		if (RenderGraph::Engine::Native::Active())
+			FrameGlobals::BeginGameHalf(ticket->globals);
 		BeginFrame();
 	}
 
@@ -509,6 +512,7 @@ namespace DCLF
 	{
 		const Snapshot::EngineReads::CaptureScope capture;
 		latePosesHold = LatePoses::ConfirmFrame();
+		FrameGlobals::EndGameHalf();
 	}
 
 	void FrameDriver::UpdateEnd()

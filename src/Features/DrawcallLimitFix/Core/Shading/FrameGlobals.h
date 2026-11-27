@@ -114,7 +114,14 @@ namespace DCLF
 		 * The next frame's capture uses these instead of the frame start's bits.
 		 */
 		static void NoteFirstPersonCulled(const RE::NiAVObject* a_root);
-		/** @brief The capture this thread reads: its Scope's, or the latest on the render thread. */
+		/**
+		 * @brief Native, game thread: binds the update's capture to the rest of the driver's game half (the light walk, the shadow
+		 * casters, Light Limit Fix's lights), from DCLF's frame start until EndGameHalf. A repeated render binds its ticket's again.
+		 */
+		static void BeginGameHalf(std::shared_ptr<const FrameGlobals> a_globals);
+		/** @brief Native, game thread: the end of the driver's game half. */
+		static void EndGameHalf();
+		/** @brief The capture this thread reads: its Scope's, the game half's on the game thread, or the latest on the render thread. */
 		static const FrameGlobals& Current();
 		/** @brief Reads since the last call from a thread with neither a scope nor the render thread's identity. The live-read detector's FrameGlobals site holds the count. */
 		static std::uint64_t TakeUnscopedReads();
