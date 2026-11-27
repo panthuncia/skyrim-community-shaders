@@ -1420,12 +1420,13 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return false;
 		// The schemes whose draws CS computes as the engine does (observe parity, draw order included): the inventory's item (1, 2) with its
 		// enchantment membranes, MistMenu (4: the main menu, a loading screen, and a loading model with its shadow maps, depth pass and
-		// masks) and the stats menu's constellations.
+		// masks), the stats menu's constellations and the lockpicking menu's lock (7).
 		switch (a_scheme) {
 		case 1:
 		case 2:
 		case 4:
 		case 6:
+		case 7:
 			return true;
 		default:
 			return false;
