@@ -165,6 +165,12 @@ namespace RenderGraph::Engine::Native
 	/** @brief The engine's Present. Copies the back buffer into the swap chain image after the frame's graph work. */
 	HRESULT Present(UINT a_syncInterval, UINT a_flags);
 
+	/**
+	 * @brief Render owner: waits until its next present may be queued (the previous one finished, and the frame latency's GPU work).
+	 * The present waits the same way; the native render thread waits here first, so it does not hold Renderer::Lock while it waits.
+	 */
+	void PacePresent();
+
 
 	/** @brief The native graphics queue's progress. Empty off native mode. */
 	rhi::QueueProgress GraphicsProgress();

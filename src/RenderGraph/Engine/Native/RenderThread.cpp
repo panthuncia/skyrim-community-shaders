@@ -294,6 +294,8 @@ namespace RenderGraph::Engine::Native::RenderThread
 			AddMax(g_stats.adoptUs, g_stats.adoptMaxUs, Micros(adopted - snapshot->published));
 		}
 		Scene::RecordRouted(payload->prepared);
+		// The present's pacing waits for the GPU. Wait before the lock, so game-thread engine code that takes it does not wait too.
+		Native::PacePresent();
 		lock(renderer);
 		if (payload->volumetricLighting) {
 			using RenderEffect = void (*)(void*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
