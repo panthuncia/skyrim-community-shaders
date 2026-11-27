@@ -126,11 +126,17 @@ namespace DCLF
 		/** @brief Any thread. The adopted set, which the next publication commits under. */
 		ToggleSet Active() const { return Unpack(active.load(std::memory_order_relaxed)); }
 
-		/** @brief Any thread. The installed publication's set, or the active one before the first. */
-		ToggleSet Frame() const { return Unpack(frame.load(std::memory_order_relaxed)); }
+		/**
+		 * @brief Any thread. The installed publication's set, or the active one before the first. Inside native's game half, the set
+		 * its frame start installed; anywhere else, the render side's (its adopted ticket's).
+		 */
+		ToggleSet Frame() const;
 
-		/** @brief Render thread, when DCLF installs the publication of the scene it adopted. a_set becomes the frame set. */
-		void InstallFrame(const ToggleSet& a_set) { frame.store(Pack(a_set), std::memory_order_relaxed); }
+		/**
+		 * @brief When DCLF installs the publication of the scene it adopted: native's game half at its frame start, the render side when
+		 * it adopts the ticket's installed frame, guest at its frame start. a_set becomes that side's frame set.
+		 */
+		void InstallFrame(const ToggleSet& a_set);
 
 		/** @brief How many times the active set has changed. A cheap witness for caches. */
 		std::uint32_t Generation() const { return generation.load(std::memory_order_relaxed); }
@@ -147,6 +153,7 @@ namespace DCLF
 		CS::Setting<std::uint64_t> requested;  // the packed requested set, as writers left it (not normalised)
 		std::atomic<std::uint64_t> active{ 0 };
 		std::atomic<std::uint64_t> frame{ 0 };
+		std::atomic<std::uint64_t> gameFrame{ 0 };  // native's game half
 		std::atomic<std::uint32_t> generation{ 0 };
 	};
 

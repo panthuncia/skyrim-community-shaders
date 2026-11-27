@@ -98,7 +98,7 @@ struct FadeFrame
 	// Per-frame values. The pass is prepared before the commit that writes this row.
 	uint RootCount;
 	uint SceneFrame;
-	uint Reserved0;
+	uint OutSlot;  // the published states this render writes
 	uint Reserved1;
 	// The animation job's update inputs.
 	float3 AnimEye;
@@ -505,7 +505,7 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 	StructuredBuffer<FadeRootStatic> roots = ResourceDescriptorHeap[RootsIndex];
 	RWStructuredBuffer<FadeNodeState> states = ResourceDescriptorHeap[StatesIndex];
 	FadeRootStatic root = roots[index];
-	RWStructuredBuffer<FadeNodeState> published = ResourceDescriptorHeap[(F.SceneFrame & 1u) != 0 ? OutIndex1 : OutIndex0];
+	RWStructuredBuffer<FadeNodeState> published = ResourceDescriptorHeap[F.OutSlot != 0 ? OutIndex1 : OutIndex0];
 	FadeNodeState state = states[index];
 	// No root, or its seed not sampled yet, so not updated this frame.
 	if (min(root.Object ^ kNoObject, root.Generation) == 0u || !MergeSeed(index, root)) {

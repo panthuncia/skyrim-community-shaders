@@ -102,6 +102,7 @@ namespace DCLF::Features::Fades
 			}
 			a_scene.fadeFrame.rootCount = a_scene.fadeRootCount;
 			a_scene.fadeFrame.sceneFrame = a_scene.fadeFrameNumber;
+			a_scene.fadeFrame.outSlot = static_cast<std::uint32_t>(Scene::FrameView::Get().RenderSerial() & 1);
 			a_uploads(a_scene.fadeFrameBuffer, &a_scene.fadeFrame, sizeof(FadeFrame), 0);
 		}
 
