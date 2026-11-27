@@ -968,3 +968,15 @@ pushes until the user is back.
      epoch). Both halves still run at the SetupSunAndSky point until the thread exists. Open: the producer split (mover
      sampling and pool kicks per ticket), scene pairing for the render thread, `coveredLast` and the family decision as
      cross-thread messages, DCLF's other points (DepthCommitted, EarlyPrepass, Prepass, BeforeOpaquePass, EndFrame).
+
+## 2026-11-27: every loading-screen model renders natively (snap5-blood; director accepted)
+
+207. **Closes 203's blood and partition items:** blood Effects (EdgeBlood03, pass 0x4842: AlphaTestRef is the threshold
+     x 1/255 plus the two weapon blood globals), Soft Effects (camera and screen-size rows, LightingInfluence.y =
+     far*near/softFalloffDepth; t3 is a null view, since the engine binds kMAIN's depth SRV while it is bound for writing
+     and D3D11/DXVK unbind it) and lit Effects (light rows from the scene node's lights, as Lighting draws) are computed;
+     particle PreviousWorld = World as the engine copies it. A skinned menu shape without renderer data draws once per
+     drawn partition with the whole skin's palette (the shape is left out if any partition's buffers are missing).
+     cs-test's `loadscreens` command and `menu-loadscreens` config show all 266 distinct loading models through the
+     engine's own setup: owned, no fatal, only Main::DrawFrame per main-menu frame. CS computes pass lists fresh each
+     render; the engine's cached lists (rebuilt only when inputs change) explain the remaining observe differences.
