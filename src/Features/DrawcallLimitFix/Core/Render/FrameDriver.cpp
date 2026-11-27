@@ -526,8 +526,9 @@ namespace DCLF
 	void FrameDriver::EndFrame()
 	{
 		LoadHold::OnFrameEnd();
-		// The engine's next update jobs follow Present, so no worker may be inside its memory from here until the next game half.
-		{
+		// Guest: the engine's next update jobs follow Present, so no worker may be inside its memory from here until the next game half.
+		// Native closes at the end of the update's renders, on the game side (Snapshot's update hook).
+		if (!RenderGraph::Engine::Native::Active()) {
 			RenderThreadBudget::Part boundary(RenderThreadBudget::Bucket::EngineBoundary);
 			EngineReadWindow::CloseAtPresent();
 		}

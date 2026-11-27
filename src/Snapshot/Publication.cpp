@@ -433,6 +433,9 @@ namespace Snapshot
 						func(a_main);
 					}
 				}
+				// The update's game side ends here: the job stages below start the engine's next update jobs, so no DCLF worker may be
+				// in engine memory past this point. Guest closed at its Present already. Phase 7 closes at the publish.
+				DCLF::EngineReadWindow::Close();
 				SideEffects::AfterRenderHalf(rendered);
 				// The cadence rendered nothing for this update: its game halves run all the same.
 				if (!rendered)
@@ -453,7 +456,7 @@ namespace Snapshot
 				}
 				if (updates % kLifetimeLineUpdates == 0)
 					logger::info("{}", Retire::TakeStatsLine());
-				// Main::Update's game logic follows. DCLF's game half opened the window; Present usually closed it already.
+				// Main::Update's game logic follows. A dropped update's game half opened the window again.
 				DCLF::EngineReadWindow::Close();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
