@@ -9,6 +9,13 @@ frames = 0
 do = "console"
 arg = "tgm"
 
+# AI off: the save's hostile guards follow into Dragonsreach and fight, which makes the shots differ between runs.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
 [[steps]]
 at = "previous"
 frames = 30

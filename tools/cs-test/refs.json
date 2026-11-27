@@ -228,28 +228,28 @@
     "accepted": "2026-11-26"
   },
   "native-vulkan+native-interior/dragonsreach": {
-    "sha256": "eae28e60584c0625a8af1dcc42fd5b6ff968f6b9f25f38883881175de000882c",
+    "sha256": "b025bfa7423a8ebd43270201d12258e67b8777f22ff3b64011fd60259f7a06ef",
     "size": "1920x1080",
-    "run": "1126-185746-dir-native-vulkan-native-interior-dir-s7dk-native-vulkan+native-interior",
-    "accepted": "2026-11-26"
+    "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
+    "accepted": "2026-11-27"
   },
   "native-vulkan+native-interior/dragonsreach2": {
-    "sha256": "59f692d878b44be23773930f8aedec607c70fea9a03b2e5c1807eab44c53933e",
+    "sha256": "108bb7c8a71c91c66aeefede8c82d44f8510166f1bb6b42b6a88785f3dbee3df",
     "size": "1920x1080",
-    "run": "1126-185746-dir-native-vulkan-native-interior-dir-s7dk-native-vulkan+native-interior",
-    "accepted": "2026-11-26"
+    "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
+    "accepted": "2026-11-27"
   },
   "native-vulkan+native-interior/vl-custom": {
-    "sha256": "55fbe40f62a8315d88beaa74e3faf9645e3b0f103a3bbe7c10c2e5ea949e206d",
+    "sha256": "0d22c1f3732d5b7eed2ca7fb20926d6b1570124595f3ffe73907ea505a554a2c",
     "size": "1920x1080",
-    "run": "1126-185746-dir-native-vulkan-native-interior-dir-s7dk-native-vulkan+native-interior",
-    "accepted": "2026-11-26"
+    "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
+    "accepted": "2026-11-27"
   },
   "native-vulkan+native-interior/vl-exterior": {
-    "sha256": "5e0d516357cdcaed3fe07787667f0c3663784ef43ebcdbecfb2be88763dad990",
+    "sha256": "5861b2283ba5e61b4a8586f693ab4a404353df3744c7c8392641b7dab2e08cde",
     "size": "1920x1080",
-    "run": "1126-185746-dir-native-vulkan-native-interior-dir-s7dk-native-vulkan+native-interior",
-    "accepted": "2026-11-26"
+    "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
+    "accepted": "2026-11-27"
   },
   "native-vulkan+quick/start": {
     "sha256": "ecbc5bd088d286f9f8b7ceeea9f15f28ecdb2038a4c3b6ac2d3b9a2b718141ce",

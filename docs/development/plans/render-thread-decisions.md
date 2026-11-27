@@ -1151,3 +1151,13 @@ pushes until the user is back.
      Full suite on the merge: 21/23; window-resize-stress-taa loses the device (passes single-threaded) and native-interior
      lost the device once at a load's held frame (rerun passed). Both go to snap7-thread2 with the shared-state, parity
      buffer, update-dip and frame-start-read items.
+
+## 2026-11-27: render thread follow-ups (snap7-thread2; director accepted)
+
+227. **The halves own their DCLF state** (`snap7-thread2.md`): FrameView's claims state is the game half's; a render-side
+     stop only drops the render's claims and is counted, and the game half applies counted stops at its hand-over; coverage
+     counts only after the last stop (T2-a). Toggles keep one frame word per half (T2-b). Fade states and tree wind pick
+     their slot from the render serial, written into the frame row (T2-c). Frame-start reads go through CS's target set,
+     not the ticket (T2-d, for snap7-pace). Not fixed: the resize device loss (snap7-devloss; native-interior's device
+     losses look like the same fault), the portal main-context stamp, update dips and frame-start reads (snap7-pace).
+     native-interior turns AI off after god mode: hostile guards followed into Dragonsreach and made its shots differ.
