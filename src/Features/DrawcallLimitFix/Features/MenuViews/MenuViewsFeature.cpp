@@ -33,11 +33,18 @@ namespace DCLF::Features::MenuViews
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief LocalMapRenderer::Render (SE 16094, AE 16335): the local map's land, objects and fog of war. */
+		/**
+		 * @brief LocalMapRenderer::Render (SE 16094, AE 16335): the local map's land, objects and fog of war. Native draws it from the scene
+		 * (Scenes::Native::RenderLocalMap) and the engine's function is not entered; guest keeps the engine's render with its batches latched.
+		 */
 		struct LocalMapRender
 		{
 			static void thunk(void* a_renderer)
 			{
+				if (::RenderGraph::Engine::Native::Active()) {
+					Scenes::Native::RenderLocalMap(a_renderer);
+					return;
+				}
 				PassCapture::MenuSceneScope menuScene;
 				func(a_renderer);
 			}

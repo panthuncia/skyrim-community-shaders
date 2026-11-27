@@ -6,8 +6,9 @@
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
 
-#include "RenderGraph/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/Family/FamilyClient.h"
@@ -238,6 +239,19 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Vertex });
 		}
 
+		/** @brief The water programs, keyed by the vertex descriptor as the water family's (the vertex stage reads Wading). */
+		void WaterStagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
+		{
+			if (!a_pixel)
+				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Vertex });
+		}
+
+		/** @brief Every water program of this family is Water.hlsl's menu scene build. */
+		Family::Defines WaterDefines(std::uint32_t)
+		{
+			return { { L"WATER_ORG_SCENE", L"" } };
+		}
+
 		/** @brief ProgramKey::variant's defines for Lighting: LIGHTING_ORG_LINEAR for kLightingLinearVariant. */
 		Family::Defines LightingVariantDefines(std::uint32_t a_variant)
 		{
@@ -264,6 +278,12 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 																		   .languageVersion = L"2018",
 																		   .constantWords = ShaderBindings::Words<UtilityBlock>(),
 																		   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Effect) } };
+			// The local map's water (technique LOD), with the menu scenes' push block (WATER_ORG_SCENE).
+			Family::EngineDrawPrograms water{ "menu scenes (Water)", { .source = "Water.hlsl",
+																		 .constantWords = ShaderBindings::Words<UtilityBlock>(),
+																		 .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Water),
+																		 .variantDefines = &WaterDefines,
+																		 .stagesOf = &WaterStagesOf } };
 		};
 
 		DrawsState& GetState()
@@ -303,6 +323,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			// The book's pages: its model's page material samples the kBOOK_TEXT targets the page copies and Scaleform drew.
 			for (const auto page : { RE::RENDER_TARGET::kBOOK_TEXT_0, RE::RENDER_TARGET::kBOOK_TEXT_1, RE::RENDER_TARGET::kBOOK_TEXT_2, RE::RENDER_TARGET::kBOOK_TEXT_3 })
 				a_inputs.AddEngine(page);
+			// The local map's water with reflections and no static cube reads the global reflections cube (t3).
+			a_inputs.AddEngine(RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS);
 		}
 
 		/** @brief Makes the client of a_view. Null, logged, when a target cannot be imported. */
@@ -316,7 +338,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			client->view = a_view;
 			client->id = std::string("cs.menu-scenes.") + NameOf(a_view);
 			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", LatchBytesOf(a_view));
-			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
+			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", MaxDrawsOf(a_view));
 			for (const auto target : TargetsOf(a_view)) {
 				if (client->colourCount >= kMaxImports)
 					break;
@@ -412,6 +434,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		state.utility.Prebuild();
 		state.lighting.Prebuild();
 		state.effect.Prebuild();
+		state.water.Prebuild();
 		if (!::RenderGraph::Engine::GraphMode()) {
 			logger::warn("[DCLF] menu scenes: needs graph mode; the menu scenes stay the engine's");
 			return true;
@@ -428,6 +451,9 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				v, client, RF::DependsOn(), [](const RF::Inputs&) -> std::optional<Family::NoKey> { return Family::NoKey{}; },
 				[client](const Family::NoKey&, FrameAnchors::ClientDesc& a_desc) { return MakeDesc(client, a_desc); }, "that batch stays the engine's");
 		}
+		// Native draws the local map itself: its programs are queued now, so its first render draws every pass.
+		if (::RenderGraph::Engine::Native::Active() && ViewEnabled(View::LocalMap))
+			Native::QueueLocalMapPrograms();
 		return true;
 	}
 
@@ -472,6 +498,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		return GetState().effect.Get(a_key, a_shader, a_building);
 	}
 
+	std::shared_ptr<const void> WaterProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building)
+	{
+		return GetState().water.Get(a_key, a_shader, a_building);
+	}
+
 	std::uint32_t ColourFormat(View a_view, std::uint32_t a_index)
 	{
 		const auto& client = ClientOf(a_view);
@@ -502,8 +533,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		const auto& state = GetState();
 		if (!AnyEnabled())
 			return "off (not graph mode)";
-		return fmt::format("{} runs ({} drawn), {} draws, {} Utility, {} Lighting and {} Effect programs", state.clients.Runs(), state.clients.Executed(),
-			state.clients.Draws(), state.utility.Built(), state.lighting.Built(), state.effect.Built());
+		return fmt::format("{} runs ({} drawn), {} draws, {} Utility, {} Lighting, {} Effect and {} Water programs", state.clients.Runs(), state.clients.Executed(),
+			state.clients.Draws(), state.utility.Built(), state.lighting.Built(), state.effect.Built(), state.water.Built());
 	}
 }
 

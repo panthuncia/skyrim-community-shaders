@@ -2873,6 +2873,11 @@ namespace RenderGraph::Engine::ImageSpace
 		return NativePost::RunMenuHdr(a_source, a_final);
 	}
 
+	bool LocalMapEffect(float a_texelX, float a_texelY)
+	{
+		return IS().on && NativePost::RunLocalMap(a_texelX, a_texelY);
+	}
+
 	std::string_view AdaptedLuminanceOf(const ID3D11ShaderResourceView* a_view)
 	{
 		return AdaptedLuminanceIdOf(a_view);

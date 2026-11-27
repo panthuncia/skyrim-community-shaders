@@ -528,7 +528,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		/** @brief Latches the draw by its shader's kind. Returns null when latched, else why not. */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
-			if (a_capture.run->draws.size() >= kMaxDraws)
+			if (a_capture.run->draws.size() >= MaxDrawsOf(a_capture.view))
 				return "more draws than the batch latches";
 			const auto& rss = CS_ENGINE_READ(ShadowState, CapturePoint, RE::BSGraphics::RendererShadowState::GetSingleton())->GetRuntimeData();
 			const auto* state = globals::state;

@@ -25,6 +25,7 @@
 #include "Features/DrawcallLimitFix/Features/Particles/ParticleSnapshots.h"
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
 
+#include "EngineFixes/LandscapeSeamsFix.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
@@ -39,6 +40,7 @@
 #include "ShaderCache.h"
 #include "Snapshot/CoreFrame.h"
 #include "State.h"
+#include "TruePBR/BSLightingShaderMaterialPBRLandscape.h"
 #include "Utils/Logging.h"
 
 #include <algorithm>
@@ -185,14 +187,6 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 	Inputs SampleInputs(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, const PreviousCamera& a_previous, bool a_shadowMaps)
 	{
-		Inputs in;
-		in.shadowMaps = a_shadowMaps;
-		in.shadowDimmers = ShadowLightDimmers(a_manager, a_camera);
-		in.eye = a_camera.world.translate;
-		in.sceneNode = a_manager.shadowSceneNode;
-		in.technique = SampleTechniqueInputs();
-		// The engine's render makes the menu's scene node the current scene graph for its draws; SetupTechnique's fog is that node's.
-		SampleFog(in.sceneNode, in.technique);
 		// DirLightColor scales by the ImageSpace data's HDR multiplier. MistMenu's scenes (main menu, loading model) have no world update
 		// behind them, so the engine's draws read the override's (manager +0xB0), which its last render copied into the current data
 		// (AE 0x141482ba0). Over a world, the game's blend replaces the current data each update.
@@ -200,7 +194,21 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		const auto* override = imageSpace && a_manager.currentlightScheme == RE::INTERFACE_LIGHT_SCHEME::kLoading ?
 		                           *reinterpret_cast<const float* const*>(imageSpace + 0xB0) :
 		                           nullptr;
-		in.pipeline = GeometryPort::SamplePipelineFrame(in.sceneNode ? in.sceneNode->GetRuntimeData().sunLight : nullptr, true, override ? &override[6] : nullptr);
+		auto in = SampleSceneInputs(a_manager.shadowSceneNode, a_camera, a_previous, override ? &override[6] : nullptr);
+		in.shadowMaps = a_shadowMaps;
+		in.shadowDimmers = ShadowLightDimmers(a_manager, a_camera);
+		return in;
+	}
+
+	Inputs SampleSceneInputs(const RE::ShadowSceneNode* a_sceneNode, const RE::NiCamera& a_camera, const PreviousCamera& a_previous, const float* a_hdrOverride)
+	{
+		Inputs in;
+		in.eye = a_camera.world.translate;
+		in.sceneNode = a_sceneNode;
+		in.technique = SampleTechniqueInputs();
+		// The engine's render makes the menu's scene node the current scene graph for its draws; SetupTechnique's fog is that node's.
+		SampleFog(in.sceneNode, in.technique);
+		in.pipeline = GeometryPort::SamplePipelineFrame(in.sceneNode ? in.sceneNode->GetRuntimeData().sunLight : nullptr, true, a_hdrOverride);
 		// The material port reads the engine's Lighting shader object, which DCLF captures only in a world frame.
 		if (!EngineShaders::Lighting()) {
 			static const REL::Relocation<RE::BSShader**> lightingShader{ REL::Offset(Engine::Address::kLightingShader) };
@@ -234,6 +242,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return d.x * d.x + d.y * d.y + d.z * d.z <= reach * reach;
 		};
 		push(data.sunLight);
+		// The local map's land passes take no other light (their point light rows stay empty).
+		if (a_in.localMap)
+			return;
 		for (const auto& light : data.activeShadowLights)
 			if (light && light->light && lights(*light)) {
 				push(light.get());
@@ -247,7 +258,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 	void FrameRows(const Inputs& a_in, float (*a_out)[4])
 	{
 		std::memset(a_out, 0, kFrameBytes);
-		Snapshot::FrameCamera::WriteCamera(a_in.camera.view, a_in.camera.proj, a_in.camera.viewProj, a_in.eye, { 0.0f, 0.0f }, &a_in.previous, &a_out[0][0]);
+		Snapshot::FrameCamera::WriteCamera(a_in.camera.view, a_in.camera.proj, a_in.camera.viewProj, a_in.eye, { 0.0f, 0.0f }, a_in.localMap ? nullptr : &a_in.previous, &a_out[0][0]);
 		Snapshot::FrameCamera::WriteRatios({}, Snapshot::Core().drClampOffset, &a_out[0][0]);
 		const float params[4]{ Snapshot::Core().inverseGamma, 1.0f, 0.0f, 0.0f };
 		std::memcpy(a_out[42], params, sizeof(params));
@@ -283,6 +294,17 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			}
 		}
 		LightingShaderDescriptors(a_out.pass, false, a_out.vertex, a_out.pixel);
+		// The local map's land passes as the engine draws them: True PBR's glint bit from its material (its GetRenderPasses hook,
+		// TruePBR.cpp) and Landscape Seams' bit on a blended quad (LandscapeSeamsFix.cpp). The ORG Lighting build compiles both features
+		// out, so the bits only name the program.
+		if (a_in.localMap && property->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kMultiTextureLandscape)) {
+			using LF = SIE::ShaderCache::LightingShaderFlags;
+			const auto seams = static_cast<std::uint32_t>(LF::LandscapeSeams), glint = static_cast<std::uint32_t>(LF::AnisoLighting);
+			const bool blended = LandscapeSeamsFix::GetInstance().IsBlended(const_cast<RE::BSGeometry*>(&a_geometry));
+			const bool glints = (a_out.pass & static_cast<std::uint32_t>(LF::TruePbr)) && static_cast<const BSLightingShaderMaterialPBRLandscape*>(property->material)->HasGlint();
+			for (auto* d : { &a_out.pass, &a_out.pixel, &a_out.rawPixel })
+				*d = (*d & ~(seams | glint)) | (blended ? seams : 0u) | (glints ? glint : 0u);
+		}
 
 		auto* shader = EngineShaders::Lighting();
 		auto* vs = shader ? globals::shaderCache->GetVertexShader(*shader, a_out.vertex) : nullptr;
@@ -320,7 +342,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return false;
 		}
 		WorldRows(a_geometry.world, a_in.eye, &geometry.vs.floats[vsLayout.offset[kVSWorld]]);
-		WorldRows(a_geometry.previousWorld, a_in.havePrevious ? a_in.previousEye : a_in.eye, &geometry.vs.floats[vsLayout.offset[kVSPreviousWorld]]);
+		WorldRows(a_geometry.previousWorld, a_in.localMap ? RE::NiPoint3{} : a_in.havePrevious ? a_in.previousEye :
+																								 a_in.eye,
+			&geometry.vs.floats[vsLayout.offset[kVSPreviousWorld]]);
 		BindlessShading shading{};
 		SampleShading(*property, a_out.pass, false, shading);
 		for (std::uint32_t i = 0; i < 4; ++i)
@@ -355,6 +379,18 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 						c.psGeometry[r][i] = rows[r][i];
 						w.psGeometry[r][i] = 1.0f;
 					}
+		}
+		// The local map's land draws find the graphics state's default height map in t6 and t14 (observed in every one; the ORG build reads
+		// neither: no parallax layer, no shadows).
+		if (a_in.localMap) {
+			const auto* height = RE::BSGraphics::State::GetSingleton()->GetRuntimeData().defaultHeightMap.get();
+			for (const std::uint32_t slot : { 6u, 14u })
+				if (!((a_out.record.textureWritten >> slot) & 1)) {
+					a_out.record.textures[slot] = MaterialPort::ViewOf(height);
+					a_out.record.addressModes[slot] = 3;
+					a_out.record.filterModes[slot] = 3;
+					a_out.record.textureWritten |= 1u << slot;
+				}
 		}
 		// A pass with shadow bits reads the shadow mask in t14 (SetupTechnique): clamped, with the technique's filter.
 		if (technique.shadowMask && technique.shadowMaskTexture) {
@@ -914,6 +950,18 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			if (!property->flags.any(Flag::kZBufferWrite) || BlendedList(a_geometry) || property->flags.any(Flag::kDecal, Flag::kDynamicDecal))
 				return false;
 			technique = ShadowUtilityTechnique(flags, testing) | ShadowModeBits(0xC);
+		} else if (a_view.view == View::LocalMap) {
+			// GetRenderPasses_LocalMap (vtable 0x2C, AE 0x1414afb00, SE 0x1412c7cd0) in render mode 0x12: none for a skinned or refracting
+			// property, a blended one, or one whose fade times material alpha is below 1 (the constant at SE 0x1415232d8).
+			if ((flags & 0x8002) || blending)
+				return false;
+			const float fade = property->fadeNode ? property->fadeNode->GetRuntimeData().currentFade : 1.0f;
+			if (fade * static_cast<const RE::BSLightingShaderMaterialBase*>(property->material)->materialAlpha < 1.0f)
+				return false;
+			technique = UtilityShaderDecl(flags) | (testing ? 0x80u : 0u) | static_cast<std::uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderBaseTexture);
+		} else if (a_view.view == View::LocalMapFog) {
+			// The same function in render mode 0x13 (the fog of war): every property, no alpha test bit.
+			technique = UtilityShaderDecl(flags) | static_cast<std::uint32_t>(SIE::ShaderCache::UtilityShaderFlags::LocalMapFogOfWar);
 		} else {
 			const auto type = static_cast<std::uint8_t>(a_geometry.GetType().underlying());
 			if (ShadowCasterReject(flags, type, blending, property->alpha, FrameGlobals::Current().shadowGlobal) != ShadowReject::None)
@@ -969,7 +1017,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 		// AlphaTestRef.x (PS c2), which only the depth pass's pixel shader declares: 0x3F7EFEFF while the alpha property blends, else the
 		// threshold over 255 plus the exe's bias.
-		if (a_view.view == View::MenuDepth && alpha && (blending || (t & 0x80u) || (t & 0x14000u) == 0x10000u)) {
+		// The fog of war's pixel shader has no PerGeometry: the engine writes no row there.
+		if ((a_view.view == View::MenuDepth || a_view.view == View::LocalMap) && alpha && (blending || (t & 0x80u) || (t & 0x14000u) == 0x10000u)) {
 			float ref = std::bit_cast<float>(0x3F7EFEFFu);
 			if (!blending) {
 				constexpr float kStep = std::bit_cast<float>(0x3B808081u), kBias = std::bit_cast<float>(0x3B80802Cu);
@@ -980,6 +1029,17 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			write(c.psGeometry[2], w.psGeometry[2], 0, ref);
 		}
 		a_out.state = UtilityStateOf(a_geometry, *property);
+		// The local map's states (LocalMapRenderer::Render): the base textures write colour (mode 1); the fog of war writes alpha only
+		// (mode 8) with no depth test and no culling.
+		if (a_view.view == View::LocalMap || a_view.view == View::LocalMapFog)
+			a_out.state.stencil = 0;
+		if (a_view.view == View::LocalMap)
+			a_out.state.write = 1;
+		else if (a_view.view == View::LocalMapFog) {
+			a_out.state.write = 8;
+			a_out.state.depth = 0;
+			a_out.state.cull = 0;
+		}
 		c.alphaTestRef = a_out.state.alphaRef;
 		return true;
 	}
@@ -1027,10 +1087,10 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			return { kFramebufferTarget, motion ? kMotionVectorTarget : -1, -1 };
 		}
 
-		/** @brief Maps a_targets into the colour client's imports. Null when mapped. */
-		const char* MapColours(const std::array<std::int32_t, kMaxColours>& a_targets, std::uint32_t a_outputs, Draw& a_draw)
+		/** @brief Maps a_targets into a_view's client's imports. Null when mapped. */
+		const char* MapColours(View a_view, const std::array<std::int32_t, kMaxColours>& a_targets, std::uint32_t a_outputs, Draw& a_draw)
 		{
-			const auto imports = TargetsOf(View::MenuColour);
+			const auto imports = TargetsOf(a_view);
 			a_draw.colourCount = 0;
 			for (std::uint32_t i = 0; i < (std::min)(a_outputs, kMaxColours); ++i) {
 				if (a_targets[i] < 0)
@@ -1040,12 +1100,12 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 					return "a colour target its view's client does not import";
 				const auto index = static_cast<std::uint32_t>(found - imports.begin());
 				a_draw.colours[i] = static_cast<std::uint8_t>(index);
-				a_draw.key.colourFormats[i] = SceneDraws::ColourFormat(View::MenuColour, index);
+				a_draw.key.colourFormats[i] = SceneDraws::ColourFormat(a_view, index);
 				if (!a_draw.key.colourFormats[i])
 					return "a colour target with no format";
 				++a_draw.colourCount;
 			}
-			a_draw.key.depthFormat = SceneDraws::DepthFormat(View::MenuColour);
+			a_draw.key.depthFormat = SceneDraws::DepthFormat(a_view);
 			return a_draw.key.depthFormat ? nullptr : "no depth import";
 		}
 
@@ -1131,11 +1191,11 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 		/** @brief A texture slot of a material record and its sampler. A slot the record leaves unwritten reads the null view. */
 		const char* AddTexture(ID3D11ShaderResourceView* a_view, std::uint32_t a_address, std::uint32_t a_filter, std::uint32_t a_slot, Run& a_run, std::uint32_t& a_index,
-			std::uint32_t& a_sampler, std::string& a_detail)
+			std::uint32_t& a_sampler, std::string& a_detail, Kind a_kind = Kind::Texture2D)
 		{
 			auto* view = Unwrap(a_view);
 			GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
-			const auto slot = Family::SlotTexture(view, Kind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, a_slot), a_index, a_run.owners, &failure);
+			const auto slot = Family::SlotTexture(view, a_kind, GpuTextures::Tag(GpuTextures::Source::FrameSlot, a_slot), a_index, a_run.owners, &failure);
 			if (slot == Family::SlotResult::Published) {
 				// A target a graph pass writes, such as the shadow mask, is read by its published id, so the graph orders the write first.
 				const auto id = PublishedResources::ExportedId(view);
@@ -1200,17 +1260,24 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			std::uint32_t& a_frame, std::string& a_detail)
 		{
 			LightingResult r;
+			// A shader CS's cache has not compiled yet (the first frames of a cold cache) leaves the draw out like a building program.
 			if (!ComputeLighting(a_in, a_geometry, r, a_detail))
-				return "its Lighting constants could not be computed";
+				return a_detail.starts_with("no shader") ? kBuilding : "its Lighting constants could not be computed";
 			Draw draw{};
 			draw.shader = Shader::Lighting;
 			constexpr auto kVertexInputs = static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::VC) | static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::Skinned);
 			draw.key.descriptor = (r.pixel & ~kVertexInputs) | (r.vertex & kVertexInputs);
 			draw.key.defineStage = Family::DefineStage::Pixel;
-			if (const char* why = MapColours(a_targets, kMaxColours, draw))
+			// The local map's land keeps Linear Lighting's pipeline: kLOCAL_MAP_SWAP stores the shader's output as plain D3D11 has it.
+			if (a_run.view == View::LocalMap)
+				draw.key.variant = kLightingLinearVariant;
+			if (const char* why = MapColours(a_run.view, a_targets, kMaxColours, draw))
 				return why;
 			const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
-			const auto state = StateOf(a_geometry, *property, false, a_targets[0]);
+			auto state = StateOf(a_geometry, *property, false, a_targets[0]);
+			// The local map's draws test no stencil (its render leaves stencil mode 0).
+			if (a_run.view == View::LocalMap)
+				state.stencil = 0;
 			if (const char* why = DescribeStates(draw, state))
 				return why;
 			auto* shader = EngineShaders::Lighting();
@@ -1225,7 +1292,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			c.descriptors[3] = globals::state->permutationData.ExtraFeatureDescriptor;
 			c.effectRadius = a_geometry.worldBound.radius;
 			c.baseTextureIsWorking = permutation.baseTextureIsWorking;
-			c.renderToUI = permutation.renderToUI;
+			// Linear Lighting's RenderToUI is set around menu scene renders only, not the local map's.
+			c.renderToUI = a_run.view == View::LocalMap ? 0u : permutation.renderToUI;
 			if (const char* why = AddGeometry(a_geometry, vs->vertexDesc, a_run, draw, c.vertexRef, c.indexRef, c.vertexLayout, c.vertexStride, c.firstIndex, a_detail))
 				return why;
 			auto null = GpuTextures::Get().NullOf(Kind::Texture2D);
@@ -1313,7 +1381,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			draw.shader = Shader::Effect;
 			draw.key.descriptor = a_result.pixel | (a_result.vertex & Effects::EffectFlag::Skinned);
 			draw.key.defineStage = Family::DefineStage::Pixel;
-			if (const char* why = MapColours(a_targets, kMaxColours, draw))
+			if (const char* why = MapColours(a_run.view, a_targets, kMaxColours, draw))
 				return why;
 			if (const char* why = DescribeStates(draw, a_state))
 				return why;
@@ -1479,7 +1547,12 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		draw.shader = Shader::Utility;
 		draw.key.descriptor = r.vertex;
 		draw.key.defineStage = Family::DefineStage::Vertex;
-		draw.key.depthFormat = SceneDraws::DepthFormat(a_view.view);
+		// The local map's Utility draws write kLOCAL_MAP_SWAP; the depth pass and the shadow maps write depth only.
+		if (a_view.view == View::LocalMap || a_view.view == View::LocalMapFog) {
+			if (const char* why = MapColours(a_view.view, { kLocalMapSwapTarget, -1, -1 }, 1, draw))
+				return why;
+		} else
+			draw.key.depthFormat = SceneDraws::DepthFormat(a_view.view);
 		if (!draw.key.depthFormat)
 			return "no depth import";
 		draw.depthSlice = a_view.slice;
@@ -1509,7 +1582,12 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		if (r.vertex & 0x4u)
 			if (const char* why = AddBones(a_geometry, a_run, draw, a_detail))
 				return why;
-		draw.frameOffset = a_run.Append(std::as_bytes(std::span<const float[4]>(a_view.frame, kFrameRows)));
+		// Draws of one camera share its rows: the previous draw's are taken when they are the same.
+		const auto frame = std::as_bytes(std::span<const float[4]>(a_view.frame, kFrameRows));
+		const auto* last = a_run.draws.empty() ? nullptr : &a_run.draws.back();
+		const bool same = last && last->frameOffset + frame.size() <= a_run.latch.size() &&
+		                  std::memcmp(a_run.latch.data() + last->frameOffset, frame.data(), frame.size()) == 0;
+		draw.frameOffset = same ? last->frameOffset : a_run.Append(frame);
 		draw.latchOffset = a_run.Append(std::as_bytes(std::span<const UtilitySceneConstants, 1>(&c, 1)));
 		if (draw.latchOffset == ~0u || draw.frameOffset == ~0u)
 			return "more constants than the batch's latch holds";
@@ -1619,8 +1697,270 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 	}
 
+	namespace
+	{
+		/** @brief A local map water draw (ComputeWater) into kLOCAL_MAP_SWAP, with the local map camera's FrameBuffer rows. */
+		const char* AddWater(const Water::Port::FrameInputs& a_frame, const RE::BSGeometry& a_geometry, const UtilityView& a_view, Run& a_run, std::string& a_detail)
+		{
+			WaterResult r;
+			if (!ComputeWater(a_frame, a_geometry, r, a_detail))
+				return "its water constants could not be computed";
+			Draw draw{};
+			draw.shader = Shader::Water;
+			// The vertex stage reads Wading, which State strips from the pixel descriptor, so the key is the vertex descriptor (the water
+			// family's rule).
+			draw.key.descriptor = r.vertex;
+			draw.key.defineStage = Family::DefineStage::Vertex;
+			if (const char* why = MapColours(a_run.view, { kLocalMapSwapTarget, -1, -1 }, 1, draw))
+				return why;
+			if (const char* why = DescribeStates(draw, r.state))
+				return why;
+			auto& c = r.constants;
+			if (const char* why = AddGeometry(a_geometry, r.vertexDesc, a_run, draw, c.vertexRef, c.indexRef, c.vertexLayout, c.vertexStride, c.firstIndex, a_detail))
+				return why;
+			// LOD's pixel stage reads t4 (and t3 with Reflections, which the local map's passes never carry); every other slot is null.
+			for (std::uint32_t t = 0; t < Water::kMaterialSlots; ++t) {
+				const auto& slot = t == 4 ? r.normals : t == 3 ? r.cube :
+				                                                 WaterResult::Slot{};
+				if (const char* why = AddTexture(slot.view, slot.address, slot.filter, t, a_run, c.textures[t], c.samplers[t], a_detail, Water::MaterialKind(t)))
+					return why;
+			}
+			bool building = false;
+			draw.program = SceneDraws::WaterProgram(draw.key, *r.shader, &building);
+			if (!draw.program)
+				return building ? kBuilding : "its ORG program cannot be built";
+			const auto frame = std::as_bytes(std::span<const float[4]>(a_view.frame, kFrameRows));
+			draw.frameOffset = a_run.Append(frame);
+			draw.latchOffset = a_run.Append(std::as_bytes(std::span<const Water::DrawConstants, 1>(&c, 1)));
+			if (draw.latchOffset == ~0u || draw.frameOffset == ~0u)
+				return "more constants than the batch's latch holds";
+			draw.stencilRef = r.state.stencilRef;
+			draw.viewport = MenuViewport(kLocalMapSwapTarget, r.state);
+			a_run.draws.push_back(std::move(draw));
+			return nullptr;
+		}
+
+		/** @brief The local map's Utility view: its render mode, the camera's eye and rows, kLOCAL_MAP_SWAP's viewport. */
+		UtilityView LocalMapUtilityView(View a_view, const RE::NiCamera& a_camera, const Inputs& a_in)
+		{
+			UtilityView view;
+			view.view = a_view;
+			view.renderMode = a_view == View::LocalMapFog ? 0x13u : 0x12u;
+			view.eye = a_camera.world.translate;
+			view.textureTransformBuffer = a_in.material.vanilla.textureTransformBuffer;
+			view.viewport = MenuViewport(kLocalMapSwapTarget, DrawState{});
+			UtilityFrameRows(a_camera, view.frame);
+			return view;
+		}
+
+		struct LocalMapState
+		{
+			PreviousCamera previous;  // never read: the local map's draws have no previous camera
+			std::uint64_t renders = 0, leftOut = 0;
+		};
+
+		LocalMapState& GetLocalMap()
+		{
+			static LocalMapState state;
+			return state;
+		}
+
+		/** @brief A draw's refusal: left out of this render (a building program, a streaming texture, no buffers yet), else fatal (decision 149). */
+		void Refused(const char* a_batch, const RE::BSGeometry& a_geometry, const char* a_why, const std::string& a_detail)
+		{
+			const char* name = a_geometry.name.c_str() ? a_geometry.name.c_str() : "?";
+			if (LeftOut(a_why)) {
+				if (GetLocalMap().leftOut++ == 0)
+					logger::info("[DCLF] local map: {} draw {} is left out of this render: {} ({})", a_batch, name, a_why, a_detail);
+				return;
+			}
+			::RenderGraph::Fatal("local map", std::format("{} draw {}: {} ({})", a_batch, name, a_why, a_detail));
+		}
+
+		/** @brief Hands a batch's run to its client (or keeps its owners when the client cannot take it now). */
+		void Hand(View a_view, std::shared_ptr<Run> a_run)
+		{
+			if (a_run->draws.size() > MaxDrawsOf(a_view))
+				::RenderGraph::Fatal("local map", std::format("{} draws in the {} batch, past its {}", a_run->draws.size(), NameOf(a_view), MaxDrawsOf(a_view)));
+			if (SceneDraws::Available() && SceneDraws::CanTake(a_view))
+				SceneDraws::Submit(std::move(a_run));
+			else
+				SceneDraws::Keep(std::move(a_run->owners));
+		}
+	}
+
+	namespace
+	{
+		struct LocalMapQueue
+		{
+			bool done = false, pending = false;
+		};
+		LocalMapQueue& GetLocalMapQueue()
+		{
+			static LocalMapQueue state;
+			return state;
+		}
+	}
+
+	void QueueLocalMapPrograms()
+	{
+		// The engine's shader objects pass through EngineDrawPrograms::Get, which reads only the key. Before the engine has made them (CS's
+		// setup can come first), the queue waits for the first native menu scene render, which comes before any local map.
+		static const REL::Relocation<RE::BSShader**> lightingShader{ REL::Offset(Engine::Address::kLightingShader) };
+		static const REL::Relocation<RE::BSShader**> waterShader{ RELOCATION_ID(528163, 415108) };
+		const RE::BSShader* utility = RE::BSUtilityShader::GetSingleton();
+		const RE::BSShader* lighting = *lightingShader.get();
+		const RE::BSShader* waterShaderObject = *waterShader.get();
+		auto& state = GetLocalMapQueue();
+		if (state.done)
+			return;
+		if (!utility || !lighting || !waterShaderObject) {
+			state.pending = true;
+			return;
+		}
+		state.done = true;
+		state.pending = false;
+		std::uint32_t queued = 0;
+		const auto queue = [&](View a_view, Shader a_shader, std::uint32_t a_descriptor, Family::DefineStage a_stage, std::uint32_t a_variant, const DrawState& a_state) {
+			Draw draw{};
+			draw.key.descriptor = a_descriptor;
+			draw.key.defineStage = a_stage;
+			draw.key.variant = a_variant;
+			if (MapColours(a_view, { kLocalMapSwapTarget, -1, -1 }, 1, draw) || DescribeStates(draw, a_state))
+				return;
+			if (a_shader == Shader::Utility && utility)
+				SceneDraws::UtilityProgram(draw.key, *utility);
+			else if (a_shader == Shader::Lighting && lighting)
+				SceneDraws::LightingProgram(draw.key, *lighting);
+			else if (a_shader == Shader::Water && waterShaderObject)
+				SceneDraws::WaterProgram(draw.key, *waterShaderObject);
+			else
+				return;
+			++queued;
+		};
+		using UF = SIE::ShaderCache::UtilityShaderFlags;
+		// The base texture passes: GetRenderPasses_LocalMap's technique for the property flags it reads (model space normals, vertex colours,
+		// tree animation), with and without the alpha test, both culling modes.
+		for (const std::uint64_t normals : { 0ull, 0x1000ull })
+			for (const std::uint64_t colours : { 0ull, 0x20'0000'0000ull })
+				for (const std::uint64_t tree : { 0ull, 0x2000'0000'0000'0000ull })
+					for (const std::uint32_t test : { 0u, 0x80u })
+						for (const std::uint32_t cull : { 0u, 1u }) {
+							const auto technique = UtilityShaderDecl(normals | colours | tree) | test | static_cast<std::uint32_t>(UF::RenderBaseTexture);
+							queue(View::LocalMap, Shader::Utility, ShadowMask::Native::VertexDescriptorOf(technique), Family::DefineStage::Vertex, 0,
+								DrawState{ .write = 1, .depth = 3, .cull = cull, .stencil = 0 });
+						}
+		// The fog of war's overlay (model space normals and vertex colours).
+		queue(View::LocalMapFog, Shader::Utility, ShadowMask::Native::VertexDescriptorOf(UtilityShaderDecl(0x1000ull | 0x20'0000'0000ull) | static_cast<std::uint32_t>(UF::LocalMapFogOfWar)),
+			Family::DefineStage::Vertex, 0, DrawState{ .write = 8, .depth = 0, .cull = 0, .stencil = 0 });
+		// The land: MTLand and MTLandLODBlend with vertex colours, True PBR, Landscape Seams and glint, in the Linear Lighting variant.
+		using LF = SIE::ShaderCache::LightingShaderFlags;
+		for (const std::uint32_t technique : { 8u, 19u })
+			for (const std::uint32_t pbr : { 0u, static_cast<std::uint32_t>(LF::TruePbr) })
+				for (const std::uint32_t seams : { 0u, static_cast<std::uint32_t>(LF::LandscapeSeams) })
+					for (const std::uint32_t glint : { 0u, static_cast<std::uint32_t>(LF::AnisoLighting) })
+						if (pbr || !glint)
+							queue(View::LocalMap, Shader::Lighting, (technique << 24) | static_cast<std::uint32_t>(LF::VC) | pbr | seams | glint, Family::DefineStage::Pixel,
+								kLightingLinearVariant, DrawState{ .write = 1, .depth = 3, .cull = 1, .stencil = 0 });
+		// The water's LOD pass, with and without vertex colours.
+		for (const std::uint32_t descriptor : { 0x4802u, 0x4803u })
+			queue(View::LocalMap, Shader::Water, descriptor, Family::DefineStage::Vertex, 0, DrawState{ .write = 1, .depth = 1, .cull = 0, .stencil = 30, .stencilRef = 1 });
+		logger::info("[DCLF] local map: {} programs queued at setup", queued);
+	}
+
+	void RenderLocalMap(const void* a_renderer)
+	{
+		auto& state = GetLocalMap();
+		// Outside the UI stage that holds its clients (a frame that closes the map) nothing of the local map can be drawn.
+		if (!SceneDraws::Available() || !SceneDraws::CanTake(View::LocalMap))
+			return;
+		const auto scene = CollectLocalMap(a_renderer);
+		if (!scene.camera)
+			return;
+		const auto& camera = *scene.camera;
+		SetLocalMapTreeDetail();
+		const auto in = SampleLocalMapInputs(camera, state.previous);
+		const auto water = SampleLocalMapWater(in, scene.water);
+		const auto mapView = LocalMapUtilityView(View::LocalMap, camera, in);
+
+		// The frame's family resources start before the draws lease theirs. The render clears kMAIN's depth and stencil and kLOCAL_MAP_SWAP to
+		// (0, 0, 0, 1): only the fog of war writes alpha.
+		Family::BeginBatch();
+		if (!::RenderGraph::Engine::Skeleton::ClearDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL))
+			::RenderGraph::Fatal("local map", "kMAIN's depth clear was not taken");
+		constexpr float kClear[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
+		if (!::RenderGraph::Engine::Skeleton::ClearColour(RE::RENDER_TARGET::kLOCAL_MAP_SWAP, kClear))
+			::RenderGraph::Fatal("local map", "kLOCAL_MAP_SWAP's clear was not taken");
+
+		// The land and objects batch, then its water (the post-resolve group after them, FinishAccumulatingPostResolveDepth).
+		std::vector<RE::BSGeometry*> visible;
+		LocalMapVisible(scene.roots, camera, visible);
+		auto run = std::make_shared<Run>();
+		run->view = View::LocalMap;
+		std::uint32_t frame = ~0u;
+		std::vector<const RE::BSGeometry*> waters;
+		constexpr std::array<std::int32_t, kMaxColours> kTargets{ kLocalMapSwapTarget, -1, -1 };
+		for (auto* geometry : visible) {
+			std::string detail;
+			const char* why = nullptr;
+			switch (LocalMapPassOf(*geometry, View::LocalMap, scene.water)) {
+			case LocalMapPass::Utility:
+				why = AddUtility(mapView, *geometry, *run, detail);
+				break;
+			case LocalMapPass::Land:
+				why = AddLighting(in, *geometry, kTargets, *run, frame, detail);
+				break;
+			case LocalMapPass::Water:
+				waters.push_back(geometry);
+				break;
+			case LocalMapPass::Tree:
+				why = "tree LOD (BSDistantTreeShader), which the local map's port does not draw";
+				break;
+			default:
+				break;
+			}
+			if (why)
+				Refused("land and objects", *geometry, why, detail);
+		}
+		for (const auto* geometry : waters) {
+			std::string detail;
+			if (const char* why = AddWater(water, *geometry, mapView, *run, detail))
+				Refused("water", *geometry, why, detail);
+		}
+		const auto mapDraws = run->draws.size();
+		Hand(View::LocalMap, std::move(run));
+
+		// The fog of war batch: its root's Utility passes in render mode 0x13, alpha only.
+		std::size_t fogDraws = 0;
+		if (scene.fogOfWar && scene.fogRoot) {
+			const auto fogView = LocalMapUtilityView(View::LocalMapFog, camera, in);
+			const LocalMapRoot fogRoot{ scene.fogRoot, false };
+			LocalMapVisible(std::span(&fogRoot, 1), camera, visible);
+			auto fog = std::make_shared<Run>();
+			fog->view = View::LocalMapFog;
+			for (auto* geometry : visible) {
+				if (LocalMapPassOf(*geometry, View::LocalMapFog, scene.water) != LocalMapPass::Utility)
+					continue;
+				std::string detail;
+				if (const char* why = AddUtility(fogView, *geometry, *fog, detail))
+					Refused("fog of war", *geometry, why, detail);
+			}
+			fogDraws = fog->draws.size();
+			Hand(View::LocalMapFog, std::move(fog));
+		}
+
+		// ISLocalMap from kLOCAL_MAP_SWAP into kLOCAL_MAP, its row 1 / the local map's size.
+		static const REL::Relocation<const std::uint32_t*> width{ RELOCATION_ID(524976, 411457) }, height{ RELOCATION_ID(524977, 411458) };
+		if (!::RenderGraph::Engine::ImageSpace::LocalMapEffect(1.0f / static_cast<float>(*width.get()), 1.0f / static_cast<float>(*height.get())))
+			::RenderGraph::Fatal("local map", "ISLocalMap could not be staged");
+		if (state.renders++ == 0)
+			logger::info("[DCLF] local map: the first native render: {} visible, {} land and object draws, {} fog of war draws", visible.size(), mapDraws, fogDraws);
+	}
+
 	DWORD Render(RE::UI3DSceneManager* a_manager, std::int32_t a_scheme, RE::NiCamera* a_camera, bool a_keepDepth)
 	{
+		if (GetLocalMapQueue().pending)
+			QueueLocalMapPrograms();
 		RE::BSSpinLockGuard locker(a_manager->lock);
 		const auto scheme = static_cast<std::int32_t>(a_manager->currentlightScheme);
 		static const REL::Relocation<bool (*)(void*)> uiShowing{ RELOCATION_ID(79939, 82076) };
@@ -1700,7 +2040,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				EffectResult result;
 				why = ComputeEffect(in, *geometry, result, detail) ?
 				          AddEffect(in, *geometry, result, StateOf(*geometry, *property, true, targets[0]), targets, *run, frame, detail) :
-				          "its Effect constants could not be computed";
+				      detail.starts_with("no shader") ? kBuilding :
+				                                        "its Effect constants could not be computed";
 			} else
 				why = "a shader the native menu scene has no program for";
 			// A draw whose program is still building is left out until it is built, as the engine draw families do (the manifest
