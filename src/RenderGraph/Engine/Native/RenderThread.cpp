@@ -125,7 +125,25 @@ namespace RenderGraph::Engine::Native::RenderThread
 		struct Stats
 		{
 			std::atomic<std::uint64_t> routed{ 0 }, unrouted{ 0 }, interfaceInline{ 0 }, renders{ 0 };
+			// Renders of a snapshot no render took before (fresh), and the time from its publish to that render's adoption and end, in us.
+			std::atomic<std::uint64_t> fresh{ 0 }, adoptUs{ 0 }, adoptMaxUs{ 0 }, endUs{ 0 }, endMaxUs{ 0 };
+			// The render halves' own time, and each wait's total and longest, in us.
+			std::atomic<std::uint64_t> renderUs{ 0 };
+			// How long a render half holds Renderer::Lock at a time: game-thread engine code that takes it waits up to that.
+			std::atomic<std::uint64_t> heldUs{ 0 }, heldMaxUs{ 0 };
+			std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(Wait::Count)> waitUs{}, waitMaxUs{};
 		} g_stats;
+
+		std::uint64_t Micros(std::chrono::steady_clock::duration a_duration)
+		{
+			return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(a_duration).count());
+		}
+
+		void AddMax(std::atomic<std::uint64_t>& a_total, std::atomic<std::uint64_t>& a_max, std::uint64_t a_us)
+		{
+			a_total.fetch_add(a_us, std::memory_order_relaxed);
+			for (auto most = a_max.load(std::memory_order_relaxed); a_us > most && !a_max.compare_exchange_weak(most, a_us, std::memory_order_relaxed);) {}
+		}
 
 		/** @brief MenuControls' debug camera path test (SE 51363, AE 52210): Main::DrawFrame then draws the path's frame. */
 		bool CameraPathActive()
@@ -196,8 +214,12 @@ namespace RenderGraph::Engine::Native::RenderThread
 		static REL::Relocation<FrameJobs> frameJobs{ REL::RelocationID(34551, 35406) };
 		using WaitForJobTask = void (*)(std::uint32_t, std::uint32_t);
 		static REL::Relocation<WaitForJobTask> waitForJobTask{ REL::RelocationID(68167, 69516) };
-		if (frameJobs(true))
+		if (frameJobs(true)) {
+			ZoneScopedN("CS.Native.GameFrame.JobWait");
+			const auto start = std::chrono::steady_clock::now();
 			waitForJobTask(0, 2);
+			CountWait(Wait::FrameJobs, std::chrono::steady_clock::now() - start);
+		}
 		// The interface: recorded alone, without render state. A menu the UI jobs opened that pauses or shows the map draws engine work
 		// in its displays, so the render half calls DrawInterface itself, on the render owner.
 		if (Scaleform::RecordsUiOnly(a_snapshot))
@@ -229,8 +251,21 @@ namespace RenderGraph::Engine::Native::RenderThread
 		const bool outer = std::exchange(t_routedRender, true);
 		auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
 		using Lock = void (*)(RE::BSGraphics::Renderer*);
-		static REL::Relocation<Lock> lock{ REL::RelocationID(75458, 77243) };
+		static REL::Relocation<Lock> engineLock{ REL::RelocationID(75458, 77243) };
 		static REL::Relocation<Lock> unlock{ REL::RelocationID(75459, 77244) };
+		std::chrono::steady_clock::time_point locked{};
+		const auto lock = [&](RE::BSGraphics::Renderer* a_renderer) {
+			ZoneScopedN("CS.Native.RenderLock");
+			const auto asked = std::chrono::steady_clock::now();
+			engineLock(a_renderer);
+			locked = std::chrono::steady_clock::now();
+			CountWait(Wait::RenderLock, locked - asked);
+		};
+		const auto release = [&](RE::BSGraphics::Renderer* a_renderer) {
+			unlock(a_renderer);
+			AddMax(g_stats.heldUs, g_stats.heldMaxUs, Micros(std::chrono::steady_clock::now() - locked));
+		};
+		const auto start = std::chrono::steady_clock::now();
 		using Begin = void (*)(RE::BSGraphics::Renderer*, std::uint32_t);
 		static REL::Relocation<Begin> begin{ REL::RelocationID(75460, 77245) };
 		using End = void (*)(RE::BSGraphics::Renderer*);
@@ -241,12 +276,18 @@ namespace RenderGraph::Engine::Native::RenderThread
 		lock(renderer);
 		// CS's frame start (claim, adoption, OnAdopted, OnBegin) and the engine's Begin body; FaceTint's render frame after it.
 		begin(renderer, 0);
-		unlock(renderer);
+		release(renderer);
+		const auto adopted = std::chrono::steady_clock::now();
 		const auto& snapshot = Snapshot::Current();
 		const auto* payload = snapshot ? PayloadOf(*snapshot) : nullptr;
 		if (!payload)
 			RenderGraph::Fatal("native render half", fmt::format("the adopted snapshot {} has no routed frame payload", snapshot ? snapshot->id : 0));
 		g_stats.renders.fetch_add(1, std::memory_order_relaxed);
+		const bool fresh = !Snapshot::Render().repeat;
+		if (fresh) {
+			g_stats.fresh.fetch_add(1, std::memory_order_relaxed);
+			AddMax(g_stats.adoptUs, g_stats.adoptMaxUs, Micros(adopted - snapshot->published));
+		}
 		Scene::RecordRouted(payload->prepared);
 		lock(renderer);
 		if (payload->volumetricLighting) {
@@ -261,7 +302,11 @@ namespace RenderGraph::Engine::Native::RenderThread
 		} else
 			Scaleform::ReplaySnapshotUi(*snapshot);
 		end(renderer);
-		unlock(renderer);
+		release(renderer);
+		const auto ended = std::chrono::steady_clock::now();
+		g_stats.renderUs.fetch_add(Micros(ended - start), std::memory_order_relaxed);
+		if (fresh)
+			AddMax(g_stats.endUs, g_stats.endMaxUs, Micros(ended - snapshot->published));
 		// Dynamic resolution's scale for the next frame (SE 508794 / AE 380760, SE 75579 / AE 77385, SE 75708 / AE 77517).
 		if (Global<const bool>(508794, 380760)) {
 			using Scale = float (*)(RE::BSGraphics::Renderer*);
@@ -296,7 +341,11 @@ namespace RenderGraph::Engine::Native::RenderThread
 	{
 		if (!t_lastRender)
 			return;
-		if (!t_lastRender->Wait())
+		ZoneScopedN("CS.Native.WaitForLastRender");
+		const auto start = std::chrono::steady_clock::now();
+		const bool waited = t_lastRender->Wait();
+		CountWait(Wait::LastRender, std::chrono::steady_clock::now() - start);
+		if (!waited)
 			RenderGraph::Fatal("native render thread", "the wait for the last render's GPU work failed");
 		t_lastRender.reset();
 	}
@@ -350,6 +399,12 @@ namespace RenderGraph::Engine::Native::RenderThread
 		return Get().running.load(std::memory_order_acquire);
 	}
 
+	void CountWait(Wait a_wait, std::chrono::steady_clock::duration a_duration)
+	{
+		const auto i = static_cast<std::size_t>(a_wait);
+		AddMax(g_stats.waitUs[i], g_stats.waitMaxUs[i], Micros(a_duration));
+	}
+
 	bool OnRenderThread()
 	{
 		return t_renderThread;
@@ -378,11 +433,25 @@ namespace RenderGraph::Engine::Native::RenderThread
 		std::string byReason;
 		for (std::size_t i = 0; i < parksBy.size(); ++i)
 			byReason += fmt::format("{}{} {}", i ? ", " : "", ParkReasonName(static_cast<ParkReason>(i)), parksBy[i]);
+		const auto fresh = g_stats.fresh.exchange(0);
+		const auto perFresh = [&](std::atomic<std::uint64_t>& a_us) { return fresh ? static_cast<double>(a_us.exchange(0)) / 1000.0 / static_cast<double>(fresh) : 0.0; };
+		const double adoptMs = perFresh(g_stats.adoptUs), endMs = perFresh(g_stats.endUs);
+		std::string waits;
+		static constexpr std::array<const char*, static_cast<std::size_t>(Wait::Count)> kWaitNames{ "update cap", "frame jobs", "Reflex sleep",
+			"Renderer::Lock", "last render's GPU work" };
+		for (std::size_t i = 0; i < kWaitNames.size(); ++i)
+			waits += fmt::format("{}{} {:.1f} ms (at most {:.2f})", i ? ", " : "", kWaitNames[i], static_cast<double>(g_stats.waitUs[i].exchange(0)) / 1000.0,
+				static_cast<double>(g_stats.waitMaxUs[i].exchange(0)) / 1000.0);
+		const auto renders = g_stats.renders.exchange(0);
 		return fmt::format(
 			"[ORG native] routed updates: {} routed (CS's game frame, render half from the payload), {} on Main::DrawFrame, {} with the "
-			"interface drawn by the producer; {} routed renders; render thread parked {} times ({}), the producers waited {:.2f} ms in all, "
-			"at most {:.2f} ms",
-			g_stats.routed.exchange(0), g_stats.unrouted.exchange(0), g_stats.interfaceInline.exchange(0), g_stats.renders.exchange(0), parks, byReason,
-			waitMs, maxMs);
+			"interface drawn by the producer; {} routed renders ({} of fresh snapshots, {} repeats; render halves {:.1f} ms in all, Renderer::Lock "
+			"held {:.1f} ms, at most {:.2f} at once); publish to "
+			"adoption {:.2f} ms average (at most {:.2f}), to the render's end {:.2f} ms (at most {:.2f}); waits: {}; render thread parked {} "
+			"times ({}), the producers waited {:.2f} ms in all, at most {:.2f} ms",
+			g_stats.routed.exchange(0), g_stats.unrouted.exchange(0), g_stats.interfaceInline.exchange(0), renders, fresh, renders > fresh ? renders - fresh : 0,
+			static_cast<double>(g_stats.renderUs.exchange(0)) / 1000.0, static_cast<double>(g_stats.heldUs.exchange(0)) / 1000.0,
+			static_cast<double>(g_stats.heldMaxUs.exchange(0)) / 1000.0, adoptMs, static_cast<double>(g_stats.adoptMaxUs.exchange(0)) / 1000.0, endMs,
+			static_cast<double>(g_stats.endMaxUs.exchange(0)) / 1000.0, waits, parks, byReason, waitMs, maxMs);
 	}
 }

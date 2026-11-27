@@ -3,6 +3,7 @@
 #include "Snapshot/Retire.h"
 
 #include <array>
+#include <chrono>
 #include <concepts>
 #include <cstdint>
 #include <memory>
@@ -227,6 +228,7 @@ namespace Snapshot
 		EngineValues engine{};                                // what the frame driver sets its engine variables from at the adoption
 		std::shared_ptr<const UiCommandStream> ui;            // the UI command stream (native; set at the update's DrawInterface end)
 		std::shared_ptr<const void> nativeFrame;              // native: a routed update's render payload (Native/RenderThread.h), else null
+		std::chrono::steady_clock::time_point published{};    // when Publish posted it (the render thread's latency counts)
 		Events events{};
 		Retire::LiveCount live;  // counts snapshots alive for the leak check (Snapshot/Retire.h)
 

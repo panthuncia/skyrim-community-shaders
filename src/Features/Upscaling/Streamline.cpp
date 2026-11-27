@@ -14,6 +14,7 @@
 #include "../../Globals.h"
 #include "../../RenderGraph/Backend.h"
 #include "../../RenderGraph/Engine/Native/Native.h"
+#include "../../RenderGraph/Engine/Native/RenderThread.h"
 #include "../../RenderGraph/Backend.h"
 #include "../../RenderGraph/RenderGraphRuntime.h"
 #include "ORGUpscaling.h"
@@ -972,8 +973,13 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 		const uint32_t simFrame = SimFrameId();
 		if (s_lastSleepFrame != simFrame) {
 			s_lastSleepFrame = simFrame;
-			if (sl::FrameToken* token = TokenForFrame(simFrame))
+			if (sl::FrameToken* token = TokenForFrame(simFrame)) {
+				ZoneScopedN("CS.Streamline.ReflexSleep");
+				const auto start = std::chrono::steady_clock::now();
 				g_sl.slReflexSleep(*token);
+				RenderGraph::Engine::Native::RenderThread::CountWait(RenderGraph::Engine::Native::RenderThread::Wait::ReflexSleep,
+					std::chrono::steady_clock::now() - start);
+			}
 		}
 	}
 }
