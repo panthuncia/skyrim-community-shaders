@@ -23,6 +23,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Draws.h"
 #include "Snapshot/Publication.h"
 
+#include "RenderGraph/Engine/Native/RenderThread.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/PublishedResources.h"
@@ -653,6 +654,12 @@ namespace DCLF
 		std::vector<std::shared_ptr<const void>>& a_bindingOwners, const EpochRevision& a_revision)
 	{
 		DCLF_ZONE("CS.DCLF.CommitMainPayload");
+		// Native render thread: the depth commit starts after the last render's GPU work. Without this wait a render that overlaps the
+		// one before it lost the device in DCLF's passes (snap7-devloss.md). The exact write it guards is not found yet.
+		if (a_frame.depthOnly) {
+			DCLF_ZONE("CS.DCLF.CMP.WaitLastRender");
+			RenderGraph::Engine::Native::RenderThread::WaitForLastRender();
+		}
 		// Held until this execution retires.
 		for (auto& owner : Scene::FrameView::Get().TakeRetiredImports())
 			a_bindingOwners.push_back(std::move(owner));
