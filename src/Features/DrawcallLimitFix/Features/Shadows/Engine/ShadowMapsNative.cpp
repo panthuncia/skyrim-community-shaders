@@ -332,6 +332,7 @@ namespace DCLF::Features::Shadows::Engine
 
 	bool RenderLightNatively(RE::BSShadowLight& a_light, std::uint32_t& a_index)
 	{
+		CS_ENGINE_READ_MARK(ShadowLights, RecordTime);
 		const auto kind = a_light.GetIsDirectionalLight() ? Kind::Directional : a_light.GetIsParabolicLight() ? Kind::Parabolic : Kind::Frustum;
 		const auto outcome = shadowMapsOpen ? RenderNative(a_light, kind, a_index) : Fallback::NotOpen;
 		++lightCounts[static_cast<std::size_t>(outcome)];

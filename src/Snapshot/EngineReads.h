@@ -34,6 +34,7 @@ namespace Snapshot::EngineReads
 		Data,                // TESDataHandler, ProcessLists, the grass manager and other game data
 		BoundState,          // GPU state the engine bound to the D3D11 context
 		FrameGlobals,        // DCLF's FrameGlobals read off the render thread with no capture bound
+		ShadowLights,        // ShadowSceneNode's shadow lights: their NiLights, descriptors, cameras and the selection's results
 		Count
 	};
 

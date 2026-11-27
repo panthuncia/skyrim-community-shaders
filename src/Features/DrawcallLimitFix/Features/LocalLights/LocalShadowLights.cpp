@@ -25,6 +25,7 @@ namespace DCLF
 			if (selected.light == selection->sun)
 				continue;
 			auto* shadowLight = const_cast<RE::BSShadowLight*>(selected.light);
+			CS_ENGINE_READ_MARK(ShadowLights, RecordTime);
 			auto& data = shadowLight->GetRuntimeData();
 			Light sampled;
 			sampled.maskBit = 1u << (selected.maskIndex & 31);
@@ -82,8 +83,10 @@ namespace DCLF
 		};
 		if (const auto* selection = LightSelection::Get().Current(Scene::FrameView::Get().SceneStep()))
 			for (const auto& selected : selection->locals)
-				if (selected.light != selection->sun)
+				if (selected.light != selection->sun) {
+					CS_ENGINE_READ_MARK(ShadowLights, RecordTime);
 					put(selected.light, selected.maskIndex);
+				}
 		// ShadowSceneNode's active lights (+0x130).
 		auto* sceneNode = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0] : nullptr;
 		if (sceneNode)

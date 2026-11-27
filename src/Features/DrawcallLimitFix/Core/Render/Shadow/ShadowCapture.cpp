@@ -147,6 +147,7 @@ namespace DCLF
 		 */
 		void CaptureCasterVolume(PendingView& a_view, const ShadowViews::View& a_shadowView)
 		{
+			CS_ENGINE_READ_MARK(ShadowLights, CapturePoint);
 			if (auto& lightData = const_cast<RE::BSShadowLight*>(a_shadowView.light)->GetRuntimeData();
 				!a_shadowView.focus && a_shadowView.descriptor < lightData.shadowmapDescriptors.size()) {
 				const auto* process = lightData.shadowmapDescriptors[a_shadowView.descriptor].cullingProcess;

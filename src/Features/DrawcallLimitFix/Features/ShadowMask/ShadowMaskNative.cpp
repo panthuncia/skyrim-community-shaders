@@ -596,6 +596,7 @@ namespace DCLF::Features::ShadowMask::Native
 			auto* light = casters[slot];
 			if (!light)
 				break;
+			CS_ENGINE_READ_MARK(ShadowLights, RecordTime);
 			if (!light->shadowMapCount) {
 				a_why = "a shadow light with no maps";
 				return false;

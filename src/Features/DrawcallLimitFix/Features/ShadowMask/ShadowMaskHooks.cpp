@@ -177,8 +177,10 @@ namespace DCLF::Features::ShadowMask
 			ShadowMaskDraws::Submit(std::move(run));
 		}
 		// The masks' loop gives each light's maps back after its draw, drawn or not.
-		for (auto* light : Native::Lights(View::World))
+		for (auto* light : Native::Lights(View::World)) {
+			CS_ENGINE_READ_MARK(ShadowLights, RecordTime);
 			Shadows::Native::ReturnShadowmaps(*light);
+		}
 	}
 
 	void DrawMenuMasks(const RE::NiPoint3& a_eye)

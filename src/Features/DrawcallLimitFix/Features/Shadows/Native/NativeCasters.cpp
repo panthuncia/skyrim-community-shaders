@@ -19,6 +19,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "Snapshot/EngineReads.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -259,6 +260,7 @@ namespace DCLF::Features::Shadows::Native
 			std::uint32_t index = 0;
 			while (index < accumulated.size() && accumulated[index]) {
 				auto* light = accumulated[index];
+				CS_ENGINE_READ_MARK(ShadowLights, RecordTime);
 				const std::uint32_t before = index;
 				// A light DCLF cannot draw casts no shadow this frame. ShadowMapsNative's line counts it.
 				if (Engine::RenderLightNatively(*light, index))

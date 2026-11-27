@@ -188,6 +188,7 @@ namespace NativePost
 			for (const auto& light : a_s.queue) {
 				if (waitingCount >= kNewFlares)
 					break;
+				CS_ENGINE_READ_MARK(ShadowLights, RecordTime);
 				const auto* niLight = light->light.get();
 				const auto* data = light->lensFlareData;
 				if (!niLight || !data)
@@ -400,6 +401,8 @@ namespace NativePost
 				Stage(static_cast<std::size_t>(visibilityEffect), visibility);
 				Chain().lensVisibilityChannel = 0;
 				const auto flare = [&](const RE::BSShadowLight* a_light) {
+					if (a_light)
+						CS_ENGINE_READ_MARK(ShadowLights, RecordTime);
 					const auto* data = a_light ? a_light->lensFlareData : in.sun;
 					Placement place;
 					if (!data || !Place(in, block->world, *camera, a_light, *data, width, height, place))
