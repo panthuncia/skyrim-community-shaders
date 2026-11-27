@@ -1026,3 +1026,24 @@ pushes until the user is back.
      changes (suboptimal code, duplicate-intent code consolidated, migration switches and temporary code removed); a
      performance investigation confirming fully asynchronous rendering (neither thread waits on the other), fixing clear
      issues and logging larger design decisions; a summary and handoff document for future agents.
+
+## 2026-11-27: the render-side frame end is isolated (snap7-frameend; director accepted)
+
+214. **The Present hook is `RenderFrameEnd(...)` then `Testing::OnGamePresent()`:** `RenderFrameEnd` is the old body in
+     order under the detector's `Half::FrameEnd` scope (UI stage and overlay, DCLF's BeforePresent, present, seal,
+     pacing, metrics, `State::Reset`, the test runner's render side, Tracy) and is what the render thread will call. The
+     game side runs after it (steps still run after the present). `Testing::OnPresent` is split: `OnFrameEnd` (render
+     frames, live-image shots, exit) and `OnGamePresent` (lifecycle with the player read, queued commands, steps).
+215. **CS's own per-update engine writes run game-side in native**, once per update after the capture
+     (`SideEffects::WriteCsEngineState` from `AfterCapture`): LODBlendRingFix (slides by the update's game delta, one
+     update earlier than before), SunShadowMaskFix, the Subsurface Scattering character light from adopted settings
+     (`CharacterLightingStrength` a bound setting), ApplyReflections' `active` kept off (the console's `ToggleAR` is the
+     engine's only writer; native's post-resolve no longer reads it), `bEnableImprovedSnow` kept off. Guest keeps these
+     writes in `State::Reset` (`SideEffects::Installed()` decides).
+216. **Shots name the snapshot they must render:** `RequestCapture(path, minSnapshot)`; a shot step asks for
+     `LastGameId()+1` and the render side takes it once the adopted snapshot reaches that id (a repeat cadence shot waits
+     for the next update's first render).
+217. **The world scopes' state is a snapshot value in native:** `WorldSettings` captures the SSR, SAO and snow helpers'
+     active flags and the composite's portal fog values; `PostChain::ReadWorld` (Begin's description, the step-lag check)
+     and the native draws read the block plus the captured frame counter. Frame end game-mutated reads per world frame
+     (native quick): 8.7 -> 2.02, all DCLF's (`FrameView.cpp:291`, `LoadHold.cpp`), which snap7-hold clears.
