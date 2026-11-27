@@ -26,13 +26,13 @@ namespace DCLF::Features::FirstPerson
 {
 	namespace
 	{
-		// Recomputes Main::Draw's first-person flag (cVar23, AE 0x1406444b0). The root's bit is the snapshot's, taken before the water
-		// update hides the root (native runs that update in the capture). The camera check reads the current state at PlayerCamera
-		// +0x28, not the free camera at +0xD0.
+		// Recomputes Main::Draw's first-person flag (cVar23, AE 0x1406444b0). The root's bit is the update's snapshot's, taken before
+		// the water update hides the root (native runs that update in the capture). The camera check reads the current state at
+		// PlayerCamera +0x28, not the free camera at +0xD0. Game half.
 		bool FirstPersonLatch()
 		{
 			bool latch = false;
-			const auto& snapshot = Snapshot::Current();
+			const auto& snapshot = Snapshot::Building();
 			if (auto* player = CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton()); player && snapshot && snapshot->firstPersonShown)
 				if (const auto* root = player->Get3D(true); root && root != player->Get3D(false)) {
 					auto* ui = CS_ENGINE_READ(UI, CapturePoint, RE::UI::GetSingleton());

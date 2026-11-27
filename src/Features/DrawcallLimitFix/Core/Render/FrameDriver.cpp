@@ -222,10 +222,10 @@ namespace DCLF
 		// A repeated render of a snapshot renders its ticket again. The scene source takes no new scene meanwhile (HoldsScene), so the
 		// publication stays the ticket's. A frame revision adopted with a held scene can still bring a newer one: the ticket is made again.
 		if (!HoldsScene())
-			MakeTicket(Snapshot::CurrentId());
+			MakeTicket(Snapshot::LastGameId());
 		else if (AdoptedSequence() > ticket->publication) {
 			++ticketsRemade;
-			MakeTicket(Snapshot::CurrentId());
+			MakeTicket(Snapshot::LastGameId());
 		}
 		BeginFrame();
 	}
@@ -682,7 +682,7 @@ namespace DCLF
 			// frames: a re-entry holds those frames. A map DCLF never drew counts only for kOcclusionReentryFrames.
 			const std::uint32_t streak = ++occlusionNeedStreak[a_map];
 			if (!LoadHold::Active() && ((occlusionEverDrawn & (1u << a_map)) || streak <= kOcclusionReentryFrames))
-				LoadHold::BeginReentry("an occlusion map DCLF cannot draw this frame (its layout is new, or the graph rebuilds)");
+				LoadHold::BeginReentry("an occlusion map DCLF cannot draw this frame (its layout is new, or the graph rebuilds)", Snapshot::Current().get());
 			if (LoadHold::Active()) {
 				LoadHold::NoteHeld(LoadHold::View::Occlusion);
 				occlusionHeld |= 1u << a_map;

@@ -369,9 +369,10 @@ namespace RenderGraph::Engine::Native::Scene
 			auto* camera = RE::Main::WorldRootCamera();
 			if (!player || !camera)
 				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran without the player or the world camera");
-			const auto& snapshot = Snapshot::Current();
+			// The game half reads the update's snapshot, not the render side's adopted one.
+			const auto& snapshot = Snapshot::Building();
 			if (!snapshot)
-				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran before any snapshot was adopted");
+				RenderGraph::Fatal("native frame skeleton", "Main::DrawFrame's world branch ran before any game update's snapshot");
 			ZoneScopedN("CS.Native.RenderScene");
 			globals::state->BeginPerfEvent("Player View");
 			g_current = PrepareFrame(a_main, *player, camera, *snapshot);

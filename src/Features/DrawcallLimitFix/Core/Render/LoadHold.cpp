@@ -391,12 +391,12 @@ namespace DCLF::LoadHold
 				LogMapCensus(mapFrames, "the map closed");
 				mapFrames = 0;
 				// The world's objects are not in the set culled with the map camera.
-				BeginReentry("the map menu closed (a camera cut back: the world is not in the set culled with the map camera)");
+				BeginReentry("the map menu closed (a camera cut back: the world is not in the set culled with the map camera)", Snapshot::Building().get());
 				return;
 			}
 			mapFrames = 0;
 			PassCapture::Get().SetMapCensus(true);
-			BeginReentry("the map menu opened (a camera cut: the map's LOD is not in the set culled with the world camera)");
+			BeginReentry("the map menu opened (a camera cut: the map's LOD is not in the set culled with the world camera)", Snapshot::Building().get());
 		}
 
 		void WatchMap()
@@ -428,18 +428,18 @@ namespace DCLF::LoadHold
 		hold.heldThisFrame = true;
 	}
 
-	void BeginReentry(const char* a_why)
+	void BeginReentry(const char* a_why, const Snapshot::FrameSnapshot* a_frame)
 	{
 		reentryThisFrame = true;
 		const auto now = state.load(std::memory_order_acquire);
 		// The first world frames after a load's hold can still need a re-entry, because the graph rebuilds for re-made targets
 		// and shadow views and occlusion maps are not DCLF's for a frame.
 		if ((now == HoldState::Idle || now == HoldState::Releasing) && !reentryBlocked && !Scene::FrameView::Get().NotDrawingYet() &&
-			!Scene::FrameView::LoadShown()) {
+			!Scene::FrameView::LoadShownIn(a_frame)) {
 			hold = {};
 			hold.start = hold.progress = std::chrono::steady_clock::now();
 			hold.reentry = a_why;
-			hold.loadEpoch = Snapshot::Current() ? Snapshot::Current()->loadEpoch : Snapshot::LoadEpoch();
+			hold.loadEpoch = a_frame ? a_frame->loadEpoch : Snapshot::LoadEpoch();
 			withMenu.store(false, std::memory_order_relaxed);
 			StoreState(HoldState::Holding);
 			logger::info("[DCLF] load hold: started (a re-entry: {}): the presents held, the last frame stays on screen", a_why);

@@ -15,6 +15,11 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Channels.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/FrameTables.h"
 
+namespace Snapshot
+{
+	struct FrameSnapshot;
+}
+
 namespace DCLF
 {
 	struct FrameGlobals;
@@ -102,11 +107,15 @@ namespace DCLF::Scene
 		 * side, its own for a loading screen's frame); guest reads the live UI.
 		 */
 		static bool LoadingScreenInFrame();
+		/** @brief LoadingScreenInFrame for a_frame, the snapshot of the half that asks (native; guest reads the live UI). */
+		static bool LoadingScreenIn(const Snapshot::FrameSnapshot* a_frame);
 		/**
 		 * @brief Render side: also true while a load's hold keeps the world off the screen. Run-comparable frame counters must not
 		 * advance then.
 		 */
 		static bool LoadShown();
+		/** @brief LoadShown for a_frame, the snapshot of the half that asks: the game half passes Snapshot::Building(). */
+		static bool LoadShownIn(const Snapshot::FrameSnapshot* a_frame);
 		/** @brief LoadShown from the live UI: game side only (a capture). */
 		static bool LoadShownNow();
 		/**

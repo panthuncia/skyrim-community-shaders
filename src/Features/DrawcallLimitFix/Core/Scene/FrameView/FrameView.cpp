@@ -296,15 +296,24 @@ namespace DCLF::Scene
 
 	bool FrameView::LoadingScreenInFrame()
 	{
+		return LoadingScreenIn(Snapshot::Current().get());
+	}
+
+	bool FrameView::LoadingScreenIn(const Snapshot::FrameSnapshot* a_frame)
+	{
 		if (!::RenderGraph::Engine::Native::Active())
 			return IsLoadingScreenUp();
-		const auto& snapshot = Snapshot::Current();
-		return snapshot && snapshot->menus.loading && !LoadHold::MenuHeld();
+		return a_frame && a_frame->menus.loading && !LoadHold::MenuHeld();
 	}
 
 	bool FrameView::LoadShown()
 	{
-		return LoadingScreenInFrame() || LoadHold::Active() || LoadHold::MenuHeld();
+		return LoadShownIn(Snapshot::Current().get());
+	}
+
+	bool FrameView::LoadShownIn(const Snapshot::FrameSnapshot* a_frame)
+	{
+		return LoadingScreenIn(a_frame) || LoadHold::Active() || LoadHold::MenuHeld();
 	}
 
 	bool FrameView::LoadShownNow()

@@ -12,6 +12,11 @@
 #include <cstdint>
 #include <string_view>
 
+namespace Snapshot
+{
+	struct FrameSnapshot;
+}
+
 namespace DCLF::LoadHold
 {
 	/** @brief Main thread, PostPostLoad. Installs the load coordinator hooks. A site another plugin changed is left alone and logged. */
@@ -34,9 +39,11 @@ namespace DCLF::LoadHold
 	void NoteHeld(View a_view);
 
 	/**
-	 * @brief Render thread. Starts a hold with the presents held, for a camera cut the set was not culled for (the map menu).
+	 * @brief Starts a hold with the presents held, for a camera cut the set was not culled for (the map menu, from the game half) or a
+	 * view DCLF cannot draw (the render half). a_frame is the snapshot of the half that asks: Snapshot::Building() in the game half,
+	 * Snapshot::Current() in the render half.
 	 */
-	void BeginReentry(const char* a_why);
+	void BeginReentry(const char* a_why, const Snapshot::FrameSnapshot* a_frame);
 
 	/**
 	 * @brief Render thread. DCLF should draw a_view's shadow or occlusion views this frame but cannot. During a hold the view
