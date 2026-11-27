@@ -15,6 +15,8 @@
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/SunCamera.h"
 #include "Snapshot/Publication.h"
 
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 
 #include <array>
@@ -106,9 +108,9 @@ namespace DCLF::Features::Shadows::Native::SunCameraImpl
 	/** @brief The frame's real delta time: BSShaderManager::State timerValues[3] (AE 0x14203308c, SE 0x141e0defc). */
 	float RealDelta()
 	{
-		// The sun direction's smoothing steps once per game update: a repeated snapshot's render runs the selection again with the same
-		// inputs and must make the same cameras.
-		if (Snapshot::Render().repeat)
+		// The sun direction's smoothing steps once per game update. Native's game half runs once per update. A frame the engine's own
+		// skeleton draws selects on the render owner, where a repeated snapshot must make the same cameras.
+		if (!DCLF::Scene::FrameView::InGameHalf() && Snapshot::Render().repeat)
 			return 0.0f;
 		return RE::BSShaderManager::State::GetSingleton().timerValues[RE::BSShaderManager::kRealDelta];
 	}

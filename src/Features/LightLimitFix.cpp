@@ -2271,10 +2271,10 @@ void LightLimitFix::CopyLocalShadowMaps()
 	}
 
 	const auto& eye = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
-	// The update's seconds: native's from the adopted snapshot, guest's read now.
+	// The update's seconds: native's game step (0 on a repeated snapshot, summed over dropped ones), guest's read now.
 	float frameTime = 0.0f;
-	if (const auto& snapshot = Snapshot::Current(); lightSet && snapshot)
-		frameTime = std::clamp(snapshot->gameDelta, 0.0f, LOCAL_SHADOW_MAX_FRAME_TIME);
+	if (lightSet)
+		frameTime = std::clamp(Snapshot::GameStep(), 0.0f, LOCAL_SHADOW_MAX_FRAME_TIME);
 	else if (const auto* delta = CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime))
 		frameTime = std::clamp(*delta, 0.0f, LOCAL_SHADOW_MAX_FRAME_TIME);
 	// Unwritten slots are zero; no light flagged LocalShadow points at them.
