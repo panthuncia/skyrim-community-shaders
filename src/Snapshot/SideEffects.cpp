@@ -1,10 +1,9 @@
 #include "Snapshot/SideEffects.h"
 
-#include "EngineFixes/LODBlendRingFix.h"
-#include "EngineFixes/SunShadowMaskFix.h"
 #include "Features/SubsurfaceScattering.h"
 #include "Globals.h"
 #include "Snapshot/EngineReads.h"
+#include "State.h"
 
 #include "Snapshot/FaceTint.h"
 #include "Snapshot/StealthLights.h"
@@ -529,26 +528,16 @@ namespace Snapshot::SideEffects
 	namespace
 	{
 		/**
-		* @brief CS's own engine writes, once per game update before the render half (guest: State::Reset at each frame's end). They
+		* @brief CS's engine writes, once per game update before the render half (guest: State::Reset at each frame's end). They
 		* read and write game state, so they belong to the game thread's publish, not the render side's frame end.
 		*/
 		void WriteCsEngineState(const FrameSnapshot& a_snapshot)
 		{
-			// The ring center and the sun's mask bits for this update's draws.
-			LODBlendRingFix::GetInstance().Update(a_snapshot.gameDelta);
-			SunShadowMaskFix::Update();
+			State::WriteCsEngineState(a_snapshot.gameDelta);
+			// The subsurface character light is native's only.
 			auto& sss = globals::features::subsurfaceScattering;
 			if (sss.loaded)
 				sss.ApplyCharacterLight(sss.settings.EnableCharacterLighting.Adopted() != 0, sss.settings.CharacterLightingStrength.Adopted());
-			// Reflections are applied to water only: the console's ToggleAR is the engine's only writer of ApplyReflections' flag.
-			if (auto* manager = CS_ENGINE_READ(ImageSpace, CapturePoint, RE::ImageSpaceManager::GetSingleton())) {
-				if (auto& applyReflections = manager->GetRuntimeData().BSImagespaceShaderApplyReflections; applyReflections)
-					applyReflections->active = false;
-			}
-			// The "improved" snow shader is unsupported.
-			static RE::Setting* const improvedSnow = RE::GetINISetting("bEnableImprovedSnow:Display");
-			if (improvedSnow)
-				improvedSnow->data.b = false;
 		}
 	}
 

@@ -11,7 +11,6 @@
 #include "Snapshot/UiCommandStream.h"
 #include "State.h"
 #include "Testing/Testing.h"
-#include "Utils/Setting.h"
 
 #include "RenderGraph/Async/LatestSlot.h"
 #include "RenderGraph/Engine/MainTick.h"
@@ -62,8 +61,6 @@ namespace Snapshot
 		constexpr float kTeleportDistance = 1024.0f;
 		// The side effects log one line per this many game updates (native).
 		constexpr std::uint64_t kSideEffectLineUpdates = 600;
-		// The lifetimes line (snapshots alive, engine references held, retire lanes) also comes once per this many game updates.
-		constexpr std::uint64_t kLifetimeLineUpdates = 1800;
 
 		/** @brief The cadence test mode, parsed once. */
 		struct Cadence
@@ -103,7 +100,7 @@ namespace Snapshot
 			std::atomic<std::uint32_t> mostFolded{ 0 };
 		};
 
-		/** @brief The render side's state. Render owner (the main thread in phase 0). */
+		/** @brief The render side's state. Render owner (the thread whose Begin adopted the current snapshot). */
 		struct Consumer
 		{
 			std::shared_ptr<const FrameSnapshot> current;
@@ -156,14 +153,6 @@ namespace Snapshot
 			size.width = static_cast<std::uint32_t>(packed);
 			size.height = static_cast<std::uint32_t>(packed >> 32);
 			return size;
-		}
-
-		/** @brief The window size event against the previous snapshot. */
-		void FillWindowSize(Events& a_events, const FrameSnapshot* a_previous)
-		{
-			a_events.windowSize = PendingWindowSize();
-			if (a_events.windowSize.serial != (a_previous ? a_previous->events.windowSize.serial : 0))
-				a_events.Add(Event::WindowResized);
 		}
 		// Set while a producer builds and publishes. The game update's publish and the frame-only ones never overlap (Publication.h),
 		// so finding it set is fatal: a producer never waits.
@@ -237,24 +226,6 @@ namespace Snapshot
 			return a_menus.freezesBackground ? FrameKind::MenuOverWorld : a_has3D ? FrameKind::World : FrameKind::MainMenu;
 		}
 
-		/** @brief The kind and menu events (kind changed, opened, closed, paused, resumed) of a_snapshot against a_previous. */
-		void MenuEvents(FrameSnapshot& a_snapshot, const FrameSnapshot& a_previous)
-		{
-			auto& events = a_snapshot.events;
-			const auto& menus = a_snapshot.menus;
-			if (a_snapshot.kind != a_previous.kind)
-				events.Add(Event::KindChanged);
-			if (menus.open > a_previous.menus.open) {
-				events.Add(Event::MenuOpened);
-				events.menusOpened += menus.open - a_previous.menus.open;
-			} else if (menus.open < a_previous.menus.open) {
-				events.Add(Event::MenuClosed);
-				events.menusClosed += a_previous.menus.open - menus.open;
-			}
-			if (menus.paused != a_previous.menus.paused)
-				events.Add(menus.paused ? Event::Paused : Event::Resumed);
-		}
-
 		/** @brief Holds the publish claim for one build and publish. A second producer at the same time is fatal. */
 		struct PublishClaim
 		{
@@ -305,7 +276,6 @@ namespace Snapshot
 		{
 			a_snapshot.menus = CaptureMenus(true);
 			const auto& menus = a_snapshot.menus;
-			a_snapshot.realDelta = CS_ENGINE_READ(Timer, CapturePoint, RE::BSTimer::GetSingleton())->realTimeDelta;
 			a_snapshot.gameDelta = menus.paused ? 0.0f : CS_ENGINE_READ(Timer, CapturePoint, RE::GetSecondsSinceLastFrame());
 			a_snapshot.gameTime = (a_previous ? a_previous->gameTime : 0.0) + a_snapshot.gameDelta;
 			if (const auto* calendar = CS_ENGINE_READ(Calendar, CapturePoint, RE::Calendar::GetSingleton()))
@@ -322,8 +292,6 @@ namespace Snapshot
 			a_snapshot.firstPersonShown = firstPersonRoot && !firstPersonRoot->GetFlags().any(RE::NiAVObject::Flag::kHidden);
 			a_snapshot.kind = MainThreadKind(menus, has3D);
 			a_snapshot.loadEpoch = g_loadEpoch.load(std::memory_order_acquire);
-			// Game side: the settings' raise count when the snapshot is built, not the variables the last render Begin took.
-			a_snapshot.settingsRevision = CS::SettingRegistry::Serial();
 			a_snapshot.engine = CaptureEngineValues();
 
 			// Native: Main::SetupSunAndSky's game half sets the camera's FOV and moves the sky with it, so it runs before the camera is taken.
@@ -331,42 +299,31 @@ namespace Snapshot
 				RenderGraph::Engine::Native::WaterEffects::SetupSunAndSky();
 			auto& main = a_snapshot.cameras.current[static_cast<std::size_t>(ViewId::Main)];
 			main = CaptureMainCamera();
-			if (a_previous)
-				a_snapshot.cameras.previous = a_previous->cameras.current;
 
 			auto& events = a_snapshot.events;
 			events.gameDelta = a_snapshot.gameDelta;
-			FillWindowSize(events, a_previous);
-			if (g_loadStartedPending.exchange(false, std::memory_order_acq_rel)) {
+			events.windowSize = PendingWindowSize();
+			if (g_loadStartedPending.exchange(false, std::memory_order_acq_rel))
 				events.Add(Event::LoadStarted);
-				++events.loadsStarted;
-			}
 			const bool loadEnded = g_loadEndedPending.exchange(false, std::memory_order_acq_rel);
 			if (loadEnded)
 				events.Add(Event::FirstAfterLoad);
 			if (!a_previous)
 				return;
-			MenuEvents(a_snapshot, *a_previous);
-			if (a_snapshot.settingsRevision != a_previous->settingsRevision)
-				events.Add(Event::SettingsChanged);
 			const auto& before = a_previous->cameras.Current(ViewId::Main);
 			if (main.valid && before.valid) {
 				// The view direction is the rotation's first column (Skyrim cameras look down their local X).
 				const float turn = main.rotation.entry[0][0] * before.rotation.entry[0][0] + main.rotation.entry[1][0] * before.rotation.entry[1][0] +
 				                   main.rotation.entry[2][0] * before.rotation.entry[2][0];
-				if (loadEnded || DistanceSquared(main.position, before.position) > kCutDistance * kCutDistance || turn < kCutTurnCos) {
+				if (loadEnded || DistanceSquared(main.position, before.position) > kCutDistance * kCutDistance || turn < kCutTurnCos)
 					events.Add(Event::CameraCut);
-					++events.cameraCuts;
-				}
 			}
 			if (player && has3D) {
 				const auto position = player->GetPosition();
 				const bool moved = a_game.havePlayer && DistanceSquared(position, a_game.previousPlayer) > kTeleportDistance * kTeleportDistance;
 				const bool cellChanged = a_game.havePlayer && cellId != a_game.previousCell;
-				if (!loadEnded && !events.Has(Event::LoadStarted) && (moved || cellChanged)) {
+				if (!loadEnded && !events.Has(Event::LoadStarted) && (moved || cellChanged))
 					events.Add(Event::Teleport);
-					++events.teleports;
-				}
 				a_game.previousPlayer = position;
 				a_game.previousCell = cellId;
 				a_game.havePlayer = true;
@@ -425,6 +382,25 @@ namespace Snapshot
 		void LogFirst(const FrameSnapshot& a_snapshot);
 
 		/**
+		* @brief The cadence test mode (CS_SNAPSHOT_CADENCE=repeat:N|drop:N, native only). How many times the render half runs for
+		* the game update that just published: N for repeat, 1 every Nth update and 0 otherwise for drop, else 1. Main thread.
+		*/
+		std::uint32_t RendersThisUpdate()
+		{
+			const auto& cadence = CadenceMode();
+			auto& game = Game();
+			const auto update = game.updates++;
+			switch (cadence.mode) {
+			case Cadence::Mode::Repeat:
+				return cadence.n;
+			case Cadence::Mode::Drop:
+				return update % cadence.n == 0 ? 1u : 0u;
+			default:
+				return 1;
+			}
+		}
+
+		/**
 		* @brief Main::Update's call of Main::DrawFrame (SE 35565 +0x5D2, AE 36564 +0xA97): build the snapshot, then either CS's game frame
 		* and the render half from its payload (a routed update, native) or the publish and Main::DrawFrame.
 		*/
@@ -459,13 +435,13 @@ namespace Snapshot
 					}
 				}
 				// The update's game side ends here: the job stages below start the engine's next update jobs, so no DCLF worker may be
-				// in engine memory past this point. Guest closed at its Present already. Phase 7 closes at the publish.
+				// in engine memory past this point. Guest closed at its Present already. A routed update closes before its publish.
 				DCLF::EngineReadWindow::Close();
 				SideEffects::AfterRenderHalf(rendered);
 				// The cadence rendered nothing for this update: its game halves run all the same. They touch the render side's DCLF state,
 				// so the render thread stops first (no Main::DrawFrame parked it).
 				if (!rendered) {
-					Routed::Park("an unrendered update");
+					Routed::Park(Routed::ParkReason::UnrenderedUpdate);
 					for (const auto fn : Game().unrendered)
 						fn(*Game().previous);
 				}
@@ -502,7 +478,7 @@ namespace Snapshot
 				}
 				// The interface drawn by the producer: the render thread stops, and this thread renders the update itself.
 				if (interfaceInline)
-					Routed::Park("the interface");
+					Routed::Park(Routed::ParkReason::Interface);
 				Publish(a_fresh);
 				LogFirst(*a_fresh);
 				if (interfaceInline) {
@@ -513,7 +489,7 @@ namespace Snapshot
 				Routed::OnPublished();
 			}
 
-			/** @brief The update's end: the update-rate cap's wait while the render thread renders (a_paced), and the periodic lines. */
+			/** @brief The update's end: the update-rate cap's wait while the render thread renders (a_paced), and the periodic stats lines. */
 			static void EndUpdate(bool a_paced)
 			{
 				if (a_paced)
@@ -527,8 +503,6 @@ namespace Snapshot
 					if (const auto line = RenderGraph::Engine::Native::RenderThread::TakeStatsLine(); !line.empty())
 						logger::info("{}", line);
 				}
-				if (updates % kLifetimeLineUpdates == 0)
-					logger::info("{}", Retire::TakeStatsLine());
 				// Main::Update's game logic follows. A dropped update's game half opened the window again.
 				DCLF::EngineReadWindow::Close();
 			}
@@ -614,13 +588,6 @@ namespace Snapshot
 		}
 	}
 
-	void Capture()
-	{
-		auto fresh = Build();
-		Publish(fresh);
-		LogFirst(*fresh);
-	}
-
 	void CaptureFrame(FrameSource a_source)
 	{
 		ZoneScopedN("CS.Snapshot.CaptureFrame");
@@ -628,12 +595,10 @@ namespace Snapshot
 		const EngineReads::CaptureScope scope;
 		auto& game = Game();
 		const FrameSnapshot* previous = game.previous.get();
-		// The last snapshot's world data, shared by pointer: blocks, cameras, scene, game time, settings revision.
+		// The last snapshot's world data, shared by pointer: blocks, cameras, game time.
 		auto fresh = previous ? std::make_shared<FrameSnapshot>(*previous) : std::make_shared<FrameSnapshot>();
 		fresh->sub = previous ? previous->sub + 1 : 1;
 		fresh->gameDelta = 0.0f;
-		fresh->realDelta = 0.0f;
-		fresh->cameras.previous = fresh->cameras.current;
 		fresh->events = {};
 		fresh->events.gameUpdates = 0;
 		fresh->loadEpoch = g_loadEpoch.load(std::memory_order_acquire);
@@ -659,13 +624,9 @@ namespace Snapshot
 		static const bool native = RenderGraph::Engine::Native::Requested();
 		fresh->ui = native ? std::make_shared<const UiCommandStream>() : nullptr;
 		fresh->nativeFrame = nullptr;
-		if (g_loadStartedPending.exchange(false, std::memory_order_acq_rel)) {
+		if (g_loadStartedPending.exchange(false, std::memory_order_acq_rel))
 			fresh->events.Add(Event::LoadStarted);
-			++fresh->events.loadsStarted;
-		}
-		FillWindowSize(fresh->events, previous);
-		if (previous)
-			MenuEvents(*fresh, *previous);
+		fresh->events.windowSize = PendingWindowSize();
 		Counters().frameOnly.fetch_add(1, std::memory_order_relaxed);
 		Publish(std::move(fresh));
 	}
@@ -821,20 +782,5 @@ namespace Snapshot
 	std::uint64_t LoadEpoch()
 	{
 		return g_loadEpoch.load(std::memory_order_acquire);
-	}
-
-	std::uint32_t RendersThisUpdate()
-	{
-		const auto& cadence = CadenceMode();
-		auto& game = Game();
-		const auto update = game.updates++;
-		switch (cadence.mode) {
-		case Cadence::Mode::Repeat:
-			return cadence.n;
-		case Cadence::Mode::Drop:
-			return update % cadence.n == 0 ? 1u : 0u;
-		default:
-			return 1;
-		}
 	}
 }

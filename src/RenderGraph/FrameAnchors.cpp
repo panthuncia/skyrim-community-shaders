@@ -3086,7 +3086,6 @@ namespace FrameAnchors
 
 	void BeginFrame(RenderGraph::Frame::Description& a_frame)
 	{
-		::Snapshot::EngineReads::BeginFrame(static_cast<std::uint8_t>(a_frame.kind));
 		::EngineZones::BeginFrame(static_cast<std::uint8_t>(a_frame.kind));
 		auto& state = Anchors();
 		if (!state.host || !IsRenderOwner())

@@ -112,8 +112,7 @@ namespace Snapshot
 	const CoreFrame& Core()
 	{
 		static const CoreFrame empty{};
-		const auto& snapshot = Current();
-		const auto* core = snapshot ? snapshot->Block<CoreFrame>() : nullptr;
+		const auto* core = CurrentBlock<CoreFrame>();
 		return core ? *core : empty;
 	}
 }

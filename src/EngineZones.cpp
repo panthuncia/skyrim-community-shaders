@@ -2,6 +2,7 @@
 
 #include "RenderGraph/Engine/Native/WaterEffects.h"
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
+#include "RenderGraph/Frame/FrameDescription.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Switches.h"
 #include "Snapshot/EngineReads.h"
@@ -58,8 +59,8 @@ namespace EngineZones
 		// functions, and every direct call to the menu-scene, local-map, interface, precipitation, ImageSpace, Volumetric Lighting
 		// and shadow-caster functions, without trivial setters. The SE columns come from aligning each function's SE call list with
 		// its AE one. A site with no confident match is AE-only. Any call is safe to list whatever its signature: a site's stub
-		// counts and jumps to the callee, leaving every argument, stack slot and the return value alone. (The generator still
-		// leaves out calls with XMM arguments, a float return or stack arguments, from when a C++ thunk forwarded the call.)
+		// counts and jumps to the callee, leaving every argument, stack slot and the return value alone. The generator leaves out
+		// calls with XMM arguments, a float return or stack arguments, though the stubs could count them too.
 		// Main::RenderPlayerView's calls of RenderWorld, RenderPostProcess and RenderFirstPersonView are not listed: they go to CS's
 		// drivers in native, and the sites inside the functions count the engine's work where it still runs. Its call of ClearMasks is
 		// not listed either: native does not make it (FirstPersonHooks.cpp).
@@ -320,8 +321,8 @@ namespace EngineZones
 			{ 51855, 0x7A1, 99023, 52727, 0x7A4, 105674, Role::Render, "ImageSpaceManager::RenderEndOfFrameEffects (in UI3DSceneManager::Render)" },
 		};
 		constexpr std::size_t kCount = std::size(kSites);
-		constexpr std::uint8_t kWorld = 0;    // RenderGraph::Frame::Kind::World
-		constexpr std::uint8_t kLoading = 3;  // RenderGraph::Frame::Kind::Loading
+		constexpr std::uint8_t kWorld = static_cast<std::uint8_t>(RenderGraph::Frame::Kind::World);
+		constexpr std::uint8_t kLoading = static_cast<std::uint8_t>(RenderGraph::Frame::Kind::Loading);
 
 		struct FrameStats
 		{
@@ -335,8 +336,6 @@ namespace EngineZones
 		std::atomic<std::uint32_t> g_wrappedCount{ 0 };
 		std::atomic<bool> g_installed{ false };
 		const char* g_unsupported = "";
-		// The current frame kind, read by the stubs. BeginFrame sets it, as it does EngineReads' own.
-		std::atomic<std::uint8_t> g_kind{ 2 };  // RenderGraph::Frame::Kind::MainMenu
 		// Render-function entries since the last Begin, and per frame kind the frames' totals. Begin's thread only.
 		std::atomic<std::uint64_t> g_frameCalls{ 0 };
 		// Read by the producer sites' stubs: 1 while producers count as render calls (CountsAsRender). BeginFrame sets it.
@@ -344,10 +343,8 @@ namespace EngineZones
 		// Read by the menu scene sites' stubs: 1 while the site's scene counts as render calls (SiteCountsAsRender). BeginFrame sets them.
 		std::array<std::atomic<std::uint8_t>, kCount> g_menuRender{};
 		std::array<FrameStats, Reads::kKinds> g_frameStats{};
-		std::uint8_t g_frameKind = 0;
 		bool g_frameBegun = false;
-
-		constexpr std::array<const char*, Reads::kKinds> kKindKeys{ "world", "frozen_world", "main_menu", "loading", "bink" };
+		using Reads::kKindKeys;
 
 		static_assert(sizeof(std::atomic<std::uint64_t>) == 8 && sizeof(std::atomic<std::uint8_t>) == 1, "the stubs address the counters directly");
 
@@ -437,7 +434,8 @@ namespace EngineZones
 		void EmitCount(Code& a_code, std::size_t a_site)
 		{
 			a_code.Put({ 0x50, 0x51 });  // push rax; push rcx
-			a_code.MovRaxImm(reinterpret_cast<std::uintptr_t>(&g_kind));
+			// The current frame kind, as the live-read detector's BeginFrame stores it.
+			a_code.MovRaxImm(reinterpret_cast<std::uintptr_t>(Reads::CurrentKindAddress()));
 			a_code.Put({ 0x0F, 0xB6, 0x00 });  // movzx eax, byte ptr [rax]
 			a_code.MovRcxImm(reinterpret_cast<std::uintptr_t>(g_entries[a_site].data()));
 			a_code.Put({ 0xF0, 0x48, 0xFF, 0x04, 0xC1 });  // lock inc qword ptr [rcx+rax*8]
@@ -690,25 +688,25 @@ namespace EngineZones
 
 	void BeginFrame(std::uint8_t a_kind) noexcept
 	{
+		const auto previous = Reads::BeginFrame(a_kind);
 		// The calls since the last Begin belong to the frame that Begin started.
 		const auto calls = g_frameCalls.exchange(0, std::memory_order_relaxed);
 		if (g_frameBegun) {
-			auto& stats = g_frameStats[g_frameKind];
+			auto& stats = g_frameStats[previous];
 			++stats.frames;
 			stats.calls += calls;
 			stats.max = std::max(stats.max, calls);
 			stats.withCalls += calls != 0;
 		}
-		const bool afterLoad = g_frameBegun && g_frameKind == kLoading && a_kind == kWorld;
-		g_frameKind = a_kind;
+		// The first world frame after a loading screen: a load's tables.
+		const bool afterLoad = g_frameBegun && previous == kLoading && a_kind == kWorld;
 		g_frameBegun = true;
-		g_kind.store(a_kind, std::memory_order_relaxed);
 		g_producersRender.store(CountsAsRender(Role::Producer) ? 1 : 0, std::memory_order_relaxed);
 		for (std::size_t i = 0; i < kCount; ++i)
 			if (kSites[i].role == Role::MenuScene)
 				g_menuRender[i].store(SiteCountsAsRender(i) ? 1 : 0, std::memory_order_relaxed);
 		if (afterLoad)
-			Report("after a load");
+			ReportBoth("after a load");
 	}
 
 	void Report(const char* a_when)

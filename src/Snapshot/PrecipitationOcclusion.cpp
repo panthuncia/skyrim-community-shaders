@@ -218,7 +218,6 @@ namespace Snapshot::PrecipitationOcclusion
 
 	const Block* Current()
 	{
-		const auto& snapshot = Snapshot::Current();
-		return snapshot ? snapshot->Block<Block>() : nullptr;
+		return Snapshot::CurrentBlock<Block>();
 	}
 }

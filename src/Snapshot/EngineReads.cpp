@@ -35,7 +35,6 @@ namespace Snapshot::EngineReads
 			"Renderer", "ShaderManagerState", "Accumulator", "Shaders", "Timer", "Calendar", "Ini", "UI", "ImageSpace", "Water", "Data", "BoundState", "FrameGlobals",
 			"ShadowLights", "Scene" };
 		constexpr std::array<const char*, static_cast<std::size_t>(Category::Count)> kCategoryNames{ "capture-point", "record-time", "bound-state", "other" };
-		constexpr std::array<const char*, kKinds> kKindKeys{ "world", "frozen_world", "main_menu", "loading", "bink" };
 
 		void List(Site& a_site) noexcept
 		{
@@ -176,19 +175,22 @@ namespace Snapshot::EngineReads
 		return t_uiDepth != 0;
 	}
 
-	void BeginFrame(std::uint8_t a_kind) noexcept
+	std::uint8_t BeginFrame(std::uint8_t a_kind) noexcept
 	{
 		g_renderThread.store(::GetCurrentThreadId(), std::memory_order_relaxed);
 		const auto previous = g_kind.exchange(a_kind, std::memory_order_relaxed);
 		g_frames[a_kind].fetch_add(1, std::memory_order_relaxed);
-		// The first world frame after a loading screen: a load's table.
-		if (a_kind == kWorld && previous == static_cast<std::uint8_t>(RenderGraph::Frame::Kind::Loading))
-			Report("after a load");
+		return previous;
 	}
 
 	std::uint8_t CurrentKind() noexcept
 	{
 		return g_kind.load(std::memory_order_relaxed);
+	}
+
+	const std::atomic<std::uint8_t>* CurrentKindAddress() noexcept
+	{
+		return &g_kind;
 	}
 
 	std::uint32_t ThreadIndex() noexcept

@@ -106,6 +106,13 @@ public:
 	void Reset();
 
 	/**
+	 * @brief CS's own engine writes, once per game update: the LOD blend ring for a_gameStep, the sun's shadow mask bits,
+	 * reflections on water only and the "improved" snow shader off. Guest makes them in Reset, native on the game side after
+	 * the capture (Snapshot/SideEffects).
+	 */
+	static void WriteCsEngineState(float a_gameStep);
+
+	/**
 	 * @brief The shaders' Timer: game seconds of the adopted snapshot (Snapshot::FrameSnapshot::gameTime), stopped while paused.
 	 * It moves once per new snapshot, so a repeated snapshot renders the same time and a dropped one loses none.
 	 */

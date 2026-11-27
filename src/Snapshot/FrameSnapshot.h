@@ -9,11 +9,6 @@
 #include <type_traits>
 #include <utility>
 
-namespace DCLF
-{
-	struct ScenePublication;
-}
-
 /**
 * @brief The frame snapshot contract (render-thread roadmap, phase 0). Notes: docs/development/plans/snap0-contract.md.
 *
@@ -22,7 +17,7 @@ namespace DCLF
 * state the game may change.
 *
 * Life of a snapshot (Snapshot/Publication.h):
-* - Built: Snapshot::Capture runs the builder once per game update, at Main::Update's call of Main::DrawFrame (the boundary
+* - Built: the publication hook runs the builder once per game update, at Main::Update's call of Main::DrawFrame (the boundary
 *   between the game update and its render half). It fills the core fields from game data and asks every registered feature
 *   capture for its block. A render frame no game update stands for (a loading screen's on the serving thread, a Bink movie's,
 *   a main-thread frame outside Main::Update) gets a frame-only snapshot from Snapshot::CaptureFrame at its Begin.
@@ -66,13 +61,6 @@ namespace Snapshot
 		LoadStarted = 1u << 1,      // a loading screen began
 		FirstAfterLoad = 1u << 2,   // the first snapshot captured after a loading screen ended
 		Teleport = 1u << 3,         // the player moved further than a step, or changed cell, without a loading screen
-		MenuOpened = 1u << 4,       // a menu opened
-		MenuClosed = 1u << 5,       // a menu closed
-		KindChanged = 1u << 6,      // the frame kind differs from the previous snapshot's
-		Paused = 1u << 7,           // the game paused
-		Resumed = 1u << 8,          // the game resumed
-		SettingsChanged = 1u << 9,  // the settings revision moved
-		WindowResized = 1u << 10,   // the window proc saw a new client size (Events::windowSize)
 	};
 
 	constexpr Event operator|(Event a, Event b) { return static_cast<Event>(static_cast<std::uint32_t>(a) | static_cast<std::uint32_t>(b)); }
@@ -96,11 +84,6 @@ namespace Snapshot
 	{
 		std::uint32_t flags = 0;
 		std::uint32_t gameUpdates = 1;  // the game updates this snapshot stands for: 1 (0 for a frame-only one), plus every replaced snapshot folded in
-		std::uint32_t loadsStarted = 0;
-		std::uint32_t menusOpened = 0;
-		std::uint32_t menusClosed = 0;
-		std::uint32_t cameraCuts = 0;
-		std::uint32_t teleports = 0;
 		float gameDelta = 0.0f;  // the game time these updates advanced, summed over folded snapshots
 		WindowSize windowSize{};  // the newest resize request at the capture; the newer serial wins when folded
 
@@ -110,11 +93,6 @@ namespace Snapshot
 		{
 			flags |= a_older.flags;
 			gameUpdates += a_older.gameUpdates;
-			loadsStarted += a_older.loadsStarted;
-			menusOpened += a_older.menusOpened;
-			menusClosed += a_older.menusClosed;
-			cameraCuts += a_older.cameraCuts;
-			teleports += a_older.teleports;
 			gameDelta += a_older.gameDelta;
 			if (a_older.windowSize.serial > windowSize.serial)
 				windowSize = a_older.windowSize;
@@ -148,7 +126,7 @@ namespace Snapshot
 		bool operator==(const MenuStates&) const = default;
 	};
 
-	/** @brief The views a snapshot carries cameras for. Phase 0 fills Main. Cube faces and shadow views get rows when ported. */
+	/** @brief The views a snapshot carries cameras for. The capture fills Main. Cube faces and shadow views get rows when ported. */
 	enum class ViewId : std::uint8_t
 	{
 		Main,
@@ -168,14 +146,12 @@ namespace Snapshot
 		std::array<float, 16> view{}, proj{}, viewProj{};
 	};
 
-	/** @brief The cameras by view. previous is the previous published snapshot's current (not the last rendered one). */
+	/** @brief The cameras by view. */
 	struct Cameras
 	{
 		std::array<CameraView, static_cast<std::size_t>(ViewId::Count)> current{};
-		std::array<CameraView, static_cast<std::size_t>(ViewId::Count)> previous{};
 
 		const CameraView& Current(ViewId a_view) const { return current[static_cast<std::size_t>(a_view)]; }
-		const CameraView& Previous(ViewId a_view) const { return previous[static_cast<std::size_t>(a_view)]; }
 	};
 
 	/**
@@ -235,7 +211,7 @@ namespace Snapshot
 	*
 	* Ids: a game update's snapshot takes the next id (1, 2, ...) with sub 0. A frame-only snapshot (Snapshot::CaptureFrame) keeps
 	* the last game update's id and takes the next sub (1, 2, ...), so (id, sub) orders every snapshot and "a new game frame" is
-	* still a new id. It copies the last snapshot's world data (blocks, cameras, scene, game time, settings revision) and has its
+	* still a new id. It copies the last snapshot's world data (blocks, cameras, game time) and has its
 	* own kind, menus, load epoch, events (gameUpdates 0, game delta 0) and UI stream.
 	*/
 	struct FrameSnapshot
@@ -244,18 +220,15 @@ namespace Snapshot
 		std::uint32_t sub = 0;        // 0 for a game update's snapshot; 1, 2, ... for the frame-only snapshots published since it
 		double gameTime = 0.0;        // game seconds since the session started, not advancing while paused
 		float gameDelta = 0.0f;       // this update's game seconds (RE::GetSecondsSinceLastFrame); 0 while paused
-		float realDelta = 0.0f;       // this update's wall-clock seconds (BSTimer::realTimeDelta)
 		float gameDaysPassed = 0.0f;  // the calendar's days passed (time of day in the fraction), 0 without a calendar
 		FrameKind kind = FrameKind::MainMenu;
 		std::uint64_t loadEpoch = 0;  // loading screens begun this session
 		MenuStates menus{};
-		std::uint64_t settingsRevision = 0;  // CS::SettingRegistry::Serial() at the capture: moves with every settings change
 		Cameras cameras{};
 		bool interior = false;                                // the player's cell is an interior
 		bool worldLoaded = false;                             // the player has 3D and a parent cell: a frozen menu can draw the world behind it
 		bool firstPersonShown = false;                        // the player's first-person root is not hidden at the capture's start (Main::RenderPlayerView's test)
 		EngineValues engine{};                                // what the frame driver sets its engine variables from at the adoption
-		std::shared_ptr<const DCLF::ScenePublication> scene;  // the scene publication it pairs with (empty in phase 0)
 		std::shared_ptr<const UiCommandStream> ui;            // the UI command stream (native; set at the update's DrawInterface end)
 		std::shared_ptr<const void> nativeFrame;              // native: a routed update's render payload (Native/RenderThread.h), else null
 		Events events{};
@@ -267,9 +240,6 @@ namespace Snapshot
 		{
 			return static_cast<const T*>(blocks[static_cast<std::size_t>(T::kId)].get());
 		}
-
-		/** @brief The block by id, untyped, for stats and pointer comparisons. */
-		const std::shared_ptr<const void>& BlockAt(BlockId a_id) const { return blocks[static_cast<std::size_t>(a_id)]; }
 
 	private:
 		friend class Builder;

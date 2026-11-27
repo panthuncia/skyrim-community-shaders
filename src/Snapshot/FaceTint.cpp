@@ -179,8 +179,7 @@ namespace Snapshot::FaceTint
 	{
 		if (!installed || RenderGraph::Frame::Driver::Current().kind != RenderGraph::Frame::Kind::World)
 			return;
-		const auto& snapshot = Snapshot::Current();
-		const auto* block = snapshot ? snapshot->Block<Block>() : nullptr;
+		const auto* block = Snapshot::CurrentBlock<Block>();
 		auto& render = RenderSide();
 		const auto frame = RenderGraph::FrameClock::BeginFrame();
 		const auto find = [&](std::uint64_t a_serial) -> const Bake* {

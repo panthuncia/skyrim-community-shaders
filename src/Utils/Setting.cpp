@@ -158,7 +158,6 @@ namespace CS
 				RecordSettingBytes(found->second);
 				bytes = found->second.raised;
 			}
-			serial.fetch_add(1, std::memory_order_acq_rel);
 			if (a_id != 0 && a_id <= table.names.size())
 				name = table.names[a_id - 1];
 			hook = table.hook;
@@ -195,7 +194,6 @@ namespace CS
 				return;
 			RecordSettingBytes(binding);
 			bytes = binding.raised;
-			serial.fetch_add(1, std::memory_order_acq_rel);
 			name = table.names[id - 1];
 			hook = table.hook;
 		}

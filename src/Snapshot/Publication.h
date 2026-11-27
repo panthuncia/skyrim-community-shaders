@@ -8,8 +8,8 @@
 /**
 * @brief Publication and adoption of frame snapshots (contract: Snapshot/FrameSnapshot.h).
 *
-* Game side (main thread): Capture() builds the next snapshot and publishes it, at Main::Update's call of Main::DrawFrame
-* (SE 35565 +0x5D2, AE 36564 +0xA97). A render frame outside that call publishes a frame-only snapshot with CaptureFrame() at
+* Game side (main thread): the publication hook builds the next snapshot and publishes it, at Main::Update's call of
+* Main::DrawFrame (SE 35565 +0x5D2, AE 36564 +0xA97). A render frame outside that call publishes a frame-only snapshot with CaptureFrame() at
 * its Begin: a loading screen's (serving thread), a Bink movie's, or a main-thread frame outside Main::Update. Render side:
 * Adopt() at each render frame's start on the thread that renders it (Renderer::Begin, before the frame driver's OnBegin);
 * recording reads Current(). Both modes publish and adopt. Guest adopts at once on the same thread, so nothing it draws changes.
@@ -34,8 +34,9 @@ namespace Snapshot
 	void RegisterUnrenderedUpdate(UnrenderedFn a_fn);
 
 	/**
-	* @brief Game-side work at the end of an update's call of Main::DrawFrame, after its renders (none on a dropped update). Main
-	* thread, once per game update, before the update's game logic. In phase 7 it runs after the publish, beside the render thread.
+	* @brief Game-side work at the end of an update's call of Main::DrawFrame. Main thread, once per game update, before the update's
+	* game logic. An update the game thread renders runs it after its renders (none on a dropped update). A routed update (native)
+	* runs it after CS's game frame and before the publish.
 	*/
 	using UpdateEndFn = void (*)(const FrameSnapshot& a_snapshot);
 
@@ -44,9 +45,6 @@ namespace Snapshot
 
 	/** @brief Installs the publication hook at Main::Update's call of Main::DrawFrame (Hooks.cpp calls this). */
 	void InstallHooks();
-
-	/** @brief Builds and publishes the next snapshot. Main thread, once per game update. */
-	void Capture();
 
 	/** @brief Where a frame-only snapshot comes from: the producer that renders a frame no game update stands for. */
 	enum class FrameSource : std::uint8_t
@@ -93,9 +91,9 @@ namespace Snapshot
 	std::uint64_t CurrentId();
 
 	/**
-	* @brief The newest game update's snapshot Capture() built, for the game half's readers. Null before the first. Game thread. Today it
-	* is what the render side adopts in the same update: a cadence repeat renders it again, a dropped update's is never adopted, and a
-	* frame-only snapshot (CaptureFrame) never replaces it. Its id is LastGameId().
+	* @brief The newest game update's snapshot, built at the publication hook, for the game half's readers. Null before the first.
+	* Game thread. It is the snapshot the update publishes for the render side: a cadence repeat renders it again, a dropped update's
+	* is never adopted, and a frame-only snapshot (CaptureFrame) never replaces it. Its id is LastGameId().
 	*/
 	const std::shared_ptr<const FrameSnapshot>& Building();
 
@@ -139,8 +137,8 @@ namespace Snapshot
 	bool InGameUpdate();
 
 	/**
-	* @brief The window proc (game thread): the renderer is asked for a new client size. Native publishes it as the next
-	* snapshot's WindowResized event (Events::windowSize) instead of letting the engine flag it at once.
+	* @brief The window proc (game thread): the renderer is asked for a new client size. Native publishes it with the next
+	* snapshot (Events::windowSize) instead of letting the engine flag it at once.
 	*/
 	void NoteWindowResize(std::uint32_t a_width, std::uint32_t a_height);
 
@@ -167,10 +165,4 @@ namespace Snapshot
 
 	/** @brief The loading screens begun this session: the load epoch the next snapshot carries. Any thread. */
 	std::uint64_t LoadEpoch();
-
-	/**
-	* @brief The cadence test mode (CS_SNAPSHOT_CADENCE=repeat:N|drop:N, native only). How many times the render half runs for
-	* the game update that just published: N for repeat, 1 every Nth update and 0 otherwise for drop, else 1. Main thread.
-	*/
-	std::uint32_t RendersThisUpdate();
 }

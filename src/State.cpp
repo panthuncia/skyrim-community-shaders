@@ -427,10 +427,8 @@ void State::Reset()
 	LandscapeSeamsFix::GetInstance().Reset();
 	// Native makes CS's per-update engine writes on the game side, after the capture (Snapshot/SideEffects).
 	const bool gameSideWrites = Snapshot::SideEffects::Installed();
-	if (!gameSideWrites) {
-		LODBlendRingFix::GetInstance().Update(Snapshot::GameStep());
-		SunShadowMaskFix::Update();
-	}
+	if (!gameSideWrites)
+		WriteCsEngineState(Snapshot::GameStep());
 
 	lastModifiedPixelDescriptor = 0;
 	lastModifiedVertexDescriptor = 0;
@@ -443,25 +441,23 @@ void State::Reset()
 	// Publish for off-thread readers (e.g. the MCP listener thread).
 	frameCountAtomic.store(frameCount, std::memory_order_relaxed);
 
-	if (!gameSideWrites) {
-		if (auto* imageSpaceManager = CS_ENGINE_READ(ImageSpace, Other, globals::game::imageSpaceManager)) {
-			auto& BSImagespaceShaderApplyReflections = imageSpaceManager->GetRuntimeData().BSImagespaceShaderApplyReflections;
-
-			// Disable reflections being applied to things other than water
-			if (BSImagespaceShaderApplyReflections.get()) {
-				BSImagespaceShaderApplyReflections->active = false;
-			}
-		}
-
-		// Disable "improved" snow shader, unsupported
-		static RE::Setting* improvedSnow = nullptr;
-		if (!improvedSnow)
-			improvedSnow = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bEnableImprovedSnow:Display"));
-		if (improvedSnow)
-			improvedSnow->data.b = false;
-	}
-
 	activeReflections = false;
+}
+
+void State::WriteCsEngineState(float a_gameStep)
+{
+	// The ring center and the sun's mask bits for this update's draws.
+	LODBlendRingFix::GetInstance().Update(a_gameStep);
+	SunShadowMaskFix::Update();
+	// Reflections are applied to water only: the console's ToggleAR is the engine's only writer of ApplyReflections' flag.
+	if (auto* manager = CS_ENGINE_READ(ImageSpace, Other, RE::ImageSpaceManager::GetSingleton())) {
+		if (auto& applyReflections = manager->GetRuntimeData().BSImagespaceShaderApplyReflections; applyReflections)
+			applyReflections->active = false;
+	}
+	// The "improved" snow shader is unsupported.
+	static RE::Setting* const improvedSnow = CS_ENGINE_READ(Ini, Other, RE::GetINISetting("bEnableImprovedSnow:Display"));
+	if (improvedSnow)
+		improvedSnow->data.b = false;
 }
 
 bool State::ShouldResetHistory() const

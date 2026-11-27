@@ -7,9 +7,10 @@
 /**
 * @brief The game-thread command queue. The ImGui frame (and other render-side code) writes engine and game state only through it:
 * it posts a task, and the task runs on the main thread at the next main tick (RenderGraph::Engine::MainTick, after the frame-job
-* wait in Main::Update), where game logic runs. Today the ImGui frame runs on the main thread at Present, so a posted write lands
-* at the end of the same Main::Update, before the next sky and game update. Once rendering has its own thread, the writes still
-* land on the game thread.
+* wait in Main::Update), where game logic runs. The ImGui frame runs at the render frame's Present, on the thread that renders.
+* For guest and for updates the game thread renders, that is the main thread, so a posted write lands at the end of the same
+* Main::Update, before the next sky and game update. For a routed native update it is the render thread, and the write lands at
+* the game thread's next main tick.
 */
 namespace GameThread
 {
