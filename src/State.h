@@ -521,6 +521,8 @@ public:
 	 * @param a_pass The render pass to inspect.
 	 */
 	void UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass);
+	/** @brief The same from a sky object's type and its geometry, used only as a key (DCLF's native sky reads captured values). */
+	void UpdateSkyShaderPermutation(std::uint32_t a_skyObjectType, const void* a_geometry);
 	/**
 	 * @brief Flags effect shader passes that draw the aurora (sky objects under the sky's aurora root).
 	 * @param a_pass The render pass to inspect.

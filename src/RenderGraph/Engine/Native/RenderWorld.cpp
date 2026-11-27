@@ -113,7 +113,7 @@ namespace RenderGraph::Engine::Native
 		// Sun::SubmitOcclusionQuery(1, ...): the sun's occlusion draw into CS's query slot, tagged with the snapshot it is drawn for.
 		if (const auto& snapshot = Snapshot::Current()) {
 			if (const auto* block = snapshot->Block<DCLF::Features::Sky::SunQueryBlock>())
-				DCLF::Features::Sky::SubmitSunQuery(accumulator, DCLF::Features::Sky::SunQueryGeometry(*block), snapshot->id);
+				DCLF::Features::Sky::SubmitSunQuery(accumulator, *block, snapshot->id);
 		}
 		// Not written: Main::RenderWorld's clears of 414748 and 414749, which nothing reads (Main::Draw's setup sets them, no xref reads them).
 		globals::state->EndPerfEvent();

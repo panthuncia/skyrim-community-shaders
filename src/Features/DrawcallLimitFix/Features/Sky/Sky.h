@@ -197,8 +197,8 @@ namespace DCLF::Features::Sky
 		bool operator==(const SunQueryBlock&) const = default;
 	};
 
-	/** @brief The block's query geometry while it is still the sun's, else null. Render thread (reads the sun, as decision 105). */
-	RE::BSGeometry* SunQueryGeometry(const SunQueryBlock& a_block);
+	/** @brief Game side: the sun's query geometry now, or null. */
+	RE::BSGeometry* SunQueryGeometryNow();
 
 	/**
 	* @brief The main pass's sky batch in native's RenderWorld, at the pre-resolve's sky techniques (SE 99938 +0x247, AE 106583 +0x237):
@@ -209,9 +209,10 @@ namespace DCLF::Features::Sky
 	/**
 	 * @brief Native, render thread: Main::RenderWorld's sun occlusion draw (the engine's Sun::SubmitOcclusionQuery(1, ...)) into CS's own
 	 * query slot, tagged a_tag (the snapshot id). Skipped while the last answer has not reached the game side. The world camera's data is
-	 * already the frame's (inside RenderWorld), so no camera is set.
+	 * already the frame's (inside RenderWorld), so no camera is set. The draw reads the sun the frame's ticket took (TicketPart::SkyRoot)
+	 * while it is still the block's query geometry.
 	 */
-	void SubmitSunQuery(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, std::uint64_t a_tag);
+	void SubmitSunQuery(RE::BSShaderAccumulator* a_accumulator, const SunQueryBlock& a_block, std::uint64_t a_tag);
 
 	/** @brief Registers the sun query's capture. */
 	void InstallSunQuery();

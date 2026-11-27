@@ -138,10 +138,12 @@ public:
 	 * @brief Checks if the current sky render pass is rendering clouds to the reflections cubemap and flags it for override.
 	 * @param Pass The BSRenderPass being set up for rendering.
 	 */
-	int FindCloudLayer(RE::BSRenderPass* Pass);
+	int FindCloudLayer(const void* a_geometry);
 	void ModifySky(RE::BSRenderPass* Pass);
 	/** @brief The same, for a pass of a reflection face (a_reflectionFace) or of another view, whatever the shadow state's target. */
 	void ModifySky(RE::BSRenderPass* Pass, bool a_reflectionFace);
+	/** @brief The same from a sky object's type and its geometry, used only as a key (DCLF's native sky reads captured values). */
+	void ModifySky(std::uint32_t a_skyObjectType, const void* a_geometry, bool a_reflectionFace);
 
 	/** @brief Copies the cloud occlusion cubemap and binds it as a shader resource for the reflections prepass. */
 	virtual void ReflectionsPrepass() override;

@@ -11,7 +11,9 @@
 namespace RE
 {
 	class BSGeometry;
+	class BSShader;
 	class BSShaderAccumulator;
+	class BSShaderProperty;
 }
 
 namespace DCLF::Features::Sky::Native
@@ -25,6 +27,39 @@ namespace DCLF::Features::Sky::Native
 		std::uint32_t renderFlags = 0;  // RenderBatches' flags (0x108 keeps the cull mode)
 		Integrations::PhysicalSky::OrgHandles physSky{};
 	};
+
+	/**
+	 * @brief What a sky pass's draw reads of its geometry and property (TakePass): the game half takes it for native's sky root and sun,
+	 * the engine-batch paths take it from the pass at the draw.
+	 */
+	struct PassObject
+	{
+		bool drawable = false;  // a property and geometry drawn by the sky shader
+		bool triShape = false;  // a BSTriShape
+		const RE::BSShader* shader = nullptr;
+		const void* geometry = nullptr;  // a key only: CS's sky hooks compare it with captured meshes
+		std::uint32_t type = 0;          // the property's uiSkyObjectType
+		std::array<float, 4> blendColor{};
+		float blendValue = 0.0f;
+		std::uint16_t cloudLayer = 0;
+		bool fadeSecond = false;
+		bool alphaTest = false;  // the geometry's alpha property tests
+		bool twoSided = false;   // the property's flag bit 36
+		bool hasBase = false, hasBlend = false;
+		ID3D11ShaderResourceView* baseView = nullptr;
+		ID3D11ShaderResourceView* blendView = nullptr;
+		std::array<float, 13> world{}, previousWorld{};  // NiTransforms
+		const Family::TriShape* shape = nullptr;         // the geometry's renderer data
+		std::uint32_t triangles = 0;
+		bool operator==(const PassObject&) const = default;
+	};
+
+	/** @brief Reads a_out from a geometry, its sky property and the pass's shader. Reads the engine. */
+	PassObject TakePass(const RE::BSGeometry* a_geometry, const RE::BSShaderProperty* a_property, const RE::BSShader* a_shader);
+	/** @brief The sun query's pass for a_geometry, read now (the property at +0x128, the sky shader). Reads the engine. */
+	PassObject TakeSunPass(const RE::BSGeometry* a_geometry);
+	/** @brief Render thread, native: the sun the frame's ticket took, if it is a_geometry, else null. */
+	const PassObject* TicketSunPass(const Snapshot::EngineRef& a_geometry);
 
 	/** @brief One pass's draw: built, left out while its program builds (logged once), or not computable (a_why). */
 	enum class PassResult : std::uint8_t
@@ -63,7 +98,7 @@ namespace DCLF::Features::Sky::Native
 	 * @brief Render thread, in place of the engine's sun query draw (AE 106604), with the query's camera set. The sun's occlusion
 	 * draw (raw technique 0, SunOcclude) from the sun geometry.
 	 */
-	PassResult BuildSun(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, const BatchInputs& a_inputs, Draw& a_draw, Family::Owners& a_owners,
+	PassResult BuildSun(RE::BSShaderAccumulator* a_accumulator, const PassObject& a_object, const BatchInputs& a_inputs, Draw& a_draw, Family::Owners& a_owners,
 		std::string& a_why);
 
 	/**

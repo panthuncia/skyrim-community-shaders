@@ -130,11 +130,10 @@ namespace DCLF::Features::Sky
 		}
 	}
 
-	RE::BSGeometry* SunQueryGeometry(const SunQueryBlock& a_block)
+	RE::BSGeometry* SunQueryGeometryNow()
 	{
 		auto* sun = Engine::Global<std::byte*>(kSun);
-		auto* geometry = sun ? Engine::At<RE::BSGeometry*>(sun, kQueryGeometry) : nullptr;
-		return a_block.submit && a_block.geometry.Names(geometry) ? geometry : nullptr;
+		return sun ? Engine::At<RE::BSGeometry*>(sun, kQueryGeometry) : nullptr;
 	}
 
 	void InstallSunQuery()
