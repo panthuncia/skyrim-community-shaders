@@ -503,6 +503,30 @@
     "run": "1127-175430-post-refs-native-vulkan-taa-water-post-refs-n1-taaw",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+ui-menus/console": {
+    "sha256": "acdbb7b7aa0b0e2502baf115d833a21712c6ac1ea3874a20b8d1a63869c49117",
+    "size": "1920x1080",
+    "run": "1127-185352-post-refs-native-vulkan-ui-menus-post-refs-n1-ui",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+ui-menus/hud": {
+    "sha256": "4a2459457565960efff9d84be22f256e32f5cbc7031393772de1ba52b0d1b32c",
+    "size": "1920x1080",
+    "run": "1127-185352-post-refs-native-vulkan-ui-menus-post-refs-n1-ui",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+ui-menus/inventory": {
+    "sha256": "1144514cb09e334ff4205042f2de6c90580f206e1d55e92d6f04e2056dedf622",
+    "size": "1920x1080",
+    "run": "1127-185352-post-refs-native-vulkan-ui-menus-post-refs-n1-ui",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+ui-menus/map": {
+    "sha256": "bb454728ef43dbe16c1baaa6c252f91509216d3cc35bf80a8c8a7c6ce2798fb5",
+    "size": "1920x1080",
+    "run": "1127-185352-post-refs-native-vulkan-ui-menus-post-refs-n1-ui",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+update-cap240/settled": {
     "sha256": "c364efa82f7bfeca95a0907f3524d5c3cc0cc403d3ed3343d9ac671d01d254bf",
     "size": "1920x1080",
