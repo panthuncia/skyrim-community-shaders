@@ -1,5 +1,6 @@
 #include "Skylighting.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/PrecipitationOcclusion.h"
 #include "Snapshot/Publication.h"
 
 #include "Deferred.h"
@@ -626,21 +627,21 @@ RE::BSShaderProperty::RenderPassArray* Skylighting::BSLightingShaderProperty_Get
 	return precipitationOcclusionMapRenderPassList;
 }
 
+void Skylighting::QuarterFrustum(RE::NiFrustum& a_frustum)
+{
+	const uint corner = globals::features::skylighting.frameCount % 4;
+	const float frustumSize = a_frustum.fTop;
+	a_frustum.fBottom = (corner == 0 || corner == 1) ? -frustumSize : 0.0f;
+	a_frustum.fLeft = (corner == 0 || corner == 2) ? -frustumSize : 0.0f;
+	a_frustum.fRight = (corner == 1 || corner == 3) ? frustumSize : 0.0f;
+	a_frustum.fTop = (corner == 2 || corner == 3) ? frustumSize : 0.0f;
+}
+
 void Skylighting::SetViewFrustum::thunk(RE::NiCamera* a_camera, RE::NiFrustum* a_frustum)
 {
 	auto& skylighting = globals::features::skylighting;
-
-	if (skylighting.inOcclusion && !skylighting.zenithFrame) {
-		uint corner = skylighting.frameCount % 4;
-
-		float frustumSize = a_frustum->fTop;
-
-		a_frustum->fBottom = (corner == 0 || corner == 1) ? -frustumSize : 0.0f;
-		a_frustum->fLeft = (corner == 0 || corner == 2) ? -frustumSize : 0.0f;
-		a_frustum->fRight = (corner == 1 || corner == 3) ? frustumSize : 0.0f;
-		a_frustum->fTop = (corner == 2 || corner == 3) ? frustumSize : 0.0f;
-	}
-
+	if (skylighting.inOcclusion && !skylighting.zenithFrame)
+		QuarterFrustum(*a_frustum);
 	func(a_camera, a_frustum);
 }
 
@@ -699,11 +700,9 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 
 	// Native mode: nothing the engine draws reaches the GPU, so the engine has nothing to draw into the map: no slot of its depth table is
 	// lent to it, the engine culls nothing for it, and nothing clears it here. Drawcall Limit Fix draws the map, and ORGSkylighting clears it
-	// with its own pass's load operation after the probe update read it. CS computes the projection RenderMask would (DrawcallLimitFix::RenderMask).
+	// with its own pass's load operation after the probe update read it. CS places the map's camera and computes its projection from the
+	// precipitation block (Snapshot::PrecipitationOcclusion), with no engine call.
 	const bool native = RenderGraph::Engine::Native::Active();
-	auto* precipitation = native ? nullptr :
-	                               &CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP];
-	const RE::BSGraphics::DepthStencilData precipitationCopy = precipitation ? *precipitation : RE::BSGraphics::DepthStencilData{};
 
 	auto& dclf = globals::features::drawcallLimitFix;
 	// Held by a Drawcall Limit Fix load hold: rendered here without the engine's cull, as DCLF's own variant is.
@@ -714,18 +713,59 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	const bool onGraph = graph.IsActive();
 	const bool zenith = zenithDue && (onGraph ? graph.ZenithReady() : !a_dclf && !held && !native && texZenithOcclusion);
 	zenithFrame = zenith;
+	// The frame's sky direction (BeginOcclusionFrame), whichever point renders the map; straight down for the zenith capture.
+	const float3 direction = zenith ? float3{ 0.0f, 0.0f, -1.0f } : occlusionDirection;
+	const float cubeSize = zenith ? ZENITH_OCCLUSION_EXTENT : occlusionDistance;
+
+	const auto keepProjection = [&](const REX::W32::XMFLOAT4X4& a_projection) {
+		if (zenith) {
+			ZenithTransform = a_projection;
+			zenithEyePending = true;
+		} else {
+			// Every probe used to evaluate this same basis; evaluate it once per capture instead.
+			const auto basis = SphericalHarmonics::Scale(SphericalHarmonics::Evaluate(-occlusionDirection), 4.0f * std::numbers::pi_v<float>);  // 4 pi from Monte Carlo
+			OcclusionSHBasis4Pi = float4{ basis.c0, basis.c1[0], basis.c1[1], basis.c1[2] };
+			OcclusionTransform = a_projection;
+		}
+	};
+
+	if (native) {
+		const auto* block = Snapshot::PrecipitationOcclusion::Current();
+		const auto& snapshot = Snapshot::Current();
+		const auto* main = snapshot ? &snapshot->cameras.Current(Snapshot::ViewId::Main) : nullptr;
+		if (!block || !block->mask.valid || !main || !main->valid)
+			return;
+		// The engine's ComputeProjection ran twice for this map, so the camera's previous forward is the direction itself.
+		const RE::NiPoint3 forward{ direction.x, direction.y, direction.z };
+		const Snapshot::PrecipitationOcclusion::ProjectionInputs inputs{ forward, cubeSize, forward, Snapshot::PrecipitationOcclusion::EyeOf(*main), block->fixed };
+		{
+			ZoneScopedN("Skylighting - Setup Projection");
+			occlusionCamera = Snapshot::PrecipitationOcclusion::Compute(inputs, zenith ? nullptr : &QuarterFrustum);
+			dclf.OcclusionView(DrawcallLimitFix::kSkyOcclusion);
+		}
+		(void)graph.TakeOcclusionCleared();
+		if (a_dclf)
+			graph.NoteOcclusionDrawn();
+		const auto projection = Snapshot::PrecipitationOcclusion::Projection(occlusionCamera, inputs.eye.position);
+		REX::W32::XMFLOAT4X4 transform;
+		static_assert(sizeof(transform) == sizeof(projection));
+		std::memcpy(&transform, projection.data(), sizeof(transform));
+		keepProjection(transform);
+		return;
+	}
+
+	auto* precipitation = &CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP];
+	const RE::BSGraphics::DepthStencilData precipitationCopy = *precipitation;
 	auto* target = zenith && !onGraph ? texZenithOcclusion : texOcclusion;
 
-	if (!native) {
-		if (target == texZenithOcclusion) {
-			// Bound to pixel shaders since the last Prepass; unbind before writing it as depth
-			ID3D11ShaderResourceView* nullSrv = nullptr;
-			globals::d3d::context->PSSetShaderResources(52, 1, &nullSrv);
-		}
-		precipitation->depthSRV = target->srv.get();
-		precipitation->texture = target->resource.get();
-		precipitation->views[0] = target->dsv.get();
+	if (target == texZenithOcclusion) {
+		// Bound to pixel shaders since the last Prepass; unbind before writing it as depth
+		ID3D11ShaderResourceView* nullSrv = nullptr;
+		globals::d3d::context->PSSetShaderResources(52, 1, &nullSrv);
 	}
+	precipitation->depthSRV = target->srv.get();
+	precipitation->texture = target->resource.get();
+	precipitation->views[0] = target->dsv.get();
 
 	static float& PrecipitationShaderCubeSize = (*(float*)REL::RelocationID(515451, 401590).address());
 	float originalPrecipitationShaderCubeSize = PrecipitationShaderCubeSize;
@@ -734,20 +774,18 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	RE::NiPoint3 originalParticleShaderDirection = PrecipitationShaderDirection;
 
 	inOcclusion = true;
-	PrecipitationShaderCubeSize = zenith ? ZENITH_OCCLUSION_EXTENT : occlusionDistance;
+	PrecipitationShaderCubeSize = cubeSize;
 
 	float originaLastCubeSize = a_precip->lastCubeSize;
 	a_precip->lastCubeSize = PrecipitationShaderCubeSize;
 
-	// The frame's sky direction (BeginOcclusionFrame), whichever point renders the map; straight down for the zenith capture.
-	const float3 direction = zenith ? float3{ 0.0f, 0.0f, -1.0f } : occlusionDirection;
 	PrecipitationShaderDirection = { direction.x, direction.y, direction.z };
 
 	static REL::Relocation<void(RE::Precipitation*, RE::NiPointer<RE::NiCamera>)> _computeProjection{ REL::RelocationID(25643, 26185) };
 	// With Drawcall Limit Fix drawing it (a_dclf), its native variant of this map: DCLF draws every occluder from its own tables,
 	// GPU-culled, in its shadow epoch, so the engine's cull and registration (SetupMask) are skipped and RenderMask only sets the camera
 	// and clears the map. Otherwise, or on a frame DCLF did not draw it, the engine does.
-	const bool engine = !native && !a_dclf && !held;
+	const bool engine = !a_dclf && !held;
 	{
 		ZoneScopedN("Skylighting - Setup Projection");
 		// The engine positions the precipitation camera using its previous world
@@ -769,7 +807,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	{
 		CS_GPU_ZONE(state->tracyCtx, "Skylighting - Render Height Map");
 		globals::profiler->BeginPass("Skylighting::OcclusionMask");
-		DrawcallLimitFix::RenderMask(a_precip, (RE::BSParticleShaderRainEmitter*)rain);
+		a_precip->RenderMask((RE::BSParticleShaderRainEmitter*)rain);
 		// RenderMask defers its clear until the first engine draw. The DCLF
 		// accumulator may be empty, so explicitly discard the previous sky
 		// direction's depths before the shadow epoch draws into this map.
@@ -778,7 +816,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 		// into the map since; then no D3D11 clear is needed.
 		const bool clearedOnGraph = graph.TakeOcclusionCleared();
 		if (a_dclf) {
-			if (!native && !clearedOnGraph)
+			if (!clearedOnGraph)
 				globals::d3d::context->ClearDepthStencilView(texOcclusion->dsv.get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
 			graph.NoteOcclusionDrawn();
 		}
@@ -786,16 +824,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	}
 	inOcclusion = false;
 
-	const auto& projection = ((RE::BSParticleShaderRainEmitter*)rain)->occlusionProjection;
-	if (zenith) {
-		ZenithTransform = projection;
-		zenithEyePending = true;
-	} else {
-		// Every probe used to evaluate this same basis; evaluate it once per capture instead.
-		const auto basis = SphericalHarmonics::Scale(SphericalHarmonics::Evaluate(-occlusionDirection), 4.0f * std::numbers::pi_v<float>);  // 4 pi from Monte Carlo
-		OcclusionSHBasis4Pi = float4{ basis.c0, basis.c1[0], basis.c1[1], basis.c1[2] };
-		OcclusionTransform = projection;
-	}
+	keepProjection(((RE::BSParticleShaderRainEmitter*)rain)->occlusionProjection);
 
 	delete rain;
 
@@ -804,8 +833,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 
 	PrecipitationShaderDirection = originalParticleShaderDirection;
 
-	if (!native)
-		*precipitation = precipitationCopy;
+	*precipitation = precipitationCopy;
 
 	{
 		ZoneScopedN("Skylighting - Restore Projection");
@@ -816,18 +844,24 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 void Skylighting::RenderOcclusionAtShadowMaps()
 {
 	auto& dclf = globals::features::drawcallLimitFix;
-	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
-	if (!loaded || !dclf.loaded || !globals::shaderCache->IsEnabled() || !sky || Util::IsInterior())
+	if (!loaded || !dclf.loaded || !globals::shaderCache->IsEnabled() || Util::IsInterior())
+		return;
+	// Native reads the capture's precipitation block, guest the sky.
+	const bool native = RenderGraph::Engine::Native::Active();
+	const auto* block = native ? Snapshot::PrecipitationOcclusion::Current() : nullptr;
+	auto* sky = native ? nullptr : CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
+	if (!(native ? block && block->precipitation : sky != nullptr))
 		return;
 	ZoneScoped;
 
 	BeginOcclusionFrame();
-	auto precip = sky->precip;
-	auto precipObject = precip->currentPrecip;
-	if (!precipObject)
-		precipObject = precip->lastPrecip;
+	auto* precip = sky ? sky->precip : nullptr;
+	RE::NiPointer<RE::BSGeometry> precipObject;
+	if (precip)
+		precipObject = precip->currentPrecip ? precip->currentPrecip : precip->lastPrecip;
+	const bool hasObject = native ? block->object : precipObject != nullptr;
 	// The maps DCLF draws in this frame's shadow epoch; the others the engine renders at its occlusion point (RenderOcclusion).
-	const bool precipitationMask = precipObject && dclf.OcclusionReady(DrawcallLimitFix::kPrecipitationOcclusion);
+	const bool precipitationMask = hasObject && dclf.OcclusionReady(DrawcallLimitFix::kPrecipitationOcclusion);
 	const bool skyMap = dclf.OcclusionReady(DrawcallLimitFix::kSkyOcclusion);
 	if (!precipitationMask && !skyMap)
 		return;
@@ -835,12 +869,12 @@ void Skylighting::RenderOcclusionAtShadowMaps()
 	auto state = globals::state;
 	CS_GPU_ZONE(state->tracyCtx, "Occlusion Maps (Drawcall Limit Fix)");
 	state->BeginPerfEvent("Occlusion Maps (Drawcall Limit Fix)");
-	// Native's RenderMask leaves the renderer's state alone (DrawcallLimitFix::RenderMask), so there is nothing to put back.
-	if (RenderGraph::Engine::Native::Active()) {
+	// Native makes no engine call and leaves the renderer's state alone: the capture placed the mask's camera, so only DCLF's view is left.
+	if (native) {
 		if (precipitationMask)
-			dclf.RenderPrecipitationMask(precip, precipObject.get(), true);
+			dclf.OcclusionView(DrawcallLimitFix::kPrecipitationOcclusion);
 		if (skyMap)
-			RenderSkyOcclusionMap(precip, true);
+			RenderSkyOcclusionMap(nullptr, true);
 		state->EndPerfEvent();
 		return;
 	}
@@ -870,11 +904,11 @@ void Skylighting::RenderOcclusion()
 	ZoneScopedS(8);
 	auto shaderCache = globals::shaderCache;
 	auto state = globals::state;
-	auto sky = CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
+	const bool native = RenderGraph::Engine::Native::Active();
 
 	// Native makes no engine render call here: the maps DCLF did not draw this frame are drawn without the engine's cull (no occluders),
 	// as a held map is.
-	if (!shaderCache->IsEnabled() && !RenderGraph::Engine::Native::Active()) {
+	if (!shaderCache->IsEnabled() && !native) {
 		CS_GPU_ZONE(globals::state->tracyCtx, "Precipitation Mask");
 		state->BeginPerfEvent("Precipitation Mask");
 		Main_Precipitation_RenderOcclusion::func();
@@ -882,39 +916,47 @@ void Skylighting::RenderOcclusion()
 		return;
 	}
 
-	if (sky) {
-		if (!Util::IsInterior()) {
-			// The maps Drawcall Limit Fix drew in its shadow epoch (RenderOcclusionAtShadowMaps) are done: the engine renders the others
-			// whole here (OcclusionNeedsEngine), every map without it.
-			auto& dclf = globals::features::drawcallLimitFix;
-			BeginOcclusionFrame();
+	// Native reads the capture's precipitation block, guest the sky.
+	const auto* block = native ? Snapshot::PrecipitationOcclusion::Current() : nullptr;
+	auto* sky = native ? nullptr : CS_ENGINE_READ(Sky, RecordTime, globals::game::sky);
+	if (!(native ? block && block->precipitation : sky != nullptr) || Util::IsInterior())
+		return;
 
-			auto precip = sky->precip;
+	// The maps Drawcall Limit Fix drew in its shadow epoch (RenderOcclusionAtShadowMaps) are done: the engine renders the others
+	// whole here (OcclusionNeedsEngine), every map without it.
+	auto& dclf = globals::features::drawcallLimitFix;
+	BeginOcclusionFrame();
 
-			{
-				CS_GPU_ZONE(globals::state->tracyCtx, "Precipitation Mask");
-				state->BeginPerfEvent("Precipitation Mask");
+	auto* precip = sky ? sky->precip : nullptr;
 
-				auto precipObject = precip->currentPrecip;
-				if (!precipObject) {
-					precipObject = precip->lastPrecip;
-				}
-				if (precipObject && dclf.OcclusionNeedsEngine(DrawcallLimitFix::kPrecipitationOcclusion))
-					dclf.RenderPrecipitationMask(precip, precipObject.get(), false);
+	{
+		CS_GPU_ZONE(globals::state->tracyCtx, "Precipitation Mask");
+		state->BeginPerfEvent("Precipitation Mask");
 
-				state->EndPerfEvent();
+		if (native) {
+			// The capture placed the mask's camera, so only DCLF's view is left.
+			if (block->object && dclf.OcclusionNeedsEngine(DrawcallLimitFix::kPrecipitationOcclusion))
+				dclf.OcclusionView(DrawcallLimitFix::kPrecipitationOcclusion);
+		} else {
+			auto precipObject = precip->currentPrecip;
+			if (!precipObject) {
+				precipObject = precip->lastPrecip;
 			}
-
-			{
-				CS_GPU_ZONE(globals::state->tracyCtx, "Skylighting Mask");
-				state->BeginPerfEvent("Skylighting Mask");
-
-				if (dclf.OcclusionNeedsEngine(DrawcallLimitFix::kSkyOcclusion))
-					RenderSkyOcclusionMap(precip, false);
-
-				state->EndPerfEvent();
-			}
+			if (precipObject && dclf.OcclusionNeedsEngine(DrawcallLimitFix::kPrecipitationOcclusion))
+				dclf.RenderPrecipitationMask(precip, precipObject.get(), false);
 		}
+
+		state->EndPerfEvent();
+	}
+
+	{
+		CS_GPU_ZONE(globals::state->tracyCtx, "Skylighting Mask");
+		state->BeginPerfEvent("Skylighting Mask");
+
+		if (dclf.OcclusionNeedsEngine(DrawcallLimitFix::kSkyOcclusion))
+			RenderSkyOcclusionMap(precip, false);
+
+		state->EndPerfEvent();
 	}
 }
 

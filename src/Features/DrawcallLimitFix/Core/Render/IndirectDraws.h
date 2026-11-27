@@ -17,7 +17,9 @@ struct ID3D11Texture2D;
 namespace RE
 {
 	class BSGeometry;
+	class NiFrustum;
 	class NiPoint3;
+	class NiTransform;
 }
 
 namespace org::runtime
@@ -395,7 +397,7 @@ namespace DCLF
 		 * @brief Occlusion maps such as Skylighting's sky map and the precipitation mask. When the shadow epoch cannot draw a map,
 		 * the engine's SetupMask registers its scene at its own occlusion point.
 		 */
-		void OcclusionView(std::uint32_t a_view, const RE::NiCamera& a_camera);
+		void OcclusionView(std::uint32_t a_view, const RE::NiTransform& a_world, const RE::NiFrustum& a_frustum, const std::array<float, 4>& a_port);
 		bool OcclusionReady(std::uint32_t a_view) const;
 
 		const ShadowStats& GetShadowStats() const { return shadowStats; }

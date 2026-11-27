@@ -58,7 +58,7 @@ namespace DCLF::Features::OcclusionMaps
 				.target = Api::OcclusionTarget::ImportedTexture,
 				.labels = { "sky occlusion", "Skylighting", "DCLF Skylighting occlusion map" },
 				.importTarget = &ImportSkyTarget,
-				.camera = &PrecipitationCamera });
+				.camera = &SkyCamera });
 			const bool skylighting = globals::features::skylighting.loaded;
 			a_context.RegisterOcclusionMap({ .map = Api::OcclusionMap::Precipitation,
 				.available = &kPrecipitationAvailable,

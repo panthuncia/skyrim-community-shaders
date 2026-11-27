@@ -437,7 +437,7 @@ namespace DCLF
 		return true;
 	}
 
-	void IndirectDraws::OcclusionView(std::uint32_t a_view, const RE::NiCamera& a_camera)
+	void IndirectDraws::OcclusionView(std::uint32_t a_view, const RE::NiTransform& a_world, const RE::NiFrustum& a_frustum, const std::array<float, 4>& a_port)
 	{
 		// Builds DCLF's view from the camera Skylighting just set up, before RenderMask draws the map. Skylighting swaps its own
 		// texture into depth target 10 for the sky map. Runs every frame the map renders, so next frame's build has its pipelines.
@@ -475,7 +475,7 @@ namespace DCLF
 		D3D11_TEXTURE2D_DESC desc{};
 		depth.texture->GetDesc(&desc);
 		ShadowCameras::Camera camera;
-		ShadowCameras::CameraMatrices(a_camera, camera);
+		ShadowCameras::CameraMatrices(a_world, a_frustum, a_port, camera);
 		const auto port = ShadowCameras::Viewport(camera.port, desc.Width, desc.Height);
 		view.x = port[0];
 		view.y = port[1];

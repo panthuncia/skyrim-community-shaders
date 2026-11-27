@@ -185,6 +185,7 @@ namespace Snapshot
 		InteriorSun,           // Features/InteriorSun.h, InteriorSun::Block
 		VolumetricLighting,    // Features/VolumetricLighting.h, VolumetricLighting::Block
 		WetnessEffects,        // Features/WetnessEffects.h, WetnessEffects::Block
+		PrecipitationOcclusion,  // Snapshot/PrecipitationOcclusion.h, Snapshot::PrecipitationOcclusion::Block
 		ExponentialHeightFog,  // Features/ExponentialHeightFog.h, ExponentialHeightFog::Block
 		// The post group: post-processing, upscaling and the other non-DCLF features.
 		GrassCollision,      // Features/GrassCollision.h, GrassCollision::Block

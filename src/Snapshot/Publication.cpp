@@ -5,6 +5,7 @@
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FaceTint.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/PrecipitationOcclusion.h"
 #include "Snapshot/Retire.h"
 #include "Snapshot/SideEffects.h"
 #include "Snapshot/UiCommandStream.h"
@@ -465,6 +466,7 @@ namespace Snapshot
 			RenderGraph::Fatal("snapshot lifetimes", "the frame-job wait is not hooked, so engine references would never be let go");
 		SideEffects::InstallHooks();
 		FaceTint::InstallHooks();
+		RegisterCapture(&PrecipitationOcclusion::Capture);
 		RenderGraph::Engine::Native::WaterEffects::InstallHooks();
 		RenderGraph::Engine::Native::Scene::InstallHooks();
 		(void)CadenceMode();

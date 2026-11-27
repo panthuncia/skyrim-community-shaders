@@ -2206,7 +2206,7 @@ void Upscaling::Main_PostProcessing::thunk(RE::ImageSpaceManager* a_this, uint32
 
 void Upscaling::Main_RenderPrecipitation::thunk()
 {
-	// Native's occlusion maps make no engine render call (DrawcallLimitFix::RenderMask), so they need no lock. The unlock is still
+	// Native's occlusion maps make no engine render call (Snapshot::PrecipitationOcclusion), so they need no lock. The unlock is still
 	// needed: ConfigureUpscaling locks dynamic resolution at the frame's start, and the world drawn after this point is scaled.
 	// Native readers of the lock (ImageSpace, Util::ConvertToDynamic) would take the frame as full resolution otherwise.
 	if (RenderGraph::Engine::Native::Active()) {

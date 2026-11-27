@@ -2,6 +2,7 @@
 
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameSnapshot.h"
+#include "Snapshot/PrecipitationOcclusion.h"
 #include "Utils/Setting.h"
 
 /** @brief Simulates realistic ambient lighting by calculating sky occlusion via a 3D probe array. */
@@ -159,6 +160,8 @@ public:
 	// The frame the occlusion maps' frame state was begun for (BeginOcclusionFrame: the render frame, RenderGraph::FrameClock), and the sky direction it chose.
 	std::uint64_t occlusionFrame = UINT64_MAX;
 	float3 occlusionDirection;
+	// Native: the sky map's camera, computed in RenderSkyOcclusionMap from the precipitation block (DCLF's sky map view reads it).
+	Snapshot::PrecipitationOcclusion::MapCamera occlusionCamera;
 
 	/**
 	 * @brief Once a frame, before the first map's camera is set up (at the shadow maps when Drawcall Limit Fix draws the maps there, else
@@ -166,8 +169,13 @@ public:
 	 * the sky direction (r2 sequence over the zenith disc).
 	 */
 	void BeginOcclusionFrame();
-	/** @brief The sky occlusion map's render, into texOcclusion swapped in for the precipitation target (a_dclf: as the mask's). */
+	/**
+	 * @brief The sky occlusion map's render, into texOcclusion swapped in for the precipitation target (a_dclf: as the mask's). Native
+	 * makes no engine call and reads no engine state: the camera and projection come from the precipitation block (a_precip is null).
+	 */
 	void RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf);
+	/** @brief The frame's quarter of the sky map (frameCount), which SetViewFrustum applies inside the engine's ComputeProjection. */
+	static void QuarterFrustum(RE::NiFrustum& a_frustum);
 
 	/** @brief Clears the accumulation frames array to force a full rebuild of skylighting probes. */
 	void ResetSkylighting();
