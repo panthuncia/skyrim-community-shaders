@@ -154,6 +154,12 @@ namespace DCLF::Features::MenuViews::Scenes
 		}
 	}
 
+	/**
+	 * @brief The Lighting program variant that keeps Linear Lighting's pipeline (LIGHTING_ORG_LINEAR). The local map's land takes it: its
+	 * swap target stores what the shader outputs, so the pipeline sets the image, and plain D3D11 draws it with Linear Lighting's.
+	 */
+	inline constexpr std::uint32_t kLightingLinearVariant = 1;
+
 	/** @brief LightingOrgDraw in Lighting.hlsl, 1376 bytes. */
 	struct LightingSceneConstants
 	{

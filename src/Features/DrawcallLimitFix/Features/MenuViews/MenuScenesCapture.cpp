@@ -316,6 +316,9 @@ namespace DCLF::Features::MenuViews::Scenes
 			constexpr auto kVertexInputs = static_cast<std::uint32_t>(LightingFlags::VC) | static_cast<std::uint32_t>(LightingFlags::Skinned);
 			draw.key.descriptor = (state->modifiedPixelDescriptor & ~kVertexInputs) | (state->modifiedVertexDescriptor & kVertexInputs);
 			draw.key.defineStage = Family::DefineStage::Pixel;
+			// The local map's land keeps Linear Lighting's pipeline: kLOCAL_MAP_SWAP stores the shader's output as plain D3D11 has it.
+			if (a_capture.view == View::LocalMap)
+				draw.key.variant = kLightingLinearVariant;
 			// The deferred stage's fourth target is never bound in a menu scene.
 			if (const char* why = MapTargets(a_capture.view, kMaxColours, draw))
 				return why;
