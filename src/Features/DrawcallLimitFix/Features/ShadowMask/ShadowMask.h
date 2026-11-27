@@ -13,11 +13,13 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawProgram.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -115,32 +117,39 @@ namespace DCLF::Features::ShadowMask
 
 	namespace Native
 	{
+		/** @brief Shadows::Native's light values, as the masks read them. */
+		using Light = Shadows::Native::ShadowLight;
+
 		/**
-		 * @brief Render thread, at a view's shadow mask call, after the engine's open technique ended. The draws of every light in the
-		 * view's caster array, in the engine's order, computed from the light, its maps and the camera. a_lights gets the lights.
-		 * False, with a_why, when a light cannot be computed (the engine then draws the batch). a_menuEye, for a menu scene CS renders
-		 * natively: the menu camera's eye, and the draws start from CS's own states rather than the engine's.
+		 * @brief Render thread, at a view's shadow masks. The draws of a_lights (the view's caster array, in the engine's order: the
+		 * world's from the light set, a menu scene's and guest's read at the call), computed from each light's values, its maps, the
+		 * settings and the camera. False, with a_why, when a light cannot be computed (the engine then draws the batch). a_menuEye, for a
+		 * menu scene CS renders natively: the menu camera's eye, and the draws start from CS's own states rather than the engine's.
 		 */
-		bool Build(View a_view, Run& a_run, std::vector<RE::BSShadowLight*>& a_lights, std::string& a_why, const RE::NiPoint3* a_menuEye = nullptr);
+		bool Build(View a_view, Run& a_run, std::span<const Light> a_lights, const Shadows::Native::MaskSettings& a_settings, const Shadows::Native::SunSplits& a_sun,
+			std::string& a_why, const RE::NiPoint3* a_menuEye = nullptr);
 
 		/** @brief FUN_1415221e0: the vertex descriptor of a raw Utility technique (the technique less 0x2B). */
 		std::uint32_t VertexDescriptorOf(std::uint32_t a_raw);
 
-		/** @brief The lights of a_view's caster array in the masks' loop order (each takes as many slots as it has maps). */
-		std::vector<RE::BSShadowLight*> Lights(View a_view);
+		/** @brief The shadow scene node whose caster array a_view's masks walk (read where the view is drawn), or null. */
+		const RE::ShadowSceneNode* SceneNodeOf(View a_view);
+
+		/** @brief The world scene node's sun light, which the cascaded mask reads, read now. */
+		Shadows::Native::SunSplits ReadSun();
 
 		/** @brief FUN_1414f4350: ends the technique the engine left open, as the masks' call does first. */
 		void EndTechnique();
 
 		/** @brief The world's sun cascade map (the map its mask draw binds at t4), or null. */
-		ID3D11ShaderResourceView* SunMap(View a_view, const std::vector<RE::BSShadowLight*>& a_lights);
+		ID3D11ShaderResourceView* SunMap(View a_view, std::span<const Light> a_lights);
 	}
 
 	/**
 	 * @brief Native: the world's shadow masks (Main::RenderShadowMasks' call of SE 100423 / AE 107141), driven by CS with no engine function
-	 * called. kSHADOW_MASK is cleared to a_clear through the skeleton, the draws are built from the shadow lights with the snapshot's main
-	 * camera and run at the anchor, and each light's maps are given back (CS's port of ReturnShadowmaps). A batch the build refuses is
-	 * logged once per reason and only cleared. Render owner, in a native world frame.
+	 * called. kSHADOW_MASK is cleared to a_clear through the skeleton, and the draws are built from the light set with the snapshot's main
+	 * camera and run at the anchor. The lights' maps were given back on the game side, once the set was made (Shadows::Native::CaptureSet).
+	 * Render owner, in a native world frame.
 	 */
 	void DrawWorldMasks(const float a_clear[4]);
 

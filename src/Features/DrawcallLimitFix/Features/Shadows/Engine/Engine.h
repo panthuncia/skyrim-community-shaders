@@ -15,6 +15,11 @@ namespace RE
 	class BSShadowLight;
 }
 
+namespace DCLF::Features::Shadows::Native
+{
+	struct ShadowLight;
+}
+
 namespace DCLF::Features::Shadows::Engine
 {
 	Api::Feature Feature();
@@ -27,10 +32,16 @@ namespace DCLF::Features::Shadows::Engine
 	/** @brief Hooks the shadow lights' Render, so a light whose views DCLF draws whole skips it (ShadowMapsNative.cpp). */
 	void InstallShadowMapHooks();
 	/**
-	 * @brief Render thread, inside the shadow maps: a_light's native shadow maps (its views captured, its Render's bookkeeping done),
-	 * a_index advanced as its Render would. False when DCLF cannot draw its views: then nothing is drawn and nothing reaches the engine.
+	 * @brief Native, game side, once the caster selection is done: a_light's Render bookkeeping (each descriptor's target, slice and light
+	 * transform, its scene accumulate array let go) and what its draws need into a_out (whether DCLF draws it, its views and slice clears,
+	 * the state its last draw leaves). a_index advances as its Render would.
 	 */
-	bool RenderLightNatively(RE::BSShadowLight& a_light, std::uint32_t& a_index);
+	void PrepareLightMaps(RE::BSShadowLight& a_light, Native::ShadowLight& a_out, std::uint32_t& a_index);
+	/**
+	 * @brief Native, render side, inside the shadow maps: a kept light's shadow maps from the light set (its views captured, its slices
+	 * cleared). False when DCLF cannot draw its views: then nothing is drawn and nothing reaches the engine.
+	 */
+	bool RenderLightNatively(const Native::ShadowLight& a_light);
 	/**
 	 * @brief Render thread, in a native menu scene render: a_light's Render bookkeeping (each descriptor's target and slice, the slice's
 	 * clear and its light transform), with no view captured and no camera state left behind. A frustum or paraboloid light only; the

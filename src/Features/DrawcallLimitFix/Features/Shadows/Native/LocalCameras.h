@@ -2,9 +2,8 @@
 
 // Ports of the per-light work CalculateActiveShadowCasterLights (AE 0x1414cc570, SE 0x1412e2f60) does for each shadow light, so
 // native mode can select the shadow lights itself. Each function is a drop-in for the engine function it names: same inputs, and the
-// same writes to the light, its cameras, accumulators, culling process and the engine's globals. Render thread, inside the light
-// selection. The float math keeps the engine's operation order.
-
+// same writes to the light, its cameras, accumulators, culling process and the engine's globals. Inside the light selection: the
+// native driver's game half for the world, a menu scene's render for its lights. The float math keeps the engine's operation order.
 
 #include <cstdint>
 
@@ -37,12 +36,6 @@ namespace DCLF::Features::Shadows::Native
 	 * shrinks with the target's distance from a_worldCamera. Makes the cameras on first use.
 	 */
 	void UpdateFocusCameras(RE::BSShadowLight& a_light, const RE::NiCamera& a_worldCamera);
-
-	/**
-	 * @brief AE FUN_1414cec70, SE FUN_1412e50a0. Queues the light, with a reference, for native's lens flares when lens flares are on
-	 * (the engine appends it to its own list for its gather). CalculateActive calls it for a light with lens flare data (+0x138).
-	 */
-	void QueueLensFlare(RE::BSShadowLight& a_light);
 
 	/**
 	 * @brief NiCamera's sphere projection (AE FUN_140d2bab0, SE FUN_140c65a20). Projects a sphere (centre, radius) with the camera.

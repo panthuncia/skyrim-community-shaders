@@ -20,6 +20,7 @@
 #include "Deferred.h"
 #include "EngineZones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
 #include "Features/ExponentialHeightFog/ORGExponentialHeightFog.h"
@@ -2985,19 +2986,6 @@ namespace RenderGraph::Engine::ImageSpace
 	{
 		const auto& chain = Chain();
 		return IS().on && chain.group.Registered() && chain.inEndOfFrame;
-	}
-
-	void BeginLensFlares()
-	{
-		auto& queue = NativePost::LensFlareRun::S().queue;
-		if (!queue.empty())
-			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::make_shared<std::vector<RE::NiPointer<RE::BSShadowLight>>>(std::move(queue)));
-		queue.clear();
-	}
-
-	void QueueLensFlare(RE::BSShadowLight& a_light)
-	{
-		NativePost::LensFlareRun::S().queue.emplace_back(&a_light);
 	}
 
 	const char* BuildTintRows(const void* a_param, TintRows& a_out)

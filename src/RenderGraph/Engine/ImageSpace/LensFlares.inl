@@ -1,8 +1,9 @@
 // Native's lens flares (the engine's gather, SE 100274 / AE 106988, and its parts: AE 0x1414c2a90 the visible flares and their history
 // slots, 0x1414c33b0 a flare's screen position and fade, 0x1414c3810 a sprite's constants), computed by CS and staged as the lens flare
-// steps with no engine call. The game inputs come from the snapshot's ImageSpace block; the lights from native's caster selection,
-// which queues each kept light that has lens flare data (QueueLensFlare). A flare's history (how many frames in a row it was seen, and
-// its texel in kLENSFLAREVIS) is kept per light here, by render frame, where the engine kept it in the light and counted game frames.
+// steps with no engine call. The game inputs come from the snapshot's ImageSpace block; the lights from the shadow light set the native
+// caster selection made (Shadows/Native/LightSet.h): each kept light with lens flare data, as values. A flare's history (how many frames
+// in a row it was seen, and its texel in kLENSFLAREVIS) is kept per light here, by render frame, where the engine kept it in the light
+// and counted game frames.
 // Included by ImageSpace.cpp.
 
 namespace NativePost
@@ -64,10 +65,12 @@ namespace NativePost
 
 		using Float4 = std::array<float, 4>;
 
+		using Light = DCLF::Features::Shadows::Native::ShadowLight;
+
 		/** @brief A flare's history: the render frame it was last seen in, how many frames in a row, and its texel. */
 		struct History
 		{
-			RE::NiPointer<RE::BSShadowLight> light;  // null for the sun
+			const RE::BSShadowLight* light = nullptr;  // a key, null for the sun
 			std::uint64_t last = 0;
 			std::uint32_t seen = 0;
 			std::uint32_t slot = 0;
@@ -76,8 +79,7 @@ namespace NativePost
 		/** @brief Render thread. */
 		struct State
 		{
-			std::vector<RE::NiPointer<RE::BSShadowLight>> queue;  // this frame's lights, from the caster selection
-			std::vector<History> lights;                          // the lights seen last frame
+			std::vector<History> lights;  // the lights seen last frame
 			History sun;
 			std::array<Float4, kSlots> slots{};  // the visibility pass's texel positions; a texel not used this frame keeps its last
 			std::uint32_t rotation = 0;          // the kLENSFLAREVIS channel this frame's visibility pass writes
@@ -88,17 +90,6 @@ namespace NativePost
 		{
 			static State state;
 			return state;
-		}
-
-		// NiLight fields the engine reads past CommonLib's: the diffuse colour and the radius.
-		constexpr std::size_t kDiffuse = 0x11c;
-		constexpr std::size_t kRadius = 0x128;
-
-		float LightField(const RE::NiLight* a_light, std::size_t a_offset)
-		{
-			float value;
-			std::memcpy(&value, reinterpret_cast<const std::byte*>(a_light) + a_offset, sizeof(value));
-			return value;
 		}
 
 		/** @brief NiPoint3::Unitize (AE 0x1402b08d0). */
@@ -144,10 +135,10 @@ namespace NativePost
 
 		/**
 		* @brief One frame's flares as the gather (AE 0x1414c2a90) finds them: a flare in view and close enough continues its texel when it
-		* was seen the frame before, else waits for a free one. Returns how many flares were seen. a_s.lights becomes this frame's lights;
-		* the last frame's go to a_retired.
+		* was seen the frame before, else waits for a free one. a_lights are the set's lights in the selection's order; those with lens
+		* flare data are the engine's queue. Returns how many flares were seen. a_s.lights becomes this frame's lights.
 		*/
-		std::uint32_t Gather(State& a_s, const LensFlareInputs& a_in, const Snapshot::CameraView& a_camera, std::uint64_t a_frame, std::vector<History>& a_retired)
+		std::uint32_t Gather(State& a_s, const LensFlareInputs& a_in, const Snapshot::CameraView& a_camera, std::uint64_t a_frame, std::span<const Light> a_lights)
 		{
 			std::uint32_t seen = 0;
 			std::array<bool, kSlots> used{};
@@ -160,7 +151,7 @@ namespace NativePost
 			std::array<Waiting, kNewFlares + 1> waiting{};
 			std::uint32_t waitingCount = 0;
 			std::vector<History> lights;
-			lights.reserve(a_s.queue.size());
+			lights.reserve(a_lights.size());
 			const auto historyOf = [&](std::size_t a_index) -> History& { return a_index == 0 ? a_s.sun : lights[a_index - 1]; };
 			const auto& eye = a_camera.position;
 			const auto view = Unitize(ViewDirection(a_camera));
@@ -185,29 +176,29 @@ namespace NativePost
 					}
 				}
 			}
-			for (const auto& light : a_s.queue) {
+			for (const auto& light : a_lights) {
+				if (!light.lensFlare)
+					continue;
 				if (waitingCount >= kNewFlares)
 					break;
-				CS_ENGINE_READ_MARK(ShadowLights, RecordTime);
-				const auto* niLight = light->light.get();
-				const auto* data = light->lensFlareData;
-				if (!niLight || !data)
+				const auto* data = light.lensFlare;
+				if (!light.hasNiLight)
 					continue;
-				const auto& point = niLight->world.translate;
+				const RE::NiPoint3 point{ light.position[0], light.position[1], light.position[2] };
 				Float4 position{ 0.0f, 0.0f, 0.0f, 1.0f };
 				if (!WorldToScreen(a_camera, point, position[0], position[1], position[2]))
 					continue;
 				const RE::NiPoint3 offset{ point.x - eye.x, point.y - eye.y, point.z - eye.z };
 				const float distance = std::sqrt(offset.x * offset.x + offset.y * offset.y + offset.z * offset.z);
-				const float past = (std::max)(distance - LightField(niLight, kRadius) * data->fadeDistRadiusScale, 0.0f);
+				const float past = (std::max)(distance - light.radius * data->fadeDistRadiusScale, 0.0f);
 				const float fade = (std::min)(past / a_in.fadeDistance, 1.0f);
 				const auto toLight = Unitize(offset);
 				if (!(0.0f < view.x * toLight.x + view.y * toLight.y + view.z * toLight.z) || !(fade < 1.0f))
 					continue;
 				position[1] = 1.0f - position[1];
 				// The light's history from last frame, if it was seen then.
-				const auto previous = std::ranges::find_if(a_s.lights, [&](const History& a_h) { return a_h.light == light; });
-				lights.push_back(previous != a_s.lights.end() ? *previous : History{ .light = light });
+				const auto previous = std::ranges::find_if(a_s.lights, [&](const History& a_h) { return a_h.light == light.light; });
+				lights.push_back(previous != a_s.lights.end() ? *previous : History{ .light = light.light });
 				auto& now = lights.back();
 				if (a_frame == now.last + 1) {
 					++now.seen;
@@ -236,7 +227,7 @@ namespace NativePost
 				}
 				++cursor;
 			}
-			a_retired = std::exchange(a_s.lights, std::move(lights));
+			a_s.lights = std::move(lights);
 			return seen;
 		}
 
@@ -250,19 +241,18 @@ namespace NativePost
 			Float4 colour{};         // the light's diffuse, toward white by the flare's colour influence
 		};
 
-		bool Place(const LensFlareInputs& a_in, const WorldSettings& a_world, const Snapshot::CameraView& a_camera, const RE::BSShadowLight* a_light,
+		bool Place(const LensFlareInputs& a_in, const WorldSettings& a_world, const Snapshot::CameraView& a_camera, const Light* a_light,
 			const RE::BSLensFlareRenderData& a_data, float a_width, float a_height, Placement& a_out)
 		{
 			const auto& eye = a_camera.position;
 			RE::NiPoint3 point;
 			std::array<float, 3> diffuse{};
-			const RE::NiLight* niLight = a_light ? a_light->light.get() : nullptr;
 			if (a_light) {
-				if (!niLight)
+				if (!a_light->hasNiLight)
 					return false;
-				point = niLight->world.translate;
+				point = { a_light->position[0], a_light->position[1], a_light->position[2] };
 				a_out.intensity = 1.0f;
-				diffuse = { LightField(niLight, kDiffuse), LightField(niLight, kDiffuse + 4), LightField(niLight, kDiffuse + 8) };
+				diffuse = a_light->diffuse;
 			} else {
 				point = { a_in.sunDirection[0] + eye.x, a_in.sunDirection[1] + eye.y, a_in.sunDirection[2] + eye.z };
 				a_out.intensity = a_in.sunVisibility;
@@ -280,7 +270,7 @@ namespace NativePost
 			if (a_light) {
 				toFlare = { point.x - eye.x, point.y - eye.y, point.z - eye.z };
 				const float distance = std::sqrt(toFlare.x * toFlare.x + toFlare.y * toFlare.y + toFlare.z * toFlare.z);
-				const float past = (std::max)(distance - LightField(niLight, kRadius) * a_data.fadeDistRadiusScale, 0.0f);
+				const float past = (std::max)(distance - a_light->radius * a_data.fadeDistRadiusScale, 0.0f);
 				a_out.intensity = 1.0f - (std::min)(past / a_in.fadeDistance, 1.0f);
 			}
 			const auto direction = Unitize(toFlare);
@@ -366,21 +356,22 @@ namespace NativePost
 
 	/**
 	* @brief Native: the lens flare gather (SE 100274, AE 106988) from the snapshot: the visibility pass over the frame's flare texels,
-	* then each visible flare's sprites (the sun's first, then the queued lights'), staged as the lens flare steps. Lets go of the
-	* frame's queue. Render owner, inside the world post chain.
+	* then each visible flare's sprites (the sun's first, then the light set's lights with lens flare data), staged as the lens flare
+	* steps. Render owner, inside the world post chain.
 	*/
 	void RunLensFlares()
 	{
 		using namespace LensFlareRun;
 		auto& s = S();
-		std::vector<History> retired;
+		const auto* set = DCLF::Features::Shadows::Native::RenderSet();
+		const std::span<const Light> lights = set ? std::span<const Light>(set->lights) : std::span<const Light>{};
 		const auto& snapshot = Snapshot::Current();
 		const auto* block = snapshot ? snapshot->Block<Block>() : nullptr;
 		const auto* camera = snapshot ? &snapshot->cameras.Current(Snapshot::ViewId::Main) : nullptr;
 		if (block && block->lensFlares.on && camera && camera->valid) {
 			const auto& in = block->lensFlares;
 			++s.frames;
-			if (Gather(s, in, *camera, Snapshot::Render().frame, retired) != 0) {
+			if (Gather(s, in, *camera, Snapshot::Render().frame, lights) != 0) {
 				const auto shapes = RenderGraph::Frame::Vars::Adopted(RenderGraph::Frame::Vars::EngineTargetShapes());
 				const auto& main = shapes.colours[RE::RENDER_TARGET::kMAIN];
 				const float width = static_cast<float>(main.width), height = static_cast<float>(main.height);
@@ -400,10 +391,8 @@ namespace NativePost
 				Chain().lensVisibilityChannel = static_cast<std::uint16_t>(s.rotation);
 				Stage(static_cast<std::size_t>(visibilityEffect), visibility);
 				Chain().lensVisibilityChannel = 0;
-				const auto flare = [&](const RE::BSShadowLight* a_light) {
-					if (a_light)
-						CS_ENGINE_READ_MARK(ShadowLights, RecordTime);
-					const auto* data = a_light ? a_light->lensFlareData : in.sun;
+				const auto flare = [&](const Light* a_light) {
+					const auto* data = a_light ? a_light->lensFlare : in.sun;
 					Placement place;
 					if (!data || !Place(in, block->world, *camera, a_light, *data, width, height, place))
 						return;
@@ -411,7 +400,7 @@ namespace NativePost
 					static const History kNone{ .seen = 1 };
 					const History* history = &s.sun;
 					if (a_light) {
-						const auto found = std::ranges::find_if(s.lights, [&](const History& a_h) { return a_h.light.get() == a_light; });
+						const auto found = std::ranges::find_if(s.lights, [&](const History& a_h) { return a_h.light == a_light->light; });
 						history = found != s.lights.end() ? &*found : &kNone;
 					}
 					for (const auto& sprite : data->sprites) {
@@ -432,18 +421,13 @@ namespace NativePost
 					}
 				};
 				flare(nullptr);
-				for (const auto& light : s.queue)
-					flare(light.get());
+				for (const auto& light : lights)
+					if (light.lensFlare)
+						flare(&light);
 				native.sprite = {};
 				s.rotation = (s.rotation + 1) & 3;
 				++s.drawn;
 			}
 		}
-		// The queue's and the dropped histories' references are let go on the main thread.
-		if (!s.queue.empty())
-			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::make_shared<std::vector<RE::NiPointer<RE::BSShadowLight>>>(std::move(s.queue)));
-		s.queue.clear();
-		if (!retired.empty())
-			Snapshot::Retire::AfterThisFrame(Snapshot::Retire::Lane::Engine, std::make_shared<std::vector<History>>(std::move(retired)));
 	}
 }

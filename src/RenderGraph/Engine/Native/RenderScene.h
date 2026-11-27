@@ -2,6 +2,12 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
+
+namespace DCLF::Features::Shadows::Native
+{
+	struct LightSet;
+}
 
 /**
 * @brief Native's world frame skeleton driven by CS (render-thread roadmap, phase 3, decision 70; notes in
@@ -28,8 +34,8 @@ namespace RenderGraph::Engine::Native::Scene
 {
 	/**
 	* @brief What the driver's game half leaves for its render half (render-thread roadmap, phase 7): the branches, the values the
-	* points read of the game, and the first-person camera as the shift placed it. Values only, apart from the SAO helper, which only
-	* goes back to the engine's RenderSaoCs. The game half runs first, on the game thread; the render half reads this, not the game.
+	* points read of the game, the shadow light set, and the first-person camera as the shift placed it. Values only, apart from the SAO
+	* helper, which only goes back to the engine's RenderSaoCs. The game half runs first, on the game thread; the render half reads this, not the game.
 	*/
 	struct Prepared
 	{
@@ -51,6 +57,8 @@ namespace RenderGraph::Engine::Native::Scene
 		bool dofCamera = false;
 		float dofNear = 0.0f;
 		float dofFar = 0.0f;
+		// The shadow casters' light set (phase 7 item 2): what the shadow maps, masks and lens flares draw from. Null without DCLF.
+		std::shared_ptr<const DCLF::Features::Shadows::Native::LightSet> shadowLights;
 		/** @brief The first-person camera (415007) between the shift and the shift back, and Main::DrawWorld's eye (415027). */
 		struct FirstPersonCamera
 		{
