@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 
 /**
 * @brief Native's world frame skeleton driven by CS (render-thread roadmap, phase 3, decision 70; notes in
@@ -38,6 +39,7 @@ namespace RenderGraph::Engine::Native::Scene
 		bool menuMode = false;       // UI +0x160 above 0: RenderWorld's and RenderFirstPersonView's first argument
 		// The clears before RenderWorld: the normals target's (c, c, 0, 0), kMAIN's colour, and whether improved snow clears its target.
 		float normalsClear = 0.0f;
+		std::int32_t normalsTarget = 4;  // the normals target this frame (WorldPass::NormalsTarget's rule)
 		std::array<float, 3> mainClear{};
 		bool snowClear = false;
 		// The end-of-frame ImageSpace runs (414573 and gEnableEOFImageSpace); the compute SAO's helper and flag; the screen splatter.
