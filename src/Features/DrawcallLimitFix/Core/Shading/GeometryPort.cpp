@@ -135,11 +135,11 @@ namespace DCLF::GeometryPort
 		       std::memcmp(worldMapPS, a_other.worldMapPS, sizeof(worldMapPS)) == 0;
 	}
 
-	PipelineFrame SamplePipelineFrame()
+	PipelineFrame SamplePipelineFrame(bool a_eyeZero)
 	{
 		// The sun: ShadowSceneNode[0]->sunLight. SetupGeometry reads it through BSLight+0x48.
 		auto* sceneNode = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState) ? CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)->shadowSceneNode[0] : nullptr;
-		return SamplePipelineFrame(sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr, false);
+		return SamplePipelineFrame(sceneNode ? sceneNode->GetRuntimeData().sunLight : nullptr, a_eyeZero);
 	}
 
 	PipelineFrame SamplePipelineFrame(const RE::BSLight* a_sun, bool a_eyeZero, const float* a_hdr)

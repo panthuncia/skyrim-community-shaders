@@ -2,6 +2,9 @@
 #include "Snapshot/CoreFrame.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
+#include "Snapshot/Publication.h"
+#include "RenderGraph/Engine/Native/RenderScene.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 
 #include "CSEditor/EditorWindow.h"
 #include "DrawcallLimitFix.h"
@@ -744,11 +747,98 @@ void LightLimitFix::ClearShaderCache()
 	clusterCullingCS = (ID3D11ComputeShader*)Util::CompileShader(L"Data\\Shaders\\LightLimitFix\\ClusterCullingCS.hlsl", clusterDefines, "cs_5_0");
 }
 
+void LightLimitFix::ReadLights(RE::ShadowSceneNode* a_node, std::vector<CapturedLight>& a_out)
+{
+	a_out.clear();
+	if (!a_node)
+		return;
+	auto add = [&](const RE::NiPointer<RE::BSLight>& e) {
+		auto* bsLight = e.get();
+		auto* niLight = bsLight ? bsLight->light.get() : nullptr;
+		if (!niLight || !IsValidLight(bsLight))
+			return;
+		auto& light = a_out.emplace_back();
+		light.light = bsLight;
+		light.data = ProcessLight(bsLight, niLight);
+		light.position = niLight->world.translate;
+		light.lodDimmer = bsLight->lodDimmer;
+		light.lightRadius = niLight->GetLightRuntimeData().radius.x;
+		light.global = IsGlobalLight(bsLight);
+		if (!light.global) {
+			for (const auto& roomPtr : bsLight->rooms)
+				if (roomPtr)
+					light.rooms.push_back(roomPtr);
+			for (const auto& portalPtr : bsLight->portals)
+				if (auto* node = portalPtr->portalSharedNode.get())
+					light.rooms.push_back(node);
+		}
+		if (bsLight->IsShadowLight()) {
+			auto* shadowLight = static_cast<RE::BSShadowLight*>(bsLight);
+			light.shadowLight = true;
+			light.frustum = shadowLight->GetIsFrustumLight();
+			light.maskIndex = GetShadowMaskIndex(shadowLight);
+			light.shadowMapRendered = IsShadowMapRendered(a_node, shadowLight);
+		}
+	};
+	for (auto& e : a_node->GetRuntimeData().activeLights)
+		add(e);
+	for (auto& e : a_node->GetRuntimeData().activeShadowLights)
+		add(e);
+}
+
+std::shared_ptr<const LightLimitFixLights> LightLimitFix::CaptureLights()
+{
+	const Snapshot::EngineReads::CaptureScope scope;
+	auto captured = std::make_shared<LightLimitFixLights>();
+	if (auto* smState = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState)) {
+		ReadLights(smState->shadowSceneNode[0], captured->lights);
+		if (localShadowHooksInstalled) {
+			captured->casterInputs = true;
+			ReadCasterInputs(smState->shadowSceneNode[0], captured->actors, captured->shadowLights);
+		}
+	}
+	return captured;
+}
+
+void LightLimitFix::ReadCasterInputs(RE::ShadowSceneNode* a_node, std::vector<CapturedActor>& a_actors, std::vector<CapturedShadowLight>& a_lights)
+{
+	a_actors.clear();
+	a_lights.clear();
+	auto addActor = [&](RE::Actor* a_actor) {
+		if (a_actor && a_actor->Get3D())
+			a_actors.push_back({ a_actor->GetPosition(), a_actor->GetFormID(), a_actor->IsDead() });
+	};
+	addActor(CS_ENGINE_READ(Player, CapturePoint, RE::PlayerCharacter::GetSingleton()));
+	if (auto processLists = CS_ENGINE_READ(Data, CapturePoint, RE::ProcessLists::GetSingleton())) {
+		for (auto& handle : processLists->highActorHandles) {
+			if (auto actor = handle.get())
+				addActor(actor.get());
+		}
+	}
+	if (!a_node)
+		return;
+	for (auto& entry : a_node->GetRuntimeData().activeShadowLights) {
+		auto* light = entry.get();
+		auto* niLight = light ? light->light.get() : nullptr;
+		if (!niLight)
+			continue;
+		a_lights.push_back({ niLight->world.rotate, niLight->world.translate, niLight->GetLightRuntimeData().radius.x, light, niLight,
+			niLight->GetFlags().any(RE::NiAVObject::Flag::kHidden) });
+	}
+}
+
 void LightLimitFix::UpdateLights()
 {
-	auto smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
-
-	auto shadowSceneNode = smState->shadowSceneNode[0];
+	// Native's render half: the lights its game half took. Otherwise (guest, a frame the engine's own skeleton draws) read now.
+	static std::vector<CapturedLight> readNow;
+	const std::vector<CapturedLight>* sceneLights = nullptr;
+	if (const auto& prepared = RenderGraph::Engine::Native::Scene::Current(); prepared.valid && prepared.pointLights)
+		sceneLights = &prepared.pointLights->lights;
+	else {
+		auto smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
+		ReadLights(smState->shadowSceneNode[0], readNow);
+		sceneLights = &readNow;
+	}
 
 	// Cache camera position from the FrameBuffer snapshot; shadowState::posAdjust can be stale in first-person
 
@@ -779,76 +869,61 @@ void LightLimitFix::UpdateLights()
 		currentLightRooms.push_back(node);
 	};
 
-	auto addLight = [&](const RE::NiPointer<RE::BSLight>& e) {
+	auto addLight = [&](const CapturedLight& a_captured) {
 		currentLightRooms.clear();
-		if (auto bsLight = e.get()) {
-			if (auto niLight = bsLight->light.get()) {
-				if (IsValidLight(bsLight)) {
-					auto light = ProcessLight(bsLight, niLight);
+		auto light = a_captured.data;
 
-					light.lightFlags.reset(LightFlags::Shadow, LightFlags::ShadowCaster, LightFlags::LocalShadow);
-					// A shadow light's lodDimmer is zeroed past the shadow distance, which would drop demoted lights; use the light LOD fade instead.
-					if (bsLight->IsShadowLight() && IsLocalShadowCacheActive()) {
-						const float radius = niLight->GetLightRuntimeData().radius.x;
-						light.fade *= GetLightLODDimmer(niLight->world.translate.GetSquaredDistance(eyePositionCached) - radius * radius);
-					} else {
-						light.fade *= bsLight->lodDimmer;
-					}
+		light.lightFlags.reset(LightFlags::Shadow, LightFlags::ShadowCaster, LightFlags::LocalShadow);
+		// A shadow light's lodDimmer is zeroed past the shadow distance, which would drop demoted lights; use the light LOD fade instead.
+		if (a_captured.shadowLight && IsLocalShadowCacheActive()) {
+			const float radius = a_captured.lightRadius;
+			light.fade *= GetLightLODDimmer(a_captured.position.GetSquaredDistance(eyePositionCached) - radius * radius);
+		} else {
+			light.fade *= a_captured.lodDimmer;
+		}
 
-					auto& effects11 = globals::features::effects11;
-					if (effects11.enableEffect)
-						effects11.OverridePointLightColor(light.color);
+		auto& effects11 = globals::features::effects11;
+		if (effects11.enableEffect)
+			effects11.OverridePointLightColor(light.color);
 
-					if (!IsGlobalLight(bsLight)) {
-						// List of BSMultiBoundRooms affected by a light
-						for (const auto& roomPtr : bsLight->rooms) {
-							addRoom(roomPtr);
-						}
-						// List of BSPortals affected by a light
-						for (const auto& portalPtr : bsLight->portals) {
-							addRoom(portalPtr->portalSharedNode.get());
-						}
-						light.lightFlags.set(LightFlags::PortalStrict);
-					}
+		if (!a_captured.global) {
+			// The BSMultiBoundRooms and BSPortals the light reaches
+			for (auto* room : a_captured.rooms)
+				addRoom(room);
+			light.lightFlags.set(LightFlags::PortalStrict);
+		}
 
-					if (bsLight->IsShadowLight()) {
-						auto* shadowLight = static_cast<RE::BSShadowLight*>(bsLight);
-						light.lightFlags.set(LightFlags::ShadowCaster);
-						if (!IsLocalShadowCacheActive()) {
-							TryAssignShadowMask(light, shadowLight);
-						} else if (const auto* caster = FindLocalShadowCaster(shadowLight); caster && caster->slice >= 0 && caster->lastRenderedFrame != 0) {
-							light.localShadowIndex = static_cast<uint32_t>(caster->slice);
-							light.lightFlags.set(LightFlags::LocalShadow);
-							// Shadowless spots were dropped, so they fade in whole; other casters fade in their shadow instead.
-							if (shadowLight->GetIsFrustumLight())
-								light.fade *= GetLocalShadowFadeIn(*caster, localShadowFrame);
-						} else if (IsShadowMapRendered(shadowSceneNode, shadowLight)) {
-							// Lights without a cached slice (cache full or not yet copied) fall back to the engine shadow mask.
-							TryAssignShadowMask(light, shadowLight);
-						}
-						// Shadowless spots would light their whole radius, so drop them; with the cache, other casters render unshadowed.
-						if (light.lightFlags.none(LightFlags::LocalShadow, LightFlags::Shadow) && (!IsLocalShadowCacheActive() || shadowLight->GetIsFrustumLight()))
-							return;
-					}
-
-					SetLightPosition(light, niLight->world.translate);
-
-					if ((light.color.x + light.color.y + light.color.z) * light.fade > 1e-4 && light.radius > 1e-4) {
-						for (auto* room : currentLightRooms)
-							lightRooms.push_back({ static_cast<uint32_t>(lightsData.size()), room });
-						lightsData.push_back(light);
-					}
-				}
+		if (a_captured.shadowLight) {
+			auto* shadowLight = static_cast<RE::BSShadowLight*>(a_captured.light);
+			light.lightFlags.set(LightFlags::ShadowCaster);
+			if (!IsLocalShadowCacheActive()) {
+				AssignShadowMask(light, a_captured.maskIndex);
+			} else if (const auto* caster = FindLocalShadowCaster(shadowLight); caster && caster->slice >= 0 && caster->lastRenderedFrame != 0) {
+				light.localShadowIndex = static_cast<uint32_t>(caster->slice);
+				light.lightFlags.set(LightFlags::LocalShadow);
+				// Shadowless spots were dropped, so they fade in whole; other casters fade in their shadow instead.
+				if (a_captured.frustum)
+					light.fade *= GetLocalShadowFadeIn(*caster, localShadowFrame);
+			} else if (a_captured.shadowMapRendered) {
+				// Lights without a cached slice (cache full or not yet copied) fall back to the engine shadow mask.
+				AssignShadowMask(light, a_captured.maskIndex);
 			}
+			// Shadowless spots would light their whole radius, so drop them; with the cache, other casters render unshadowed.
+			if (light.lightFlags.none(LightFlags::LocalShadow, LightFlags::Shadow) && (!IsLocalShadowCacheActive() || a_captured.frustum))
+				return;
+		}
+
+		SetLightPosition(light, a_captured.position);
+
+		if ((light.color.x + light.color.y + light.color.z) * light.fade > 1e-4 && light.radius > 1e-4) {
+			for (auto* room : currentLightRooms)
+				lightRooms.push_back({ static_cast<uint32_t>(lightsData.size()), room });
+			lightsData.push_back(light);
 		}
 	};
 
-	for (auto& e : shadowSceneNode->GetRuntimeData().activeLights) {
-		addLight(e);
-	}
-	for (auto& e : shadowSceneNode->GetRuntimeData().activeShadowLights) {
-		addLight(e);
-	}
+	for (const auto& captured : *sceneLights)
+		addLight(captured);
 	// A room keeps its number while any light reaches it. DCLF's objects carry the number from its copy of this map, which reaches
 	// their draws a few frames late: a renumbered room would gate them as another room until then. A newly reached room takes the
 	// lowest free number. The shader's room flags hold 128 rooms: a room past them has no number, and its objects are not gated (-1).
@@ -1408,6 +1483,10 @@ namespace
 		int32_t renderTarget = -1;
 		float biasScale = 0.0f;
 		DirectX::XMFLOAT4X4 lightTransform{};
+		bool parabolic = false;
+		bool frustum = false;
+		uint32_t maps = 0;         // shadowMapCount
+		float spotFalloff = 0.0f;  // a frustum light's falloff
 	};
 
 	/** @brief Typeless parent of a cache format, which is always R16_UNORM or R32_FLOAT. */
@@ -1429,6 +1508,31 @@ namespace
 		a_info.biasScale = runtimeData.shadowBiasScale;
 		static_assert(sizeof(a_info.lightTransform) == sizeof(descriptor.lightTransform));
 		std::memcpy(&a_info.lightTransform, &descriptor.lightTransform, sizeof(a_info.lightTransform));
+		a_info.parabolic = a_light->GetIsParabolicLight();
+		a_info.frustum = a_light->GetIsFrustumLight();
+		a_info.maps = a_light->shadowMapCount;
+		if (a_info.frustum)
+			a_info.spotFalloff = static_cast<RE::BSShadowFrustumLight*>(a_light)->GetShadowFrustumLightRuntimeData().falloff;
+		return true;
+	}
+
+	/** @brief The same from the casters' light set (native's render side). */
+	bool ReadLocalShadowRenderInfo(const DCLF::Features::Shadows::Native::ShadowLight& a_light, LocalShadowRenderInfo& a_info)
+	{
+		using DCLF::Features::Shadows::Native::LightKind;
+		if (a_light.descriptors.empty())
+			return false;
+		const auto& descriptor = a_light.descriptors[0];
+		a_info.engineSlice = descriptor.slice;
+		a_info.renderTarget = descriptor.target;
+		a_info.maskIndex = a_light.maskIndex;
+		a_info.biasScale = a_light.biasScale;
+		static_assert(sizeof(a_info.lightTransform) == sizeof(descriptor.lightTransform));
+		std::memcpy(&a_info.lightTransform, descriptor.lightTransform.data(), sizeof(a_info.lightTransform));
+		a_info.parabolic = a_light.kind == LightKind::Parabolic;
+		a_info.frustum = a_light.kind == LightKind::Frustum;
+		a_info.maps = a_light.maps;
+		a_info.spotFalloff = a_light.spotFalloff;
 		return true;
 	}
 }
@@ -1459,9 +1563,13 @@ bool LightLimitFix::IsShadowMapRendered(RE::ShadowSceneNode* a_shadowSceneNode, 
 
 void LightLimitFix::TryAssignShadowMask(LightData& a_light, RE::BSShadowLight* a_shadowLight)
 {
-	const auto maskIndex = GetShadowMaskIndex(a_shadowLight);
-	if (maskIndex < SHADOW_MASK_CHANNEL_COUNT) {
-		a_light.shadowMaskIndex = maskIndex;
+	AssignShadowMask(a_light, GetShadowMaskIndex(a_shadowLight));
+}
+
+void LightLimitFix::AssignShadowMask(LightData& a_light, uint32_t a_maskIndex)
+{
+	if (a_maskIndex < SHADOW_MASK_CHANNEL_COUNT) {
+		a_light.shadowMaskIndex = a_maskIndex;
 		a_light.lightFlags.set(LightFlags::Shadow);
 	}
 }
@@ -1489,12 +1597,36 @@ bool LightLimitFix::TrackLocalShadowCasters()
 	if (!IsLocalShadowCacheActive())
 		return false;
 
-	auto smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
-	if (!smState)
-		return false;
-	auto shadowSceneNode = smState->shadowSceneNode[0];
-	if (!shadowSceneNode)
-		return false;
+	// Native's render half: the inputs its game half took, with the snapshot's camera. Otherwise read now.
+	static std::vector<CapturedActor> actorsNow;
+	static std::vector<CapturedShadowLight> lightsNow;
+	const std::vector<CapturedActor>* actors = &actorsNow;
+	const std::vector<CapturedShadowLight>* shadowLights = &lightsNow;
+	bool hasCamera = false;
+	RE::NiTransform cameraWorld;
+	RE::NiFrustum cameraFrustum;
+	if (const auto& prepared = RenderGraph::Engine::Native::Scene::Current(); prepared.valid && prepared.pointLights && prepared.pointLights->casterInputs) {
+		actors = &prepared.pointLights->actors;
+		shadowLights = &prepared.pointLights->shadowLights;
+		const auto& snapshot = Snapshot::Current();
+		if (const auto* view = snapshot ? &snapshot->cameras.Current(Snapshot::ViewId::Main) : nullptr; view && view->valid) {
+			hasCamera = true;
+			cameraWorld.rotate = view->rotation;
+			cameraWorld.translate = view->position;
+			cameraWorld.scale = 1.0f;
+			cameraFrustum = view->frustum;
+		}
+	} else {
+		auto smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
+		if (!smState || !smState->shadowSceneNode[0])
+			return false;
+		ReadCasterInputs(smState->shadowSceneNode[0], actorsNow, lightsNow);
+		if (const auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera())) {
+			hasCamera = true;
+			cameraWorld = camera->world;
+			cameraFrustum = camera->GetRuntimeData2().viewFrustum;
+		}
+	}
 
 	ZoneScoped;
 
@@ -1508,43 +1640,27 @@ bool LightLimitFix::TrackLocalShadowCasters()
 
 	localShadowActors.clear();
 	localShadowActorHistoryNext.clear();
-	auto addActor = [&](RE::Actor* a_actor) {
-		if (!a_actor || !a_actor->Get3D())
-			return;
-		const auto formID = a_actor->GetFormID();
-		const auto position = a_actor->GetPosition();
+	for (const auto& actor : *actors) {
 		float speed = 0.0f;
-		if (auto it = localShadowActorHistory.find(formID); it != localShadowActorHistory.end())
-			speed = std::min(it->second.GetDistance(position), LOCAL_SHADOW_ACTOR_MAX_SPEED);
-		localShadowActorHistoryNext.insert_or_assign(formID, position);
-		if (a_actor->IsDead() && speed < LOCAL_SHADOW_ACTOR_REST_SPEED)
-			return;
-		localShadowActors.push_back({ position, speed });
-	};
-	addActor(CS_ENGINE_READ(Player, RecordTime, RE::PlayerCharacter::GetSingleton()));
-	if (auto processLists = CS_ENGINE_READ(Data, RecordTime, RE::ProcessLists::GetSingleton())) {
-		for (auto& handle : processLists->highActorHandles) {
-			if (auto actor = handle.get())
-				addActor(actor.get());
-		}
+		if (auto it = localShadowActorHistory.find(actor.formID); it != localShadowActorHistory.end())
+			speed = std::min(it->second.GetDistance(actor.position), LOCAL_SHADOW_ACTOR_MAX_SPEED);
+		localShadowActorHistoryNext.insert_or_assign(actor.formID, actor.position);
+		if (actor.dead && speed < LOCAL_SHADOW_ACTOR_REST_SPEED)
+			continue;
+		localShadowActors.push_back({ actor.position, speed });
 	}
 	std::swap(localShadowActorHistory, localShadowActorHistoryNext);
 
-	const auto* camera = CS_ENGINE_READ(Camera, RecordTime, RE::Main::WorldRootCamera());
 	RE::NiFrustumPlanes viewFrustum{};
-	if (camera)
-		Util::ComputeFrustumPlanes(viewFrustum, camera->GetRuntimeData2().viewFrustum, camera->world);
+	if (hasCamera)
+		Util::ComputeFrustumPlanes(viewFrustum, cameraFrustum, cameraWorld);
 	// The rotation takes the camera from UpdateCamera, which no hook sees while the cache follows Drawcall Limit Fix.
-	if (camera && localShadowFollowsDCLF)
-		localShadowCameraPosition = camera->world.translate;
+	if (hasCamera && localShadowFollowsDCLF)
+		localShadowCameraPosition = cameraWorld.translate;
 
-	for (auto& entry : shadowSceneNode->GetRuntimeData().activeShadowLights) {
-		auto light = entry.get();
-		if (!light)
-			continue;
-		auto niLight = light->light.get();
-		if (!niLight)
-			continue;
+	for (const auto& entry : *shadowLights) {
+		auto* light = entry.light;
+		auto* niLight = entry.niLight;
 
 		LocalShadowCaster* caster = FindLocalShadowCaster(light);
 		if (!caster) {
@@ -1553,9 +1669,9 @@ bool LightLimitFix::TrackLocalShadowCasters()
 			caster->light = light;
 		}
 
-		const float teleportDistance = std::max(LOCAL_SHADOW_TELEPORT_DISTANCE, niLight->GetLightRuntimeData().radius.x * LOCAL_SHADOW_TELEPORT_RADIUS_FRACTION);
+		const float teleportDistance = std::max(LOCAL_SHADOW_TELEPORT_DISTANCE, entry.radius * LOCAL_SHADOW_TELEPORT_RADIUS_FRACTION);
 		const bool teleported = caster->lastRenderedFrame != 0 &&
-		                        caster->renderedPosition.GetSquaredDistance(niLight->world.translate) > teleportDistance * teleportDistance;
+		                        caster->renderedPosition.GetSquaredDistance(entry.position) > teleportDistance * teleportDistance;
 		if (caster->niLight != niLight || teleported) {
 			const int32_t slice = caster->slice;
 			*caster = LocalShadowCaster{};
@@ -1565,11 +1681,11 @@ bool LightLimitFix::TrackLocalShadowCasters()
 		caster->niLight = niLight;
 
 		caster->lastSeenFrame = frame;
-		caster->position = niLight->world.translate;
-		caster->rotation = niLight->world.rotate;
-		caster->radius = niLight->GetLightRuntimeData().radius.x;
-		caster->hidden = niLight->GetFlags().any(RE::NiAVObject::Flag::kHidden);
-		if (!camera || Util::IsSphereInFrustum(viewFrustum, caster->position, caster->radius))
+		caster->position = entry.position;
+		caster->rotation = entry.rotation;
+		caster->radius = entry.radius;
+		caster->hidden = entry.hidden;
+		if (!hasCamera || Util::IsSphereInFrustum(viewFrustum, caster->position, caster->radius))
 			caster->lastOnScreenFrame = frame;
 
 		caster->dynamic = false;
@@ -1994,12 +2110,12 @@ void LightLimitFix::CopyLocalShadowMaps()
 	localShadowStatRendered = 0;
 	localShadowStatCached = 0;
 
-	auto smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
+	// Native's render side reads the casters' light set; the engine's lights are read otherwise.
+	const auto* lightSet = DCLF::Features::Shadows::Native::RenderSet();
 	auto renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
-	if (!smState || !renderer)
-		return;
-	auto shadowSceneNode = smState->shadowSceneNode[0];
-	if (!shadowSceneNode)
+	auto* smState = lightSet ? nullptr : CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
+	auto* shadowSceneNode = smState ? smState->shadowSceneNode[0] : nullptr;
+	if (!renderer || (!lightSet && !shadowSceneNode))
 		return;
 
 	auto& depthStencil = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS];
@@ -2020,8 +2136,6 @@ void LightLimitFix::CopyLocalShadowMaps()
 	localShadowFrameCopies.clear();
 
 	const uint32_t frame = localShadowFrame;
-	auto& runtimeData = shadowSceneNode->GetRuntimeData();
-	auto* sunLight = static_cast<RE::BSShadowLight*>(runtimeData.sunShadowDirLight);
 	const uint32_t scale = std::max(localShadowEngineResolution / localShadowCacheResolution, 1u);
 	assert(std::has_single_bit(scale));
 
@@ -2050,7 +2164,9 @@ void LightLimitFix::CopyLocalShadowMaps()
 	if (localShadowFollowsDCLF) {
 		for (const auto& view : localShadowDrawnViews)
 			drawn.push_back({ view.light, &view });
-	} else {
+	} else if (shadowSceneNode) {
+		auto& runtimeData = shadowSceneNode->GetRuntimeData();
+		auto* sunLight = static_cast<RE::BSShadowLight*>(runtimeData.sunShadowDirLight);
 		for (auto& entry : runtimeData.activeShadowLights) {
 			auto* light = entry.get();
 			if (light && light != sunLight && IsShadowMapRendered(shadowSceneNode, light))
@@ -2066,7 +2182,11 @@ void LightLimitFix::CopyLocalShadowMaps()
 
 		// The projection and bias are the light's own. DCLF draws its views with the engine's camera, into the slice it names.
 		LocalShadowRenderInfo info{};
-		if (!ReadLocalShadowRenderInfo(light, info))
+		if (lightSet) {
+			const auto* captured = lightSet->Find(light);
+			if (!captured || !ReadLocalShadowRenderInfo(*captured, info))
+				continue;
+		} else if (!ReadLocalShadowRenderInfo(light, info))
 			continue;
 		if (entry.view) {
 			info.renderTarget = static_cast<int32_t>(entry.view->target);
@@ -2083,7 +2203,7 @@ void LightLimitFix::CopyLocalShadowMaps()
 			continue;
 		}
 		if (loggedMapping.First())
-			logger::info("[LLF] Local shadow slice mapping: shadowmapIndex {}, maskIndex {}, renderTarget {}, parabolic {}, shadowMapCount {}", info.engineSlice, info.maskIndex, info.renderTarget, light->GetIsParabolicLight(), light->shadowMapCount);
+			logger::info("[LLF] Local shadow slice mapping: shadowmapIndex {}, maskIndex {}, renderTarget {}, parabolic {}, shadowMapCount {}", info.engineSlice, info.maskIndex, info.renderTarget, info.parabolic, info.maps);
 
 		sliceClaims[info.engineSlice]++;
 		pending.push_back({ light, caster, info });
@@ -2116,12 +2236,11 @@ void LightLimitFix::CopyLocalShadowMaps()
 
 		uint32_t type = LOCAL_SHADOW_TYPE_SPOT;
 		float spotFalloff = LOCAL_SHADOW_DEFAULT_SPOT_FALLOFF;
-		if (light->GetIsParabolicLight()) {
-			type = light->shadowMapCount == 2 ? LOCAL_SHADOW_TYPE_OMNI : LOCAL_SHADOW_TYPE_HEMISPHERE;
-		} else if (light->GetIsFrustumLight()) {
-			const float falloff = static_cast<RE::BSShadowFrustumLight*>(light)->GetShadowFrustumLightRuntimeData().falloff;
-			if (std::isfinite(falloff) && falloff > 0.0f)
-				spotFalloff = falloff;
+		if (info.parabolic) {
+			type = info.maps == 2 ? LOCAL_SHADOW_TYPE_OMNI : LOCAL_SHADOW_TYPE_HEMISPHERE;
+		} else if (info.frustum) {
+			if (std::isfinite(info.spotFalloff) && info.spotFalloff > 0.0f)
+				spotFalloff = info.spotFalloff;
 		}
 
 		const float biasTexelScale = static_cast<float>(scale);
@@ -2149,7 +2268,12 @@ void LightLimitFix::CopyLocalShadowMaps()
 	}
 
 	const auto& eye = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
-	const float frameTime = CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime) ? std::clamp(*CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime), 0.0f, LOCAL_SHADOW_MAX_FRAME_TIME) : 0.0f;
+	// The update's seconds: native's from the adopted snapshot, guest's read now.
+	float frameTime = 0.0f;
+	if (const auto& snapshot = Snapshot::Current(); lightSet && snapshot)
+		frameTime = std::clamp(snapshot->gameDelta, 0.0f, LOCAL_SHADOW_MAX_FRAME_TIME);
+	else if (const auto* delta = CS_ENGINE_READ(Timer, RecordTime, globals::game::deltaTime))
+		frameTime = std::clamp(*delta, 0.0f, LOCAL_SHADOW_MAX_FRAME_TIME);
 	// Unwritten slots are zero; no light flagged LocalShadow points at them.
 	localShadowFrameData.assign(localShadowCacheSlots, LocalShadowData{});
 	for (auto& caster : localShadowCasters) {

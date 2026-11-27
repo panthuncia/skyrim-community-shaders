@@ -4,6 +4,11 @@
 #include "OverlayFeature.h"
 #include "Utils/Setting.h"
 
+#include <memory>
+#include <vector>
+
+struct LightLimitFixLights;
+
 struct LightLimitFix : OverlayFeature
 {
 	static constexpr uint MAX_LIGHTS = 1024;
@@ -109,6 +114,49 @@ public:
 		uint pad1;
 	};
 	STATIC_ASSERT_ALIGNAS_16(LightData);
+
+	/**
+	* @brief A scene light as UpdateLights takes it of the engine: ProcessLight's values, the NiLight's position and radius, the BSLight's
+	* fade, flags and rooms, and a shadow light's mask channel. Native's game half takes the list (CaptureLights) after the queued lights
+	* and the shadow casters; the render half reads only it. Lights and rooms are keys, never read through on the render side.
+	*/
+	struct CapturedLight
+	{
+		// LightData first and the rest in 64 bytes: no padding for its alignment (C4324).
+		LightData data{};
+		RE::BSLight* light = nullptr;
+		RE::NiPoint3 position{};
+		float lodDimmer = 0.0f;
+		float lightRadius = 0.0f;  // NiLight radius.x
+		uint32_t maskIndex = 0;    // GetShadowMaskIndex
+		bool global = false;       // IsGlobalLight: no rooms
+		bool shadowLight = false;
+		bool frustum = false;
+		bool shadowMapRendered = false;  // IsShadowMapRendered
+		std::vector<RE::NiNode*> rooms;  // the rooms and portal nodes the light reaches
+	};
+
+	/** @brief An actor the local shadow cache's caster tracking weighs lights by: the player or a high process actor with 3D. */
+	struct CapturedActor
+	{
+		RE::NiPoint3 position{};
+		RE::FormID formID = 0;
+		bool dead = false;
+	};
+
+	/** @brief An active shadow light as the caster tracking reads it: its NiLight's placement, radius and hidden bit. Keys only. */
+	struct CapturedShadowLight
+	{
+		RE::NiMatrix3 rotation{};
+		RE::NiPoint3 position{};
+		float radius = 0.0f;
+		RE::BSShadowLight* light = nullptr;
+		RE::NiLight* niLight = nullptr;
+		bool hidden = false;
+	};
+
+	/** @brief Game side, native: the scene's lights for this update's render half (the driver's Prepared). */
+	std::shared_ptr<const LightLimitFixLights> CaptureLights();
 
 	static constexpr uint32_t SHADOW_MASK_CHANNEL_COUNT = 4;
 	static constexpr uint32_t NO_SHADOW_MASK_INDEX = 255;
@@ -363,6 +411,10 @@ public:
 	void SetLightPosition(LightLimitFix::LightData& a_light, RE::NiPoint3 a_initialPosition, bool a_cached = true);
 	/** @brief Gathers all active scene lights and uploads them to the GPU light buffer. */
 	void UpdateLights();
+	/** @brief The active lights of a_node as CapturedLights, read now (the capture, or guest's frame). */
+	void ReadLights(RE::ShadowSceneNode* a_node, std::vector<CapturedLight>& a_out);
+	/** @brief The caster tracking's inputs, read now (the capture, or guest's frame): the actors and a_node's active shadow lights. */
+	static void ReadCasterInputs(RE::ShadowSceneNode* a_node, std::vector<CapturedActor>& a_actors, std::vector<CapturedShadowLight>& a_lights);
 	/** @brief Rebuilds the light cluster structure and performs GPU light culling. */
 	void UpdateStructure();
 	/** @brief Runs the light update and binds clustered light SRVs for the frame. */
@@ -527,6 +579,8 @@ public:
 	LocalShadowCaster* FindLocalShadowCaster(RE::BSShadowLight* a_light);
 	/** @brief Flags a light as an engine shadow-mask light only when it owns one of the four mask channels. */
 	static void TryAssignShadowMask(LightData& a_light, RE::BSShadowLight* a_shadowLight);
+	/** @brief TryAssignShadowMask with the channel already read. */
+	static void AssignShadowMask(LightData& a_light, uint32_t a_maskIndex);
 	/** @brief Returns the shadow mask channel of a light, or NO_SHADOW_MASK_INDEX when it has none. */
 	static uint32_t GetShadowMaskIndex(RE::BSShadowLight* a_shadowLight);
 	/** @brief True when the engine rendered this light's shadow map this frame; maskIndex alone goes stale once a light is removed. */
@@ -750,6 +804,16 @@ private:
 
 	VertexColorCacheEntry GetParticleLightConfig(RE::BSRenderPass* a_pass);
 	bool QueueParticleLight(RE::BSRenderPass* a_pass, VertexColorCacheEntry& a_reference);
+};
+
+/** @brief LightLimitFix::CaptureLights' list. Forward-declared by the native driver, which hands it from its game half to its render half. */
+struct LightLimitFixLights
+{
+	std::vector<LightLimitFix::CapturedLight> lights;
+	// The local shadow cache's caster tracking inputs, taken while its hooks are installed.
+	bool casterInputs = false;
+	std::vector<LightLimitFix::CapturedActor> actors;
+	std::vector<LightLimitFix::CapturedShadowLight> shadowLights;
 };
 
 template <>

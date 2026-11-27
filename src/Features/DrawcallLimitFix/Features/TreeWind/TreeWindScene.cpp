@@ -10,11 +10,14 @@
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Uploads.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Versioned.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBufferSet.h"
+#include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/SetupPrograms.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdint>
 #include <memory>
 
@@ -39,8 +42,13 @@ namespace DCLF::Features::TreeWind
 			return *reinterpret_cast<const float*>(a_at.address());
 		}
 
-		/** @brief The frame's tree clock inputs. Render thread, any time after Main::Update. */
-		TreeWindFrame SampleTreeWindFrame()
+		// The frame's tree clock inputs in the frame's globals, which DCLF's frame start takes on the game side.
+		constexpr std::uint32_t kFrameFloats = sizeof(TreeWindFrame) / sizeof(float);
+		static_assert(sizeof(TreeWindFrame) == kFrameFloats * sizeof(float));
+		Api::FrameGlobalsSlot frameSlot;  // install
+
+		/** @brief The tree clock inputs, game side (after Main::Update). */
+		TreeWindFrame CaptureTreeWindFrame()
 		{
 			TreeWindFrame frame;
 			frame.deltaTime = GlobalFloat(frameSeconds);
@@ -57,6 +65,24 @@ namespace DCLF::Features::TreeWind
 			frame.fadeStart = GlobalFloat(treeWindFadeStart);
 			frame.fadeEnd = GlobalFloat(treeWindFadeEnd);
 			frame.timerScale = GlobalFloat(treeWindTimerScale);
+			return frame;
+		}
+
+		void CaptureFrameGlobals(float* a_out)
+		{
+			const auto frame = CaptureTreeWindFrame();
+			std::memcpy(a_out, &frame, sizeof(frame));
+		}
+
+		/** @brief The tree clock inputs as the frame's ticket took them. A repeated snapshot's render steps no time: the clocks move once per update. */
+		TreeWindFrame SampleTreeWindFrame()
+		{
+			TreeWindFrame frame;
+			if (!frameSlot)
+				return frame;
+			std::memcpy(&frame, &FrameGlobals::Current().features[frameSlot.first], sizeof(frame));
+			if (Snapshot::Render().repeat)
+				frame.deltaTime = 0.0f;
 			return frame;
 		}
 
@@ -163,6 +189,7 @@ namespace DCLF::Features::TreeWind
 
 	void RegisterScene(Api::InstallContext& a_context)
 	{
+		frameSlot = a_context.RegisterFrameGlobals({ .name = "tree-wind-frame", .floats = kFrameFloats, .capture = &CaptureFrameGlobals });
 		sceneId = a_context.RegisterSceneResources({ .name = "tree-wind", .setup = &Setup, .registerGraph = &RegisterGraph, .require = &Require, .fit = &Fit });
 		a_context.RegisterCommitHook({ .name = "tree-wind", .commit = &Commit });
 		a_context.RegisterFrameBinding({ .name = "tree wind SRV", .textureRegister = kWindRegister, .select = &SelectWind });

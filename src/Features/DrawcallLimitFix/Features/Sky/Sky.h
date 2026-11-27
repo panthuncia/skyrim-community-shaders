@@ -208,9 +208,10 @@ namespace DCLF::Features::Sky
 
 	/**
 	 * @brief Native, render thread: Main::RenderWorld's sun occlusion draw (the engine's Sun::SubmitOcclusionQuery(1, ...)) into CS's own
-	 * query slot, tagged a_tag (the snapshot id). Skipped while the last answer has not reached the game side.
+	 * query slot, tagged a_tag (the snapshot id). Skipped while the last answer has not reached the game side. The world camera's data is
+	 * already the frame's (inside RenderWorld), so no camera is set.
 	 */
-	void SubmitSunQuery(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, RE::NiCamera* a_camera, std::uint64_t a_tag);
+	void SubmitSunQuery(RE::BSShaderAccumulator* a_accumulator, RE::BSGeometry* a_geometry, std::uint64_t a_tag);
 
 	/** @brief Registers the sun query's capture. */
 	void InstallSunQuery();

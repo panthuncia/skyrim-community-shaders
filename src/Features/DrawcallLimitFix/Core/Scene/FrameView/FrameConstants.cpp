@@ -26,9 +26,11 @@ namespace DCLF::Scene
 		NoteProjectedTextures();
 		if (!EngineShaders::Lighting())
 			return;
-		// Sampled here because only from Prepass is the eye the main camera's. At EarlyPrepass it is still the shadow-map camera's.
+		// Native: the frame start's game half took it (its eye is zero at native's Prepass, inside RenderWorld). Guest samples it here
+		// because only from Prepass is the eye the main camera's; at EarlyPrepass it is still the shadow-map camera's.
 		// A sample without a sun makes nothing and is not kept.
-		const GeometryPort::PipelineFrame portFrame = GeometryPort::SamplePipelineFrame();
+		const auto& taken = FrameGlobals::Current().pipeline;
+		const GeometryPort::PipelineFrame portFrame = taken ? *taken : GeometryPort::SamplePipelineFrame(false);
 		++geometryStats.samples;
 		const bool pipelineInputsMoved = portFrame.sun && (!geometryPortFrame || !portFrame.SamePipelineInputs(*geometryPortFrame));
 		if (portFrame.sun) {

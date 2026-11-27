@@ -21,7 +21,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Draws.h"
-#include "Snapshot/EngineReads.h"
+#include "Snapshot/Publication.h"
 
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
@@ -396,9 +396,9 @@ namespace DCLF
 			sunCascades.clear();
 			Api::SunCascadeSink cascadeSink(sunCascades);
 			Extensions::SampleSunCascades(cascadeSink);
-			// Frames with no cascades draw sun-lit passes unshadowed. That is only right in interiors.
-			const auto* tes = CS_ENGINE_READ(TES, RecordTime, RE::TES::GetSingleton());
-			sunTestEmpty += sunCascades.empty() && !(tes && tes->interiorCell) ? 1 : 0;
+			// Frames with no cascades draw sun-lit passes unshadowed. That is only right in interiors (the adopted snapshot's cell).
+			const auto& snapshot = Snapshot::Current();
+			sunTestEmpty += sunCascades.empty() && !(snapshot && snapshot->interior) ? 1 : 0;
 			if (sunTestWindow.Tick())
 				Reports::ColourSunTestLine(std::exchange(sunTestEmpty, 0));
 			// The list stays whole as the build parity's reference. The latch takes the clamped count.

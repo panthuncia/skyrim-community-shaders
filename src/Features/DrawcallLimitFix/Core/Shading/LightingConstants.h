@@ -157,7 +157,9 @@ namespace DCLF
 	};
 	static_assert(sizeof(ExtrasFrame) == 96);
 	inline constexpr std::size_t kExtrasFrameVertexBytes = offsetof(ExtrasFrame, projectedGlobals);
-	/** @brief Render thread. This frame's inputs from the engine's globals. */
+	/** @brief Game side, FrameGlobals::Capture: ExtrasFrame's inputs from the engine's globals (the land blend position, ProjectedUVParams3). */
+	void CaptureExtrasInputs(std::array<float, 2>& a_landBlend, std::array<float, 4>& a_projectedGlobals);
+	/** @brief Render thread. This frame's ExtrasFrame: the frame globals' inputs and the projection at the frame's eye. */
 	ExtrasFrame SampleExtrasFrame();
 	/**
 	 * @brief How TextureProj is made: World x projection, the projection alone for Envmap, or the shape's own materialProjection.

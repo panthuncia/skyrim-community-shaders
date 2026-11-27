@@ -1,5 +1,6 @@
 // Grass's GPU tables and programs, and the depth commit hook that uploads the mirror's changes and the per-frame draw row into them.
-// The draw row also carries the engine's per-frame grass values (wind, sun, fade), read where BSGrassShader reads them.
+// The draw row also carries the engine's per-frame grass values (wind, sun, fade, the camera), which DCLF's frame start takes on the
+// game side into the frame's globals; the commit reads them from there.
 
 // Helpers.h first. volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -12,6 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
+#include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Uploads.h"
@@ -50,44 +52,88 @@ namespace DCLF::Features::Grass
 
 		constexpr std::uint32_t kInitialInstances = 256 * 1024, kInitialShapes = 4096, kInitialMeshes = 256;
 
-		// The values below are reverse-engineered from BSGrassShader::SetupGeometry and SetupTechnique.
-		// The shader multiplies this by the shape's wave period. Timer at 0x142033090, scaled to 1/600 of a turn as the engine does.
-		float WindTimeBase()
+		// The engine's per-frame grass values in the frame's globals (game side, DCLF's frame start). The values are reverse-engineered
+		// from BSGrassShader::SetupGeometry and SetupTechnique.
+		enum GameValue : std::uint32_t
 		{
-			return Engine::Global<float>(Address::kWindTimer) * (1.0f / 600.0f) * 6.28318f;
+			kWindTimer,     // the timer at 0x142033090
+			kWindStrength,  // the grass wind clamped to 60, times fWindGrassMultiplier:Display
+			kShadowClamp,   // the sun's direction .w
+			kFogNearW,      // the sun's colour .w
+			kSun,           // 1 with ShadowSceneNode 0's sun light, then its direction (negated), diffuse and ambient
+			kSunDirection,
+			kSunDiffuse = kSunDirection + 3,
+			kSunAmbient = kSunDiffuse + 3,
+			kCamera = kSunAmbient + 3,  // 1 with the world camera, then its position and its frustum's top
+			kCameraPosition,
+			kCameraTop = kCameraPosition + 3,
+			kAlphaParams,  // two floats
+			kGameValues = kAlphaParams + 2,
+		};
+		Api::FrameGlobalsSlot gameSlot;  // install
+
+		void CaptureGameValues(float* a_out)
+		{
+			a_out[kWindTimer] = Engine::Global<float>(Address::kWindTimer);
+			a_out[kWindStrength] = std::min(Engine::Global<float>(Address::kWindSpeed), 60.0f) * Engine::Global<float>(Address::kWindGrassMultiplier);
+			a_out[kShadowClamp] = Engine::Global<float>(Address::kShadowClampValue);
+			a_out[kFogNearW] = Engine::Global<float>(Address::kFogNearColorW);
+			auto* state = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState);
+			auto* scene = state ? state->shadowSceneNode[0] : nullptr;
+			auto* sun = scene ? scene->GetRuntimeData().sunLight : nullptr;
+			if (auto* light = sun ? static_cast<RE::NiDirectionalLight*>(sun->light.get()) : nullptr) {
+				const auto& direction = light->GetWorldDirection();
+				const auto& data = light->GetLightRuntimeData();
+				a_out[kSun] = 1.0f;
+				const float values[9]{ -direction.x, -direction.y, -direction.z, data.diffuse.red, data.diffuse.green, data.diffuse.blue, data.ambient.red,
+					data.ambient.green, data.ambient.blue };
+				std::memcpy(a_out + kSunDirection, values, sizeof(values));
+			}
+			if (auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera())) {
+				a_out[kCamera] = 1.0f;
+				const auto& translate = camera->world.translate;
+				a_out[kCameraPosition] = translate.x;
+				a_out[kCameraPosition + 1] = translate.y;
+				a_out[kCameraPosition + 2] = translate.z;
+				a_out[kCameraTop] = std::abs(camera->GetRuntimeData2().viewFrustum.fTop);
+			}
+			a_out[kAlphaParams] = Engine::Global<float>(Address::kAlphaParams);
+			a_out[kAlphaParams + 1] = Engine::Global<float>(Address::kAlphaParams + 4);
 		}
 
-		// Wind strength is the grass wind clamped to 60, times fWindGrassMultiplier:Display. The direction lives in each bucket row.
+		/** @brief A game value as the frame's ticket took it. */
+		float Taken(std::uint32_t a_value)
+		{
+			return gameSlot ? FrameGlobals::Current().features[gameSlot.first + a_value] : 0.0f;
+		}
+
+		// The shader multiplies this by the shape's wave period. The timer scaled to 1/600 of a turn as the engine does.
+		float WindTimeBase()
+		{
+			return Taken(kWindTimer) * (1.0f / 600.0f) * 6.28318f;
+		}
+
+		// The direction lives in each bucket row.
 		void SampleWind(float (&a_wind)[4])
 		{
 			a_wind[0] = 0.0f;
 			a_wind[1] = 0.0f;
-			a_wind[2] = std::min(Engine::Global<float>(Address::kWindSpeed), 60.0f) * Engine::Global<float>(Address::kWindGrassMultiplier);
+			a_wind[2] = Taken(kWindStrength);
 			a_wind[3] = 0.0f;
 		}
 
 		// The sun as SetupGeometry reads it, from ShadowSceneNode 0's sun light.
 		void SampleLight(DrawRow& a_row)
 		{
-			a_row.dirLightDirection[3] = Engine::Global<float>(Address::kShadowClampValue);
-			a_row.dirLightColor[3] = Engine::Global<float>(Address::kFogNearColorW);
-			auto* state = CS_ENGINE_READ(ShaderManagerState, CapturePoint, globals::game::smState);
-			auto* scene = state ? state->shadowSceneNode[0] : nullptr;
-			auto* sun = scene ? scene->GetRuntimeData().sunLight : nullptr;
-			auto* light = sun ? static_cast<RE::NiDirectionalLight*>(sun->light.get()) : nullptr;
-			if (!light)
+			a_row.dirLightDirection[3] = Taken(kShadowClamp);
+			a_row.dirLightColor[3] = Taken(kFogNearW);
+			if (Taken(kSun) == 0.0f)
 				return;
-			const auto& direction = light->GetWorldDirection();
-			const auto& data = light->GetLightRuntimeData();
-			a_row.dirLightDirection[0] = -direction.x;
-			a_row.dirLightDirection[1] = -direction.y;
-			a_row.dirLightDirection[2] = -direction.z;
-			a_row.dirLightColor[0] = data.diffuse.red;
-			a_row.dirLightColor[1] = data.diffuse.green;
-			a_row.dirLightColor[2] = data.diffuse.blue;
-			a_row.ambientColor[0] = data.ambient.red;
-			a_row.ambientColor[1] = data.ambient.green;
-			a_row.ambientColor[2] = data.ambient.blue;
+			for (std::uint32_t c = 0; c < 3; ++c) {
+				a_row.dirLightDirection[c] = Taken(kSunDirection + c);
+				a_row.dirLightColor[c] = Taken(kSunDiffuse + c);
+				a_row.ambientColor[c] = Taken(kSunAmbient + c);
+			}
 		}
 
 		float IniFloat(const char* a_name, float a_fallback)
@@ -99,18 +145,15 @@ namespace DCLF::Features::Grass
 		// The cull values follow Grass Optimizations' CullParams. Returns false without a camera.
 		bool SampleCull(DrawRow& a_row)
 		{
-			auto* camera = CS_ENGINE_READ(Camera, CapturePoint, RE::Main::WorldRootCamera());
 			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
-			if (!camera || !renderer)
+			if (Taken(kCamera) == 0.0f || !renderer)
 				return false;
 			const auto settings = GrassShared::Settings();
 			static const float startFade = IniFloat("fGrassStartFadeDistance:Grass", 6000.0f);
 			static const float vanillaMax = startFade + IniFloat("fGrassFadeRange:Grass", 2000.0f);
 			const float maxDistance = settings.RenderDistanceOverride > 0.0f ? settings.RenderDistanceOverride : vanillaMax;
-			const auto& translate = camera->world.translate;
-			a_row.eye[0] = translate.x;
-			a_row.eye[1] = translate.y;
-			a_row.eye[2] = translate.z;
+			for (std::uint32_t c = 0; c < 3; ++c)
+				a_row.eye[c] = Taken(kCameraPosition + c);
 			auto& cull = a_row.cull;
 			cull.minPixelSize = settings.MinPixelSize;
 			cull.fullDetailPx = settings.FullDetailPixelSize;
@@ -119,12 +162,12 @@ namespace DCLF::Features::Grass
 			cull.costBias = settings.MeshCostBias;
 			cull.costBiasStart = std::max(0.0f, settings.CostBiasStartDistance);
 			const auto [screenWidth, screenHeight] = renderer->GetScreenSize();
-			const float top = std::abs(camera->GetRuntimeData2().viewFrustum.fTop);
+			const float top = Taken(kCameraTop);
 			cull.projScale = top > 0.0f ? static_cast<float>(screenHeight) / (2.0f * top) : 0.0f;
 			cull.maxDistSq = maxDistance * maxDistance;
 			cull.edgeFadeStart = std::clamp(settings.EdgeFadeStart, 0.0f, 1.0f);
-			cull.alphaParam1 = Engine::Global<float>(Address::kAlphaParams);
-			cull.alphaParam2 = Engine::Global<float>(Address::kAlphaParams + 4);
+			cull.alphaParam1 = Taken(kAlphaParams);
+			cull.alphaParam2 = Taken(kAlphaParams + 1);
 			cull.invisibleFadeCull = settings.InvisibleFadeCull;
 			cull.simpleShadingPx = std::max(0.0f, settings.SimpleShadingPixelSize);
 			const float collision = std::max(0.0f, settings.CollisionDistance);
@@ -524,6 +567,7 @@ namespace DCLF::Features::Grass
 
 	void RegisterTables(Api::InstallContext& a_context)
 	{
+		gameSlot = a_context.RegisterFrameGlobals({ .name = "grass", .floats = kGameValues, .capture = &CaptureGameValues });
 		tablesId = a_context.RegisterSceneResources({ .name = "grass", .setup = &Setup, .registerGraph = &RegisterGraph, .require = &Require, .postInputs = &PostInputs,
 			.inputWords = kInputWords, .latched = &Latched });
 		a_context.RegisterCommitHook({ .name = "grass", .commit = &Commit });

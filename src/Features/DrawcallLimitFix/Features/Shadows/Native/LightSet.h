@@ -109,6 +109,8 @@ namespace DCLF::Features::Shadows::Native
 		const RE::BSShadowLight* light = nullptr;  // a key
 		std::uint32_t maps = 0;
 		std::array<float, 3> start{}, end{};
+		// The sun's descriptors after the maps' bookkeeping, kept or not (CaptureSet only): Deferred's cascade record reads them.
+		std::vector<MapValues> descriptors;
 	};
 
 	/** @brief The frame's kept shadow lights, in shadowLightsAccum's walk (each light once, in slot order), with the masks' settings. */

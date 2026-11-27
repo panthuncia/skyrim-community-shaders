@@ -7,6 +7,7 @@
 #include "Effects11.h"
 #include "Effects11/SettingManager.h"
 #include "Features/CloudShadows.h"
+#include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
 #include "Features/ExponentialHeightFog/ORGExponentialHeightFog.h"
 #include "Features/IBL.h"
 #include "Features/LightLimitFix.h"
@@ -580,13 +581,19 @@ void ExponentialHeightFog::BindIntegratedLightScattering()
 ID3D11ShaderResourceView* ExponentialHeightFog::BuildEngineLocalShadowData(EngineLocalShadows& a_shadows) const
 {
 	auto* renderer = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer);
-	auto* smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
-	if (!renderer || !smState || !smState->shadowSceneNode[0])
+	if (!renderer)
 		return nullptr;
-	auto* shadowSceneNode = smState->shadowSceneNode[0];
 	auto& depthStencil = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS];
 	if (!depthStencil.texture || !depthStencil.depthSRV)
 		return nullptr;
+	// Native's render side: the casters gave every light's maps back on the game side (the light set's capture), as the engine's masks
+	// give them back before this frame's Prepass in guest. No light holds a slice, so no entry is written, and no light is read.
+	if (DCLF::Features::Shadows::Native::RenderSet() && !Snapshot::EngineReads::InCapture())
+		return depthStencil.depthSRV;
+	auto* smState = CS_ENGINE_READ(ShaderManagerState, RecordTime, globals::game::smState);
+	if (!smState || !smState->shadowSceneNode[0])
+		return nullptr;
+	auto* shadowSceneNode = smState->shadowSceneNode[0];
 
 	D3D11_TEXTURE2D_DESC textureDesc{};
 	depthStencil.texture->GetDesc(&textureDesc);

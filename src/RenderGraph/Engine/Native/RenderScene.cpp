@@ -8,10 +8,12 @@
 
 #include "EngineZones.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Native/LightSet.h"
+#include "Features/LightLimitFix.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/WorldPass.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Fatal.h"
+#include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
 #include "Utils/Logging.h"
 
@@ -274,6 +276,9 @@ namespace RenderGraph::Engine::Native::Scene
 			if (skipped && !skippedHidden)
 				Flags(skipped) &= ~kHidden;
 			p.shadowLights = DCLF::Features::Shadows::Native::TakeSet();
+			// Light Limit Fix's scene lights, after the queued lights (added and removed above) and the casters' mask channels.
+			if (globals::features::lightLimitFix.loaded)
+				p.pointLights = globals::features::lightLimitFix.CaptureLights();
 			// The first-person depth epoch takes the camera the shift placed, before the port below (as RenderDepth saw it).
 			if (b.firstPerson) {
 				ShiftFirstPerson(a_player, false);
@@ -322,6 +327,7 @@ namespace RenderGraph::Engine::Native::Scene
 		void RecordFrame(const Prepared& a_frame, RE::NiCamera* a_camera, std::uint32_t a_target)
 		{
 			ZoneScopedN("CS.Native.RenderScene.Render");
+			const Snapshot::EngineReads::RenderHalfScope half(Snapshot::EngineReads::Half::Record);
 			// The shadow maps, masks and lens flares draw from the game half's light set.
 			DCLF::Features::Shadows::Native::AdoptSet(a_frame.shadowLights);
 			// +0x2EC, the shadow maps.

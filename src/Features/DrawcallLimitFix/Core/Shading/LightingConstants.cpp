@@ -2,9 +2,10 @@
 
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Shading/GeometryPort.h"
+#include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
+#include "Snapshot/FrameCamera.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
-#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
 #include "Features/DrawcallLimitFix/Integrations/LinearLighting/LinearLighting.h"
@@ -138,18 +139,30 @@ namespace DCLF
 		return &a_tables.extraRows[std::size_t(offset) * 4];
 	}
 
-	ExtrasFrame SampleExtrasFrame()
+	void CaptureExtrasInputs(std::array<float, 2>& a_landBlend, std::array<float, 4>& a_projectedGlobals)
 	{
-		EngineReadWindow::Touch("SampleExtrasFrame");
-		ExtrasFrame frame;
 		auto at = [](std::uintptr_t a_offset) { return *reinterpret_cast<const float*>(REL::Offset(a_offset).address()); };
 		// SetupGeometry for techniques 8 and 19 blends two BSShaderManager::State positions by its clock. Each runtime's own arithmetic, to match bits:
 		// AE multiplies by 0.2 (0x141ad2840) over the fade seconds, SE (FUN_1412f4e20) divides by fade seconds times 5.
 		const float elapsed = at(kStateTimer) - at(kStateGridLerpStart);
 		float t = REL::Module::IsSE() ? elapsed / (at(kStateLandFadeSeconds) * 5.0f) : elapsed * (at(kLandFadeFraction) / at(kStateLandFadeSeconds));
 		t = t <= 0.0f ? 0.0f : 1.0f <= t ? 1.0f : t;
-		frame.landBlend[0] = (at(kStateGridCenterX) - at(kStateOldGridCenterX)) * t + at(kStateOldGridCenterX);
-		frame.landBlend[1] = (at(kStateGridCenterY) - at(kStateOldGridCenterY)) * t + at(kStateOldGridCenterY);
+		a_landBlend[0] = (at(kStateGridCenterX) - at(kStateOldGridCenterX)) * t + at(kStateOldGridCenterX);
+		a_landBlend[1] = (at(kStateGridCenterY) - at(kStateOldGridCenterY)) * t + at(kStateOldGridCenterY);
+		// The pixel parameters' globals from FUN_1414e00c0: the two tilings and the projected-normals switch.
+		a_projectedGlobals[0] = at(Engine::Address::kProjectedTiling);
+		a_projectedGlobals[1] = at(Engine::Address::kProjectedTiling2);
+		a_projectedGlobals[2] = 0.0f;
+		a_projectedGlobals[3] = *reinterpret_cast<const std::uint8_t*>(REL::Offset(Engine::Address::kProjectedNormals).address()) ? 1.0f : 0.0f;
+	}
+
+	ExtrasFrame SampleExtrasFrame()
+	{
+		ExtrasFrame frame;
+		const auto& globals = FrameGlobals::Current();
+		frame.landBlend[0] = globals.landBlend[0];
+		frame.landBlend[1] = globals.landBlend[1];
+		std::memcpy(frame.projectedGlobals, globals.projectedGlobals.data(), sizeof(frame.projectedGlobals));
 		// The ProjectedUV projection: a fixed rotation about Z at posAdjust, built by the engine's own NiTransform-to-matrix routine.
 		using ToMatrix = void (*)(float*, const RE::NiTransform*);
 		static const REL::Relocation<ToMatrix> toMatrix{ REL::Offset(Engine::Address::kTransformToMatrix) };
@@ -163,14 +176,14 @@ namespace DCLF
 		projection.rotate.entry[2][0] = 0.0f;
 		projection.rotate.entry[2][1] = 0.0f;
 		projection.rotate.entry[2][2] = 1.0f;
-		projection.translate = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData().posAdjust.getEye();
+		// Native: the frame camera's eye (the posAdjust SetCameraData gives the main camera). Guest: the shadow state's.
+		if (Snapshot::FrameCamera::Owned()) {
+			const auto& eye = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
+			projection.translate = { eye.x, eye.y, eye.z };
+		} else
+			projection.translate = CS_ENGINE_READ(ShadowState, CapturePoint, globals::game::shadowState)->GetRuntimeData().posAdjust.getEye();
 		projection.scale = 1.0f;
 		toMatrix(frame.projection, &projection);
-		// The pixel parameters' globals from FUN_1414e00c0: the two tilings and the projected-normals switch.
-		frame.projectedGlobals[0] = at(Engine::Address::kProjectedTiling);
-		frame.projectedGlobals[1] = at(Engine::Address::kProjectedTiling2);
-		frame.projectedGlobals[2] = 0.0f;
-		frame.projectedGlobals[3] = *reinterpret_cast<const std::uint8_t*>(REL::Offset(Engine::Address::kProjectedNormals).address()) ? 1.0f : 0.0f;
 		return frame;
 	}
 

@@ -267,6 +267,9 @@ namespace DCLF::Features::Shadows::Native
 			// slices go back here, before the next update's game logic can remove a light.
 			for (const auto& captured : set->lights)
 				ReturnShadowmaps(*const_cast<RE::BSShadowLight*>(captured.light));
+			// The sun's descriptors as the bookkeeping left them, for the cascade record, also when the sun casts nothing this update.
+			if (const auto* sun = set->sun.light)
+				set->sun.descriptors = set->Find(sun) ? set->Find(sun)->descriptors : ReadLight(*sun).descriptors;
 		}
 		// The main accumulator keeps the camera and flag RenderShadowMaps gave it before RenderWorld's batches. Its registration jobs
 		// are not run: native draws nothing from the main camera's registered passes, so the engine's batch calls that still mark CS's

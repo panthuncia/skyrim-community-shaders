@@ -58,7 +58,7 @@ namespace DCLF::Extensions
 	/** @brief Number of Lighting technique slots a contribution may name. */
 	inline constexpr std::uint32_t kTechniqueSlots = 32;
 	/** @brief Floats FrameGlobals holds for the features' contributions. Grow it before registering more. */
-	inline constexpr std::uint32_t kFrameGlobalsFloats = 8;
+	inline constexpr std::uint32_t kFrameGlobalsFloats = 64;
 
 	/** @brief A technique's contribution. */
 	struct TechniqueEntry

@@ -2,6 +2,9 @@
 
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
+#include "Features/DrawcallLimitFix/Core/Shading/GeometryPort.h"
+#include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
+#include "Snapshot/FrameCamera.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 #include "Snapshot/EngineReads.h"
@@ -297,6 +300,9 @@ namespace DCLF
 			g->eye = { camera->world.translate.x, camera->world.translate.y, camera->world.translate.z };
 			g->lodAdjust = camera->GetRuntimeData2().lodAdjust;
 		}
+		CaptureExtrasInputs(g->landBlend, g->projectedGlobals);
+		if (::Snapshot::FrameCamera::Owned())
+			g->pipeline = std::make_shared<const GeometryPort::PipelineFrame>(GeometryPort::SamplePipelineFrame(true));
 		Extensions::CaptureFrameGlobals(g->features);
 		// Roots whose hidden bit the frame changes around the scene's views, as the views see it, at the frame's start.
 		if (!g->loading) {
