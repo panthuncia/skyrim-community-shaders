@@ -1,0 +1,59 @@
+# The book menu (BookMenu, UI3DSceneManager's scheme 3): `book` opens the first plain book, a shot of its first pages; `page`
+# turns a page, a shot of the next ones. The pages are the page texture copied into kBOOK_TEXT_n with Scaleform's text drawn
+# over it, sampled by the book model. Compose it: native-vulkan+menu-book, guest+menu-book.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+# The save's low health shows a help message over the book otherwise.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.restoreav health 1000"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "book"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "book-open"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "page"
+arg = "next"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "book-page"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "Book Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["book-open", "book-page"]
+shot_refs = ["book-open", "book-page"]
