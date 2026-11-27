@@ -239,7 +239,7 @@ namespace DCLF::Features::Streaming
 												});
 											},
 				[](TextureStreaming::TextureId a_id) { SceneScheduler::Graph().RetireTextureWindow(a_id); } });
-			TextureStreaming::SetWindowListener([](const ID3D11ShaderResourceView* a_shell) { GpuTextures::Get().NoteWindowChanged(a_shell); });
+			TextureStreaming::SetWindowListener([](const ID3D11ShaderResourceView* a_shell) { GpuTextures::Get().NoteViewChanged(a_shell); });
 			TextureStreaming::SetDemandSource(&Demand);
 		}
 	}

@@ -86,6 +86,7 @@ namespace DCLF
 		std::vector<std::uint64_t> usedSeen;          // the used pipelines as the last pass saw them
 		std::vector<std::uint32_t> techniqueSeen;     // each technique row's bindingVersion then
 		std::uint32_t textureGenerationSeen = ~0u;    // GpuTextures::Generation then
+		std::uint64_t relocationCursor = 0;           // GpuTextures::RelocatedViews' cursor for the frame's shadow mask
 		void MarkMask(std::uint32_t a_slot)
 		{
 			if (masks.size() <= a_slot)

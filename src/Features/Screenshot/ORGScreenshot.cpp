@@ -36,6 +36,7 @@ bool ORGScreenshot::Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_
 #include "Features/HDRDisplay/ORGHDRDisplay.h"
 #include "Globals.h"
 #include "RenderGraph/AnchorPasses.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/UiTargets.h"
 #include "RenderGraph/Frame/Declare.h"
 #include "RenderGraph/Frame/Observed.h"
@@ -341,6 +342,15 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 		desc = state.clean->desc;
 	else
 		a_source.texture->GetDesc(&desc);
+	// Native: an engine target's copy reads the adopted version, which keeps the old size until a resize's revision is adopted. The
+	// engine's own texture takes the new size at once, and a copy of that size would read past the adopted version.
+	if (!clean && a_source.engineTarget >= 0 && RenderGraph::Engine::Native::Active()) {
+		const auto shapes = RenderGraph::Frame::Vars::Adopted(RenderGraph::Frame::Vars::EngineTargetShapes());
+		if (const auto& shape = shapes.colours[static_cast<std::size_t>(a_source.engineTarget)]; shape.width && shape.height) {
+			desc.Width = shape.width;
+			desc.Height = shape.height;
+		}
+	}
 	const auto bytes = rhi::FormatByteSize(source.Format());
 	if (!bytes)
 		return false;

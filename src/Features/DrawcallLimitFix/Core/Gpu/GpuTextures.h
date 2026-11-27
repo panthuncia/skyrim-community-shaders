@@ -201,13 +201,16 @@ namespace DCLF
 
 		/**
 		 * @brief Any thread. Views superseded since a_cursor, which it advances: those DXVK moved (ORG's commit, at Present) and those
-		 * whose streamed window changed.
+		 * that name another image now (NoteViewChanged).
 		 * False when the log no longer reaches a_cursor, so every binding should be resolved again.
 		 */
 		bool RelocatedViews(std::uint64_t& a_cursor, std::vector<ID3D11ShaderResourceView*>& a_out) const;
 
-		/** @brief Any thread. A streamed texture got a new window, so supersede its import. a_shell is an identity, never dereferenced. */
-		void NoteWindowChanged(const ID3D11ShaderResourceView* a_shell);
+		/**
+		 * @brief Any thread. The view names another image now, so supersede its import: a streamed texture got a new window, or the
+		 * engine target set pointed an engine target's view at a new version (a resize). a_view is an identity, never dereferenced.
+		 */
+		void NoteViewChanged(const ID3D11ShaderResourceView* a_view);
 
 		/** @brief Any thread. Whether a binding's owner was superseded. */
 		static bool Superseded(const void* a_owner);
