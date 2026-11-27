@@ -263,6 +263,12 @@
     "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+native-river/river": {
+    "sha256": "dc407aeb1bb2ff52be8c1d0931a2dbf510e4a928de44f11e1162d0ec5d894086",
+    "size": "1920x1080",
+    "run": "1127-175223-post-refs-native-vulkan-native-river-post-refs-n1-river",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+native-tour/start": {
     "sha256": "c6849db483f02913b84e3b7f54e342272408b0d57af93fdc1a77a0ee3236747f",
     "size": "1920x1080",
@@ -358,6 +364,18 @@
     "size": "1920x1080",
     "run": "1126-185658-dir-native-vulkan-quick-dir-s7dk-native-vulkan+quick",
     "accepted": "2026-11-26"
+  },
+  "native-vulkan+rain/rain": {
+    "sha256": "cc7067d150fecd8028026352b6af7970b66c2f0866bab426a3c4b234f724b73b",
+    "size": "1920x1080",
+    "run": "1127-175639-post-refs-native-vulkan-rain-post-refs-n1-rain",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+rain/rain-later": {
+    "sha256": "1998befdf928b2048f4ef2ac741341b3bc1e910e49f8f4b14b285e23a66ae714",
+    "size": "1920x1080",
+    "run": "1127-175639-post-refs-native-vulkan-rain-post-refs-n1-rain",
+    "accepted": "2026-11-27"
   },
   "native-vulkan+shadows-blend/blend-off": {
     "sha256": "61d7c2617b8e161ba9343710445408c02f4042017d845bff7e50ccc97e0a2a89",

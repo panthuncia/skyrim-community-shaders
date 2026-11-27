@@ -5,9 +5,29 @@ extends = ["base"]
 [run]
 timeout_s = 420
 
+# God mode and AI off (the save is a guard fight; NPCs wander), so the shots compare with references.
 [[steps]]
 at = "world-ready"
-frames = 200
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+# tai alone leaves combat running: the save's guard keeps fighting. tcai stops it.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 199
 do = "console"
 arg = "set timescale to 0"
 
@@ -85,3 +105,5 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["river", "river-east"]
+
+shot_refs = ["river"]   # not river-east: native draws an orange haze over Riverwood's smelter (post-refs.md, B1)
