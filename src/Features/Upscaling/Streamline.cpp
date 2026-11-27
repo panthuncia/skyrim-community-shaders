@@ -92,6 +92,10 @@ namespace
 		static constexpr std::size_t kSimFrames = 16;
 		std::array<std::atomic<std::uint64_t>, kSimFrames> simFrameUpdate{};
 		std::array<std::atomic<uint32_t>, kSimFrames> simFrameId{};
+		// Native's render thread: the frame id its Reflex sleep used, taken by the render frame that follows (0: none).
+		std::atomic<uint32_t> sleptRenderFrameId = { 0 };
+		// Reflex sleeps each frame: low-latency mode or a frame limit is set (UpdateReflex).
+		std::atomic<bool> reflexSleeps = { false };
 		// PCL markers only feed Reflex and DLSS-G latency. With neither active, emitting them is pure
 		// per-frame cross-DLL overhead -- 7 slGetNewFrameToken+slPCLSetMarker pairs per frame on a path
 		// the D3D11 branch does not have at all. Streamline is now always initialised for in-game
@@ -884,6 +888,8 @@ void Streamline::BeginRenderFrame()
 	const uint32_t frame = static_cast<uint32_t>(Snapshot::Render().frame);
 	const uint32_t previous = g_sl.renderFrameId.load(std::memory_order_acquire);
 	uint32_t id = frame > previous ? frame : previous + 1u;
+	// Native's render thread slept for this frame with the id it reserved (ReflexSleepRender).
+	id = (std::max)(id, g_sl.sleptRenderFrameId.exchange(0, std::memory_order_acq_rel));
 	// The first render of a game update's snapshot takes the update's simulation id when it is still ahead: Reflex then sees the
 	// update's simulation and its render as one frame. A repeat has no simulation of its own.
 	if (const auto& snapshot = Snapshot::Current(); snapshot && !Snapshot::Render().repeat)
@@ -1000,7 +1006,11 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 	// FSR-FG path's cap "could not be applied": frameLimitUs was handed to Reflex and then never
 	// given a chance to sleep on it, so the cap fell through to DXVK's limiter, which applies it
 	// from the submission thread after the present instead of in the render loop.
-	if (mode != sl::ReflexMode::eOff || a_frameLimitUs != 0u) {
+	const bool sleeps = mode != sl::ReflexMode::eOff || a_frameLimitUs != 0u;
+	g_sl.reflexSleeps.store(sleeps, std::memory_order_release);
+	// With native's render thread the render thread sleeps (ReflexSleepRender): the frame limit paces renders, and the game thread
+	// never waits for the render side's pacing.
+	if (sleeps && !RenderGraph::Engine::Native::RenderThread::Running()) {
 		// PollInputDevices can run more than once per rendered frame.
 		static uint32_t s_lastSleepFrame = UINT32_MAX;
 		const uint32_t simFrame = SimFrameId();
@@ -1015,6 +1025,24 @@ void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimit
 			}
 		}
 	}
+}
+
+void Streamline::ReflexSleepRender()
+{
+	if (!initialized || !featureReflex || !g_sl.reflexSleeps.load(std::memory_order_acquire))
+		return;
+	// The render frame about to start: the next id, or the newest update's simulation id when that is ahead (the frame that renders
+	// it takes it, BeginRenderFrame).
+	const uint32_t id = (std::max)(g_sl.renderFrameId.load(std::memory_order_acquire) + 1u, SimFrameIdOf(Snapshot::LastGameId()));
+	sl::FrameToken* token = TokenForFrame(id);
+	if (!token)
+		return;
+	g_sl.sleptRenderFrameId.store(id, std::memory_order_release);
+	ZoneScopedN("CS.Streamline.ReflexSleep");
+	const auto start = std::chrono::steady_clock::now();
+	g_sl.slReflexSleep(*token);
+	RenderGraph::Engine::Native::RenderThread::CountWait(RenderGraph::Engine::Native::RenderThread::Wait::ReflexSleep,
+		std::chrono::steady_clock::now() - start);
 }
 
 void Streamline::SetPCLMarker(PclMarker a_marker)

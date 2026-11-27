@@ -124,6 +124,12 @@ public:
 
 	void SetPCLMarker(PclMarker a_marker);
 
+	/**
+	 * @brief Native's render thread, before a routed render's adoption: Reflex's sleep, which applies the frame limit and low-latency
+	 * pacing to renders. The game thread's input poll does not sleep while the render thread runs.
+	 */
+	void ReflexSleepRender();
+
 	/** @brief Updates DLSS-G mode and generated-frame count. */
 	bool SetDLSSGMode(bool a_enable, uint32_t a_displayWidth, uint32_t a_displayHeight,
 		uint32_t a_numFramesToGenerate = 1, bool a_autoMode = false, bool a_dynamic = false,

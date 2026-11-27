@@ -110,7 +110,7 @@ namespace RenderGraph::Engine::Native::RenderThread
 	{
 		UpdateCap,    // game thread: the update-rate cap (Snapshot::PaceGameUpdate)
 		FrameJobs,    // game thread: the game frame's wait for the UI jobs
-		ReflexSleep,  // game thread: Reflex's sleep at the input poll
+		ReflexSleep,  // render thread: Reflex's sleep before a render's adoption (the input poll's without the render thread)
 		RenderLock,   // render thread: taking Renderer::Lock
 		LastRender,   // render thread: the depth commit's wait for the last render's GPU work
 		Count

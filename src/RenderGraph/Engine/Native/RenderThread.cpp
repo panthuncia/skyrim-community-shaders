@@ -5,6 +5,7 @@
 #include "RenderGraph/Engine/Native/RenderThread.h"
 
 #include "Features/DrawcallLimitFix.h"
+#include "Features/Upscaling/Streamline.h"
 #include "RenderGraph/Async/Retirement.h"
 #include "RenderGraph/Engine/Native/EngineAccess.h"
 #include "RenderGraph/Engine/Native/Native.h"
@@ -265,6 +266,10 @@ namespace RenderGraph::Engine::Native::RenderThread
 			unlock(a_renderer);
 			AddMax(g_stats.heldUs, g_stats.heldMaxUs, Micros(std::chrono::steady_clock::now() - locked));
 		};
+		// Reflex's sleep paces renders (the frame limit, low-latency mode) and comes before the adoption, so the render takes the newest
+		// snapshot when it wakes.
+		if (t_renderThread)
+			Streamline::GetSingleton()->ReflexSleepRender();
 		const auto start = std::chrono::steady_clock::now();
 		using Begin = void (*)(RE::BSGraphics::Renderer*, std::uint32_t);
 		static REL::Relocation<Begin> begin{ REL::RelocationID(75460, 77245) };
