@@ -1047,3 +1047,53 @@ pushes until the user is back.
      active flags and the composite's portal fog values; `PostChain::ReadWorld` (Begin's description, the step-lag check)
      and the native draws read the block plus the captured frame counter. Frame end game-mutated reads per world frame
      (native quick): 8.7 -> 2.02, all DCLF's (`FrameView.cpp:291`, `LoadHold.cpp`), which snap7-hold clears.
+
+## 2026-11-27: DCLF's render half without the read-window hold (snap7-hold; director accepted)
+
+218. **Refines 140: the engine-read window has no hold bit.** The hold never protected the render side's own reads; it
+     kept DCLF's workers out of engine memory during the engine's game-side writes. `EngineReadWindow` is open from DCLF's
+     game half (`Open()` in `GameFrameStart`) to Present (`CloseAtPresent()` in `EndFrame`); `Close()` stays at the end of
+     the DrawFrame call. `kHeld`, `HoldForRenderHalf` and `ReleaseRenderHalf` are deleted. The only lease taker still
+     kicked from the render half is the frame values' producer.
+219. **DCLF's render half reads its scene work from the ticket:** per-feature ticket slots (`RegisterTicketPart`,
+     `TicketPartOf`) carry water (tracked shapes and every value BuildPass reads, native) and sky (the sky root flattened,
+     both modes since guest's reflection faces cull it too). `FrameView::LoadingScreenInFrame()` reads the snapshot's
+     `menus.loading` in native; LoadHold's frame-end reads use snapshot values and a game-half actor count. Native moves
+     to the game side: the late-pose confirm (`FrameDriver::GameHalfEnd`, before Main::Draw's tail), the late-pose check
+     (`Snapshot::RegisterUpdateEnd`), `ServeMaterialRequests` (in `GameFrameStart`; a request can wait one update longer),
+     Skin's owner checks (`Skin::RevalidateOwners` at the capture). Render-to-game messages: `coveredLast` is an atomic;
+     the adopted revision's family pipelines are published at adoption (`PublishFamilyRenderState`) and
+     `DecideDrawFamilies` reads the latest. The detector counts scene-graph walks (`EngineReads::Object::Scene`). Native
+     quick, record half game-mutated reads per world frame: 78.7 -> 26.0 (sky BuildPass 20.9 left, precipitation,
+     PostChain 0.02); frame end: 0. Open: sky BuildPass per-pass values, the producer split, scene pairing (needs the
+     revision to adopt a named scene and the render thread), family lane requests from the game half, lifetimes of the
+     renderer-data and texture pointers the ticket's shapes lead to.
+
+## 2026-11-27: precipitation occlusion from captured values (snap7-precip; director accepted)
+
+220. **Precipitation occlusion reads captured values:** `Snapshot/PrecipitationOcclusion.{h,cpp}` ports the engine's
+     `Precipitation::ComputeProjection` (SE 25643, AE 26185) and RenderMask's projection as functions of values (the
+     shader direction and cube size `Precipitation::Update` writes in `Sky::Update`, the world camera, the occlusion
+     camera's previous forward, port, scale and SetViewFrustum near limits); bit-exact against the engine in observe. A
+     new block `BlockId::PrecipitationOcclusion` (guest and native fill it) gets the mask's camera and projection once per
+     update; native also writes the rain emitter's projection there (the engine's particle setup reads it). Skylighting's
+     sky map camera is computed render-side from the block (its direction and quarter are per render frame).
+     `Api::OcclusionCamera` holds values and `IndirectDraws::OcclusionView` takes them; `DrawcallLimitFix::RenderMask` is
+     removed; Wetness reads `maskProjection` from the block. The mask's previous forward is CS's game-side state (the
+     engine's came from whichever render call ran last; they differ only the first frame after a direction jump). Native
+     no longer sets the accumulator's camera. Guest keeps its engine paths. Build trap: the scene settings catalog
+     generator matches struct names globally; avoid generic struct names (`Camera`, `Eye`, `Inputs`) in new headers.
+
+## 2026-11-27: the local map's look in graph mode (snap5-localmap; director accepted, port not done)
+
+221. **The local map's white land was Linear Lighting compiled out of the ORG Lighting build:** plain D3D11 compiles the
+     land's PBR Lighting (pixel descriptor 0x8000029) with Linear Lighting on, and kLOCAL_MAP_SWAP stores that output; the
+     ORG build without it lit the land with the raw sun colour and it saturated. A Lighting variant
+     (`kLightingLinearVariant`, `LIGHTING_ORG_LINEAR`) keeps Linear Lighting; only the local map's land draws use it
+     (`TryLatchLighting`). Plain D3D11's look is the target. The alpha (only the clear and the fog-of-war pass) was right
+     in every mode; native's opaque panel came from refused batches with cold programs in the first frames. The Utility
+     programs it needs are already in the lab manifest after one session. Open: the port itself (pass census, the
+     LocalMapRenderer::Render reverse engineering and a plan in `snap5-localmap.md`; local map frames still 35 engine
+     render calls); menu models in the ORG build lack Linear Lighting while D3D11 draws them with it (check against D3D11
+     shots); `kMaxDraws` (2048 per batch) can be exceeded (Whiterun's local map draws about 1,380 passes); a D3D11 run
+     with Linear Lighting disabled still drew the land dark (unexplained).

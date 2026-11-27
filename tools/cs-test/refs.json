@@ -1,4 +1,22 @@
 {
+  "guest+map-local/localmap": {
+    "sha256": "025e92c48cf41639e64f3fa81ffc82f40863b3a6eded52a53c800af1c82e4864",
+    "size": "1920x1080",
+    "run": "1127-030444-s7-localmap-guest-map-local-s7-localmap-fin-guest-local2",
+    "accepted": "2026-11-27"
+  },
+  "guest+map-local/localmap-b": {
+    "sha256": "299b9b1a080de4aaee54229535c375eae2bc1eb1be65514a103d1c36fa2b20e5",
+    "size": "1920x1080",
+    "run": "1127-030444-s7-localmap-guest-map-local-s7-localmap-fin-guest-local2",
+    "accepted": "2026-11-27"
+  },
+  "guest+map-local/map": {
+    "sha256": "0beb16e5a5827ede51b563de40a384501a18fffafa3a5b584a19c9c51131419d",
+    "size": "1920x1080",
+    "run": "1127-030444-s7-localmap-guest-map-local-s7-localmap-fin-guest-local2",
+    "accepted": "2026-11-27"
+  },
   "guest+map/map": {
     "sha256": "30f1a16bb3569bf7697b8efd7d280655abd28d5b08b378b4dd671f3b4c410373",
     "size": "1920x1080",
@@ -106,6 +124,24 @@
     "size": "1920x1080",
     "run": "1126-185749-dir-native-vulkan-facegen-dir-s7dk-native-vulkan+facegen",
     "accepted": "2026-11-26"
+  },
+  "native-vulkan+map-local/localmap": {
+    "sha256": "6234b7e578d4e82b56a0c11bbb38590969c66db6bc8799be8c174974498fe620",
+    "size": "1920x1080",
+    "run": "1127-025515-s7-localmap-native-vulkan-map-local-s7-localmap-fin-nvk-local",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+map-local/localmap-b": {
+    "sha256": "170ee5a38858703f8aec336862cde476b52590cd4e4a2634bc17b8077dad7354",
+    "size": "1920x1080",
+    "run": "1127-025515-s7-localmap-native-vulkan-map-local-s7-localmap-fin-nvk-local",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+map-local/map": {
+    "sha256": "bad066db010a3a71b914310a97660c180b0088d623f53429152b31e4f13bc6c4",
+    "size": "1920x1080",
+    "run": "1127-025515-s7-localmap-native-vulkan-map-local-s7-localmap-fin-nvk-local",
+    "accepted": "2026-11-27"
   },
   "native-vulkan+map/map": {
     "sha256": "55e34f9de8adedca033be89df515d73ae0e89475168e2fc8341eeffd0af5c43b",
