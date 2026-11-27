@@ -1231,3 +1231,26 @@ pushes until the user is back.
      can pass points whose external work still runs (DV2-b; fixed separately). snap7-devloss3 switches stages and DCLF at
      the same frame and removes the wait. The D3D12 grey-land shot (1127-114515) looks like zeroed land rows at startup, not
      this.
+
+## 2026-11-27: performance investigation (post-perf; director accepted)
+
+233. **Routed rendering is asynchronous in steady play** (roadmap "After phase 7" item 2; `post-perf.md`). The game thread
+     spends 87-92% in the update cap's wait and under 0.3% in any other wait; it holds 30/60/240 updates/s at any render
+     rate (60 at 58 fps 4K and at 225 fps), and rendering holds its rate when the game slows (40 extra actors: 190 updates/s,
+     137 fps). Publish-to-render-end latency 6.5-9.9 ms at 1080p (Dev-Fast). The interim `WaitForLastRender` takes 46-90%
+     of render-thread time; free in these GPU-bound Vulkan scenes, 11% on D3D12 (optimized). Fixed: one Streamline
+     simulation id per game update, set at publish (no double SimulationStart); Reflex sleeps on the render thread before
+     each adoption (an 85 fps limit now gives 85 fps, 60 updates/s); the present's pacing runs before Renderer::Lock (held
+     13-19% instead of 49-67% once the interim wait goes); counters and zones for fresh/repeat renders, lock hold,
+     publish-to-adoption/end and waits by kind. Recorded for later: D-1 port Renderer::Begin/End (lock holds up to 6-17 ms),
+     D-2 repeats never idle the render thread (consider a display-rate cap), D-3 DCLF's animated fade batch is shared and the
+     game thread waits in `WaitAnimatedDrain` (post-fades), D-4 non-world frame kinds on the render thread, D-5 ORG's
+     submission thread is the next serial stage (39% busy). Open: game updates collapsed to ~2/s for 60-100 s in 2 of ~23
+     runs (post-fades). Merge check: native-tour lost the device once with the interim wait in place (rerun passed).
+
+234. **Resize renders wrong in native and guest, before the render thread** (user report, director check). After a resize
+     everything DCLF draws turns black or disappears, background water flickers, and the UI keeps the old size (crosshair at
+     the old centre). window-resize-stress-taa had no shot references, so it passed. Shot brightness shows it in every run
+     kept (back to 2026-11-26 morning); d3d11 renders all 13 shots correctly; guest goes dark at the first resize and then
+     lost the device. Owned by snap7-devloss3 together with the device loss: native and guest must match d3d11 after
+     resizes, with references accepted.
