@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
+#include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
 #include "Features/DrawcallLimitFix/Core/Shading/GeometryPort.h"
@@ -24,10 +25,12 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Switches.h"
 #include "ShaderCache.h"
+#include "Snapshot/EngineReads.h"
 #include "Snapshot/FrameCamera.h"
 #include "State.h"
 #include "Utils/Logging.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -144,7 +147,7 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		s.engineOrder.clear();
 		s.engineHints.clear();
 		s.mineOrder.clear();
-		if (s.active && a_view == View::MenuColour && a_camera)
+		if (s.active && (a_view == View::MenuColour || a_view == View::MenuDepth) && a_camera)
 			if (auto* manager = RE::UI3DSceneManager::GetSingleton())
 				if (auto* root = manager->menuObjects[static_cast<std::uint32_t>(manager->currentlightScheme)].get())
 					Native::SceneGeometry(root, *a_camera, Native::SortsByClosestPoint(*manager), s.mineOrder);
@@ -153,6 +156,30 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 	void End()
 	{
 		auto& s = Get();
+		if (s.active && s.view == View::MenuDepth && s.camera) {
+			// The depth pass's membership: the engine's draws against the geometry CS gives a depth pass.
+			std::vector<const RE::BSGeometry*> mine;
+			Native::UtilityView view;
+			view.view = View::MenuDepth;
+			for (const auto& p : s.mineOrder) {
+				Native::UtilityResult result;
+				std::string why;
+				if (!p.membrane && (Native::ComputeUtility(view, *p.geometry, result, why) || !why.empty()))
+					mine.push_back(p.geometry);
+			}
+			auto engine = s.engineOrder;
+			std::ranges::sort(engine);
+			engine.erase(std::ranges::unique(engine).begin(), engine.end());
+			std::ranges::sort(mine);
+			std::string missing, extra;
+			for (const auto* g : engine)
+				if (!std::ranges::binary_search(mine, g))
+					missing += GeometryName(g) + " ";
+			for (const auto* g : mine)
+				if (!std::ranges::binary_search(engine, g))
+					extra += GeometryName(g) + " ";
+			Note("menu-depth membership", !missing.empty() || !extra.empty(), std::format("engine only: {}; mine only: {}", missing, extra));
+		}
 		if (s.active && s.view == View::MenuColour && !s.engineOrder.empty()) {
 			++s.orderBatches;
 			// The blended list's order (hint 1 in the engine's passes, BlendedList in CS's), and whether the two agree on membership.
@@ -455,6 +482,133 @@ namespace DCLF::Features::MenuViews::Scenes::Observe
 		const auto* m = reinterpret_cast<const float (*)[4]>(mine.data());
 		CompareRows("palette previous", e, m, rows, GeometryName(a_pass->geometry));
 		CompareRows("palette current", e + kPaletteRows, m + kPaletteRows, rows, GeometryName(a_pass->geometry));
+	}
+
+	void Utility(const RE::BSRenderPass* a_pass, const UtilitySceneConstants& a_engine, const float (*a_frame)[4], std::uint32_t a_vertex, std::uint32_t a_slice,
+		const Native::DrawState& a_state, const Family::Viewport& a_viewport, const ID3D11ShaderResourceView* a_t0, std::uint32_t a_address, std::uint32_t a_filter)
+	{
+		auto& s = Get();
+		auto* manager = RE::UI3DSceneManager::GetSingleton();
+		if (!s.active || !a_pass || !a_pass->geometry || !manager || (s.view != View::MenuDepth && s.view != View::MenuShadow))
+			return;
+		const auto name = GeometryName(a_pass->geometry);
+		const std::string prefix = NameOf(s.view);
+		const auto field = [&](const char* a_name) { return prefix + " " + a_name; };
+		const std::uint32_t buffer = MaterialPort::SampleFrame().vanilla.textureTransformBuffer;
+		// The views the draw can be from: the depth pass's camera, or each kept shadow light's descriptor drawing into the draw's slice.
+		std::vector<Native::UtilityView> views;
+		if (s.view == View::MenuDepth) {
+			if (!s.camera)
+				return;
+			if (!s.inputsMade) {
+				s.inputs = Native::SampleInputs(*manager, *s.camera, PreviousOf(s), ShadowMapsNow(*manager));
+				s.inputsMade = true;
+			}
+			auto& view = views.emplace_back();
+			view.view = View::MenuDepth;
+			view.eye = s.camera->world.translate;
+			view.textureTransformBuffer = buffer;
+			view.viewport = Family::FrameViewport(kMainTarget, static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN), 0);
+			view.viewport.depthRange = { 0.0f, 1.0f };
+			Native::FrameRows(s.inputs, view.frame);
+		} else if (auto* node = RE::BSShaderManager::State::GetSingleton().shadowSceneNode[1]) {
+			for (auto* light : node->GetRuntimeData().shadowLightsAccum) {
+				if (!light || !light->light)
+					continue;
+				const auto& descriptors = light->GetRuntimeData().shadowmapDescriptors;
+				const bool parabolic = light->GetIsParabolicLight();
+				for (std::uint32_t i = 0; i < light->shadowMapCount && i < descriptors.size(); ++i) {
+					const auto& bound = parabolic ? descriptors[0] : descriptors[i];
+					auto* camera = descriptors[i].camera.get();
+					const auto* data = descriptors[i].shaderAccumulator ? descriptors[i].shaderAccumulator->GetRuntimeData() : nullptr;
+					if (!camera || !data || bound.shadowmapIndex != a_slice)
+						continue;
+					auto& view = views.emplace_back();
+					view.view = View::MenuShadow;
+					view.renderMode = static_cast<std::uint32_t>(data->renderMode);
+					view.eye = camera->world.translate;
+					if (parabolic)
+						view.parabola = { 1.0f / light->light->GetLightRuntimeData().radius.x, i == 1 ? -1.0f : 1.0f };
+					view.slice = a_slice;
+					view.textureTransformBuffer = buffer;
+					std::uint32_t width = 0, height = 0;
+					if (auto* texture = CS_ENGINE_READ(Renderer, RecordTime, globals::game::renderer)->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS].texture) {
+						D3D11_TEXTURE2D_DESC desc{};
+						texture->GetDesc(&desc);
+						width = desc.Width;
+						height = desc.Height;
+					}
+					ShadowCameras::Camera matrices;
+					ShadowCameras::CameraMatrices(*camera, matrices);
+					view.viewport.rect = ShadowCameras::Viewport(matrices.port, width, height);
+					view.viewport.depthRange = { 0.0f, 1.0f };
+					Native::UtilityFrameRows(*camera, view.frame);
+				}
+			}
+		}
+		if (views.empty()) {
+			Note(field("view"), true, std::format("{}: no view of slice {}", name, a_slice));
+			return;
+		}
+		// The candidate whose eye (FrameBuffer c40) is the engine's, on the engine's hemisphere.
+		const auto* chosen = &views.front();
+		for (const auto& view : views)
+			if (std::memcmp(view.frame[40], a_frame[40], 12) == 0 && (view.parabola[1] == 0.0f || view.parabola[1] == a_engine.vsTechnique[1][1]))
+				chosen = &view;
+		Native::UtilityResult mine;
+		std::string why;
+		const bool made = Native::ComputeUtility(*chosen, *a_pass->geometry, mine, why);
+		Note(field("computed"), !made, std::format("{}: {}", name, why.empty() ? "no pass in CS's rule" : why));
+		if (!made)
+			return;
+		Note(field("vertex descriptor"), mine.vertex != a_vertex, std::format("{}: engine {:#x} mine {:#x} (technique {:#x})", name, a_vertex, mine.vertex, mine.technique));
+		const auto compare = [&](const std::string& a_field, const float (*a_e)[4], const float (*a_m)[4], const float (*a_w)[4], std::uint32_t a_count) {
+			for (std::uint32_t r = 0; r < a_count; ++r)
+				for (std::uint32_t i = 0; i < 4; ++i)
+					if (a_w[r][i] != 0.0f && std::memcmp(&a_e[r][i], &a_m[r][i], 4) != 0) {
+						Note(a_field, true, std::format("{} row {}: engine {} mine {}", name, r, Rows(a_e, a_count), Rows(a_m, a_count)));
+						return;
+					}
+			Note(a_field, false, {});
+		};
+		const auto& c = mine.constants;
+		const auto& w = mine.written;
+		compare(field("vs technique"), a_engine.vsTechnique, c.vsTechnique, w.vsTechnique, kVSTechniqueRows);
+		compare(field("vs material"), a_engine.vsMaterial, c.vsMaterial, w.vsMaterial, kVSMaterialRows);
+		compare(field("vs geometry"), a_engine.vsGeometry, c.vsGeometry, w.vsGeometry, kVSGeometryRows);
+		compare(field("ps geometry"), a_engine.psGeometry, c.psGeometry, w.psGeometry, kPSGeometryRows);
+		Note(field("alpha test ref"), std::memcmp(&a_engine.alphaTestRef, &c.alphaTestRef, 4) != 0, std::format("{}: engine {} mine {}", name, a_engine.alphaTestRef, c.alphaTestRef));
+		const auto& m = mine.state;
+		Note(field("state"),
+			m.blend != a_state.blend || m.write != a_state.write || m.depth != a_state.depth || m.cull != a_state.cull || m.depthBias != a_state.depthBias ||
+				m.stencil != a_state.stencil || m.stencilRef != a_state.stencilRef,
+			std::format("{}: engine blend {} write {} depth {} cull {} bias {} stencil {}/{:#x}; mine blend {} write {} depth {} cull {} bias {} stencil {}/{:#x}", name,
+				a_state.blend, a_state.write, a_state.depth, a_state.cull, a_state.depthBias, a_state.stencil, a_state.stencilRef, m.blend, m.write, m.depth, m.cull,
+				m.depthBias, m.stencil, m.stencilRef));
+		Family::Viewport viewport = chosen->viewport;
+		viewport.depthRange[1] -= Family::DepthBiasViewportOffset(m.depthBias);
+		Note(field("viewport"), viewport.rect != a_viewport.rect || viewport.depthRange != a_viewport.depthRange,
+			std::format("{}: engine {} {} {} {} range {} {}; mine {} {} {} {} range {} {}", name, a_viewport.rect[0], a_viewport.rect[1], a_viewport.rect[2], a_viewport.rect[3],
+				a_viewport.depthRange[0], a_viewport.depthRange[1], viewport.rect[0], viewport.rect[1], viewport.rect[2], viewport.rect[3], viewport.depthRange[0],
+				viewport.depthRange[1]));
+		// The frame rows but the previous camera's (c16-c19, c41), which no Utility technique here reads.
+		for (std::uint32_t r = 0; r < kFrameRows; ++r) {
+			if ((r >= 16 && r < 20) || r == 41)
+				continue;
+			if (std::memcmp(a_frame[r], chosen->frame[r], 16) != 0) {
+				Note(field("frame"), true,
+					std::format("{} row {}: engine [{} {} {} {}] mine [{} {} {} {}]", name, r, a_frame[r][0], a_frame[r][1], a_frame[r][2], a_frame[r][3], chosen->frame[r][0],
+						chosen->frame[r][1], chosen->frame[r][2], chosen->frame[r][3]));
+				break;
+			}
+			if (r + 1 == kFrameRows)
+				Note(field("frame"), false, {});
+		}
+		if (mine.texture) {
+			const auto* view = ::RenderGraph::Engine::Tripwire::Unwrap(MaterialPort::ViewOf(mine.texture));
+			Note(field("t0"), view != a_t0 || mine.address != a_address || mine.filter != a_filter,
+				std::format("{}: engine {} {}/{} mine {} {}/{}", name, static_cast<const void*>(a_t0), a_address, a_filter, static_cast<const void*>(view), mine.address, mine.filter));
+		}
 	}
 
 	void Report()

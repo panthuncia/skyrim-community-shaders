@@ -9,9 +9,11 @@
 #include "Features/DrawcallLimitFix/Core/Engine/SkinPalettes.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
+#include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
+#include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Shading/GeometryPort.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
@@ -20,6 +22,7 @@
 #include "Features/DrawcallLimitFix/Features/Effects/EffectDescriptors.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 #include "Features/DrawcallLimitFix/Features/Particles/ParticleSnapshots.h"
+#include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/LightLimitFix.h"
@@ -31,6 +34,7 @@
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Fatal.h"
+#include "RenderGraph/PublishedResources.h"
 #include "ShaderCache.h"
 #include "Snapshot/CoreFrame.h"
 #include "State.h"
@@ -82,6 +86,12 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				const float folded = c[0] == 0.0f && c[1] == 0.0f && c[2] == 0.0f ? t[i] : (r[i][0] * c[0] + r[i][1] * c[1] + r[i][2] * c[2]) * s + t[i];
 				a_out[i * 4 + 3] = folded - e[i];
 			}
+		}
+
+		/** @brief The alpha test reference the batch renderer sets for an alpha property: its threshold times the exe's 1/255 (0x3B808081). */
+		float AlphaRefOf(const RE::NiAlphaProperty& a_alpha)
+		{
+			return static_cast<float>(a_alpha.alphaThreshold) * std::bit_cast<float>(0x3B808081u);
 		}
 
 		/** @brief Whether a_geometry is a particle system drawn as camera-facing quads (not strips). */
@@ -263,9 +273,13 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			}
 			a_out.pass = derived.derivedPass;
 			a_out.rawPixel = derived.rawPixel;
-			// Without shadow maps a shadow light is a plain light of the pass (GetRenderPasses reads the colour accumulator's +0x178).
-			if (a_out.lights.shadow && a_in.shadowMaps)
-				a_out.pass |= (1u << 14) | ((a_out.lights.shadow & 7u) << 6);
+			// Without shadow maps a shadow light is a plain light of the pass (GetRenderPasses reads the colour accumulator's +0x178). The raw
+			// pixel descriptor takes the same bits: DefShadow reaches the shader through CS's permutation block.
+			if (a_out.lights.shadow && a_in.shadowMaps) {
+				const std::uint32_t bits = (1u << 14) | ((a_out.lights.shadow & 7u) << 6);
+				a_out.pass |= bits;
+				a_out.rawPixel |= bits;
+			}
 		}
 		LightingShaderDescriptors(a_out.pass, false, a_out.vertex, a_out.pixel);
 
@@ -323,6 +337,31 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			for (std::uint32_t i = 0; i < 4; ++i)
 				c.psGeometry[r][i] = w.psGeometry[r][i] = 0.0f;
 		PointLightRows(a_in, a_out.lights, a_in.eye, c, w);
+		if (a_in.shadowMaps && a_out.lights.shadow) {
+			// The point light routine (AE 0x1414df650) zeroes ShadowLightMaskSelect, then gives each shadow light its mask channel.
+			ConstantBlock select;
+			select.Reset();
+			float* channels = &select.floats[psLayout.offset[kPSShadowLightMaskSelect]];
+			for (std::uint32_t i = 0; i < 4; ++i)
+				channels[i] = 0.0f;
+			for (std::uint32_t i = 0; i < a_out.lights.shadow && i < 4; ++i)
+				channels[i] = static_cast<float>(static_cast<const RE::BSShadowLight*>(a_out.lights.lights[1 + i])->GetRuntimeData().maskIndex);
+			float rows[kLightingPSGeometryRows][4]{}, written[kLightingPSGeometryRows][4]{};
+			Pack(select, psLayout, psTable, kPSGroups[kPerGeometry], kPSFirstVariable[kPerGeometry], rows, written, kLightingPSGeometryRows);
+			for (std::uint32_t r = 0; r < kLightingPSGeometryRows; ++r)
+				for (std::uint32_t i = 0; i < 4; ++i)
+					if (written[r][i] != 0.0f) {
+						c.psGeometry[r][i] = rows[r][i];
+						w.psGeometry[r][i] = 1.0f;
+					}
+		}
+		// A pass with shadow bits reads the shadow mask in t14 (SetupTechnique): clamped, with the technique's filter.
+		if (technique.shadowMask && technique.shadowMaskTexture) {
+			a_out.record.textures[kShadowMaskSlot] = technique.shadowMaskTexture;
+			a_out.record.addressModes[kShadowMaskSlot] = 0;
+			a_out.record.filterModes[kShadowMaskSlot] = technique.filterModes[kShadowMaskSlot];
+			a_out.record.textureWritten |= 1u << kShadowMaskSlot;
+		}
 		return true;
 	}
 
@@ -703,6 +742,126 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 	namespace
 	{
+		/**
+		 * @brief The states a menu model's Utility draw is drawn with: depth test and write and no colour, the property's culling, and the
+		 * alpha property's test.
+		 */
+		DrawState UtilityStateOf(const RE::BSGeometry& a_geometry, const RE::BSShaderProperty& a_property)
+		{
+			using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
+			DrawState state;
+			state.depth = 3;
+			state.write = 0;
+			state.cull = a_property.flags.any(Flag::kTwoSided) ? 0u : 1u;
+			const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+			if (alpha && alpha->GetAlphaTesting())
+				state.alphaRef = AlphaRefOf(*alpha);
+			return state;
+		}
+	}
+
+	void UtilityFrameRows(const RE::NiCamera& a_camera, float (*a_out)[4])
+	{
+		std::memset(a_out, 0, kFrameBytes);
+		ShadowCameras::Camera matrices;
+		ShadowCameras::CameraMatrices(a_camera, matrices);
+		const RE::NiPoint3 eye{ matrices.eye[0], matrices.eye[1], matrices.eye[2] };
+		Snapshot::FrameCamera::WriteCamera(matrices.view, matrices.proj, matrices.viewProj, eye, { 0.0f, 0.0f }, nullptr, &a_out[0][0]);
+		Snapshot::FrameCamera::WriteRatios({}, Snapshot::Core().drClampOffset, &a_out[0][0]);
+		const float params[4]{ Snapshot::Core().inverseGamma, 1.0f, 0.0f, 0.0f };
+		std::memcpy(a_out[42], params, sizeof(params));
+	}
+
+	bool ComputeUtility(const UtilityView& a_view, const RE::BSGeometry& a_geometry, UtilityResult& a_out, std::string& a_why)
+	{
+		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
+		a_out = {};
+		a_why.clear();
+		const auto* property = netimmerse_cast<const RE::BSLightingShaderProperty*>(a_geometry.GetGeometryRuntimeData().shaderProperty.get());
+		if (!property || !property->material)
+			return false;
+		const std::uint64_t flags = property->flags.underlying();
+		const auto* alpha = a_geometry.GetGeometryRuntimeData().alphaProperty.get();
+		const bool testing = alpha && alpha->GetAlphaTesting();
+		const bool blending = alpha && alpha->GetAlphaBlending();
+		// The passes GetRenderPasses registers: the depth pass takes what writes depth and is not blended, a shadow map its casters.
+		std::uint32_t technique = 0;
+		if (a_view.view == View::MenuDepth) {
+			if (!property->flags.any(Flag::kZBufferWrite) || BlendedList(a_geometry) || property->flags.any(Flag::kDecal, Flag::kDynamicDecal))
+				return false;
+			technique = ShadowUtilityTechnique(flags, testing) | ShadowModeBits(0xC);
+		} else {
+			const auto type = static_cast<std::uint8_t>(a_geometry.GetType().underlying());
+			if (ShadowCasterReject(flags, type, blending, property->alpha, FrameGlobals::Current().shadowGlobal) != ShadowReject::None)
+				return false;
+			technique = ShadowUtilityTechnique(flags, testing) | ShadowModeBits(a_view.renderMode);
+		}
+		a_out.technique = technique;
+		a_out.vertex = ShadowMask::Native::VertexDescriptorOf(technique);
+		auto& c = a_out.constants;
+		auto& w = a_out.written;
+		const auto write = [](float* a_row, float* a_mask, std::uint32_t a_i, float a_value) {
+			a_row[a_i] = a_value;
+			a_mask[a_i] = 1.0f;
+		};
+		const std::uint32_t t = a_out.vertex;
+		// SetupTechnique: a paraboloid's ParabolaParam (VS c1).
+		if ((t & 0x20004000u) == 0x4000u && (t & 0x10000u)) {
+			write(c.vsTechnique[1], w.vsTechnique[1], 0, a_view.parabola[0]);
+			write(c.vsTechnique[1], w.vsTechnique[1], 1, a_view.parabola[1]);
+		}
+		// SetupMaterial: a textured technique's TexcoordOffset, and t0 the diffuse with the material's clamp mode.
+		const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(property->material);
+		if ((t & 0x2u) && (t & 0x2040280u)) {
+			const std::uint32_t buffer = a_view.textureTransformBuffer & 1;
+			write(c.vsMaterial[0], w.vsMaterial[0], 0, material->texCoordOffset[buffer].x);
+			write(c.vsMaterial[0], w.vsMaterial[0], 1, material->texCoordOffset[buffer].y);
+			write(c.vsMaterial[0], w.vsMaterial[0], 2, material->texCoordScale[buffer].x);
+			write(c.vsMaterial[0], w.vsMaterial[0], 3, material->texCoordScale[buffer].y);
+			if (t & 0x2040080u) {
+				if (property->material->GetType() != RE::BSShaderMaterial::Type::kLighting) {
+					a_why = "a textured Utility pass of a material that is not a Lighting material";
+					return false;
+				}
+				a_out.texture = material->diffuseTexture.get();
+				a_out.address = static_cast<std::uint32_t>(material->textureClampMode);
+				a_out.filter = 3;
+			}
+		}
+		// SetupGeometry: World (VS c1-c4) less the eye, unskinned only; a skinned draw's palettes place it.
+		if (!(t & 0x4u)) {
+			float rows[12];
+			WorldRows(a_geometry.world, a_view.eye, rows);
+			for (std::uint32_t r = 0; r < 3; ++r)
+				for (std::uint32_t i = 0; i < 4; ++i)
+					write(c.vsGeometry[1 + r], w.vsGeometry[1 + r], i, rows[r * 4 + i]);
+			const float last[4]{ 0.0f, 0.0f, 0.0f, 1.0f };
+			for (std::uint32_t i = 0; i < 4; ++i)
+				write(c.vsGeometry[4], w.vsGeometry[4], i, last[i]);
+		}
+		if (t & 0x200u) {
+			a_why = std::format("a Utility technique with an eye position row ({:#x})", t);
+			return false;
+		}
+		// AlphaTestRef.x (PS c2), which only the depth pass's pixel shader declares: 0x3F7EFEFF while the alpha property blends, else the
+		// threshold over 255 plus the exe's bias.
+		if (a_view.view == View::MenuDepth && alpha && (blending || (t & 0x80u) || (t & 0x14000u) == 0x10000u)) {
+			float ref = std::bit_cast<float>(0x3F7EFEFFu);
+			if (!blending) {
+				constexpr float kStep = std::bit_cast<float>(0x3B808081u), kBias = std::bit_cast<float>(0x3B80802Cu);
+				ref = static_cast<float>(alpha->alphaThreshold) * kStep + kBias;
+				if (alpha->alphaThreshold == 4)
+					ref += kStep;
+			}
+			write(c.psGeometry[2], w.psGeometry[2], 0, ref);
+		}
+		a_out.state = UtilityStateOf(a_geometry, *property);
+		c.alphaTestRef = a_out.state.alphaRef;
+		return true;
+	}
+
+	namespace
+	{
 		namespace Pipeline = ::RenderGraph::Engine::Pipeline;
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 
@@ -727,7 +886,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 				state.blend = destination == RE::NiAlphaProperty::AlphaFunction::kOne ? 2u : 1u;
 			}
 			if (alpha && alpha->GetAlphaTesting())
-				state.alphaRef = static_cast<float>(alpha->alphaThreshold) / 255.0f;
+				state.alphaRef = AlphaRefOf(*alpha);
 			const bool test = a_property.flags.any(Flag::kZBufferTest), write = a_property.flags.any(Flag::kZBufferWrite);
 			state.depth = a_effect ? (test ? (write ? 3u : 1u) : 0u) : 3u;
 			state.cull = a_property.flags.any(Flag::kTwoSided) ? 0u : 1u;
@@ -797,7 +956,15 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 			auto* view = Unwrap(a_view);
 			GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 			const auto slot = Family::SlotTexture(view, Kind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, a_slot), a_index, a_run.owners, &failure);
-			if (slot != Family::SlotResult::Ok) {
+			if (slot == Family::SlotResult::Published) {
+				// A target a graph pass writes, such as the shadow mask, is read by its published id, so the graph orders the write first.
+				const auto id = PublishedResources::ExportedId(view);
+				const auto result = SceneDraws::ReadPublished(a_run.view, id, a_index);
+				if (result != Family::InputResult::Graph) {
+					a_detail = std::format("t{} holds '{}': {}", a_slot, id, Family::ReasonOf(result));
+					return "a slot holds a published texture its client does not read";
+				}
+			} else if (slot != Family::SlotResult::Ok) {
 				a_detail = GpuTextures::DescribeFailure(view, a_slot, failure);
 				const bool streaming = failure == GpuTextures::ResolveFailure::Pending || failure == GpuTextures::ResolveFailure::StreamedWindow;
 				return streaming ? kStreaming : "a texture it samples could not be imported";
@@ -837,10 +1004,8 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 		const char* DescribeStates(Draw& a_draw, const DrawState& a_state)
 		{
-			// The colour pass writes stencil bit 0 everywhere it draws (mode 2, ref 0xff) for the TAA mask fill that follows.
-			constexpr std::uint32_t kStencilMode = 2, kStencilRef = 0xff;
-			a_draw.stencilRef = kStencilRef;
-			if (!Family::DescribeStates(a_draw.key, Pipeline::EngineBlendState(a_state.blend, 0, a_state.write, 0), Pipeline::EngineDepthStencilState(a_state.depth, kStencilMode),
+			a_draw.stencilRef = a_state.stencilRef;
+			if (!Family::DescribeStates(a_draw.key, Pipeline::EngineBlendState(a_state.blend, 0, a_state.write, 0), Pipeline::EngineDepthStencilState(a_state.depth, a_state.stencil),
 					Pipeline::EngineRasterState(0, a_state.cull, a_state.depthBias, 0)))
 				return "a depth-stencil, blend or rasterizer state with no description";
 			return nullptr;
@@ -1114,6 +1279,66 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		}
 	}
 
+	const char* AddUtility(const UtilityView& a_view, const RE::BSGeometry& a_geometry, Run& a_run, std::string& a_detail)
+	{
+		UtilityResult r;
+		if (!ComputeUtility(a_view, a_geometry, r, a_detail))
+			return a_detail.empty() ? nullptr : "its Utility constants could not be computed";
+		auto* shader = RE::BSUtilityShader::GetSingleton();
+		auto* vs = shader ? globals::shaderCache->GetVertexShader(*shader, r.vertex) : nullptr;
+		if (!vs) {
+			a_detail = std::format("vs {:#x}", r.vertex);
+			return "no Utility vertex shader for its technique";
+		}
+		Draw draw{};
+		draw.shader = Shader::Utility;
+		draw.key.descriptor = r.vertex;
+		draw.key.defineStage = Family::DefineStage::Vertex;
+		draw.key.depthFormat = SceneDraws::DepthFormat(a_view.view);
+		if (!draw.key.depthFormat)
+			return "no depth import";
+		draw.depthSlice = a_view.slice;
+		if (const char* why = DescribeStates(draw, r.state))
+			return why;
+		UtilitySceneConstants c = r.constants;
+		if (const char* why = AddGeometry(a_geometry, vs->vertexDesc, a_run, draw, c.vertexRef, c.indexRef, c.vertexLayout, c.vertexStride, c.firstIndex, a_detail))
+			return why;
+		// UTILITY_ORG_SCENE reads t0 and t7; every other slot, and t0 without a texture, gets the null view and the first sampler.
+		for (std::uint32_t slot = 0; slot < kUtilitySlots; ++slot) {
+			if (slot == 0 && r.texture) {
+				if (const char* why = AddTexture(MaterialPort::ViewOf(r.texture), r.address, r.filter, slot, a_run, c.textures[slot], c.samplers[slot], a_detail))
+					return why;
+				continue;
+			}
+			if (Family::SlotTexture(nullptr, UtilitySlotKind(slot), GpuTextures::Tag(GpuTextures::Source::FrameSlot, slot), c.textures[slot], a_run.owners) !=
+				Family::SlotResult::Ok)
+				return "no null view";
+			c.samplers[slot] = Family::SlotSampler(0, 0, a_run.owners);
+			if (c.samplers[slot] == GpuTextures::kInvalid)
+				return "its sampler modes have no graph sampler";
+		}
+		bool building = false;
+		draw.program = SceneDraws::UtilityProgram(draw.key, *shader, &building);
+		if (!draw.program)
+			return building ? kBuilding : "its ORG program cannot be built";
+		if (r.vertex & 0x4u)
+			if (const char* why = AddBones(a_geometry, a_run, draw))
+				return why;
+		draw.frameOffset = a_run.Append(std::as_bytes(std::span<const float[4]>(a_view.frame, kFrameRows)));
+		draw.latchOffset = a_run.Append(std::as_bytes(std::span<const UtilitySceneConstants, 1>(&c, 1)));
+		if (draw.latchOffset == ~0u || draw.frameOffset == ~0u)
+			return "more constants than the batch's latch holds";
+		draw.viewport = a_view.viewport;
+		draw.viewport.depthRange[1] -= Family::DepthBiasViewportOffset(r.state.depthBias);
+		a_run.draws.push_back(std::move(draw));
+		return nullptr;
+	}
+
+	bool LeftOut(const char* a_why)
+	{
+		return a_why == kBuilding || a_why == kNoBuffers || a_why == kStreaming;
+	}
+
 	/**
 	 * @brief Whether a_geometry's pass has accumulation hint 1, the accumulator's blended list (FUN_1414f50b0, batch renderer +0xF0), as
 	 * GetRenderPasses gives it. BSEffectShaderProperty (AE 0x1414bd890): not a decal or billboard, and the property's alpha below one,
@@ -1187,42 +1412,24 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		return accumulator && reinterpret_cast<const std::uint8_t*>(accumulator)[0x51] != 0;
 	}
 
-	bool Owns(std::int32_t a_scheme, bool a_keepDepth)
+	bool Owns(std::int32_t a_scheme)
 	{
 		// The observe step compares the engine's draws, so it owns none.
 		static const bool native = ::RenderGraph::Engine::Native::Active() && !Observe::Enabled();
 		if (!native)
 			return false;
 		// The schemes whose draws CS computes as the engine does (observe parity, draw order included): the inventory's item (1, 2) with its
-		// enchantment membranes, the stats menu's constellations, and MistMenu's renders without a depth pass (the main menu, a loading
-		// screen before its model). A MistMenu render with one (a loading model with shadow lights) needs its depth pass, shadow maps and
-		// shadow mask, which CS does not draw yet.
+		// enchantment membranes, MistMenu (4: the main menu, a loading screen, and a loading model with its shadow maps, depth pass and
+		// masks) and the stats menu's constellations.
 		switch (a_scheme) {
 		case 1:
 		case 2:
+		case 4:
 		case 6:
 			return true;
-		case 4:
-			return !a_keepDepth;
 		default:
 			return false;
 		}
-	}
-
-	namespace
-	{
-		/** @brief Each scheme's last render's depth pass flag, for the detector's per-frame ownership (NativeOwns). */
-		std::array<std::atomic<bool>, 8>& LastKeepDepth()
-		{
-			static std::array<std::atomic<bool>, 8> last{};
-			return last;
-		}
-	}
-
-	void NoteRender(std::int32_t a_scheme, bool a_keepDepth)
-	{
-		if (a_scheme >= 0 && static_cast<std::size_t>(a_scheme) < LastKeepDepth().size())
-			LastKeepDepth()[static_cast<std::size_t>(a_scheme)].store(a_keepDepth, std::memory_order_relaxed);
 	}
 
 	DWORD Render(RE::UI3DSceneManager* a_manager, std::int32_t a_scheme, RE::NiCamera* a_camera, bool a_keepDepth)
@@ -1265,8 +1472,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 
 		// The draw half: the colour pass from the scene graph into CS's frame.
 		auto& native = GetNative();
-		// No owned render renders shadow maps (Owns): its shadow lights are plain lights of their passes.
-		const auto in = SampleInputs(*a_manager, *camera, native.previous, scheme == 4 && a_keepDepth);
+		// Scheme 4 with its depth pass renders the shadow lights' maps (RenderShadowsAndDepth); otherwise they are plain lights of their passes.
+		const bool shadowMaps = scheme == 4 && a_keepDepth;
+		const auto in = SampleInputs(*a_manager, *camera, native.previous, shadowMaps);
 		const bool closestPoint = SortsByClosestPoint(*a_manager);
 		std::vector<ScenePass> passes;
 		SceneGeometry(root, *camera, closestPoint, passes);
@@ -1283,6 +1491,9 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		constexpr float kBlack[4]{ 0.0f, 0.0f, 0.0f, 0.0f };
 		if (scheme == 4 && !::RenderGraph::Engine::Skeleton::ClearColour(RE::RENDER_TARGET::kMAIN, kBlack))
 			::RenderGraph::Fatal("menu scenes", "kMAIN's colour clear at a native menu scene render was not taken");
+		// The shadow maps, the depth pass the colour pass keeps, and the masks its Lighting draws read.
+		if (shadowMaps)
+			RenderShadowsAndDepth(*a_manager, *camera, root, in);
 		auto run = std::make_shared<Run>();
 		run->view = View::MenuColour;
 		std::uint32_t frame = ~0u;
@@ -1344,8 +1555,6 @@ namespace DCLF::Features::MenuViews
 {
 	bool NativeOwns(std::int32_t a_scheme)
 	{
-		// The scheme's ownership for its last render's kind: a MistMenu render changes kind (main menu, loading model) rarely.
-		const bool keepDepth = a_scheme >= 0 && a_scheme < 8 && Scenes::Native::LastKeepDepth()[static_cast<std::size_t>(a_scheme)].load(std::memory_order_relaxed);
-		return Scenes::Native::Owns(a_scheme, keepDepth);
+		return Scenes::Native::Owns(a_scheme);
 	}
 }

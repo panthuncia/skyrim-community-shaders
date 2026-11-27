@@ -443,9 +443,9 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
-	std::shared_ptr<const void> UtilityProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
+	std::shared_ptr<const void> UtilityProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building)
 	{
-		return GetState().utility.Get(a_key, a_shader);
+		return GetState().utility.Get(a_key, a_shader, a_building);
 	}
 
 	std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building)

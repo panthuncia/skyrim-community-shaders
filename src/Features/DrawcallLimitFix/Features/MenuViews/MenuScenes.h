@@ -370,6 +370,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		struct DrawState
 		{
 			std::uint32_t blend = 0, write = 1, depth = 3, cull = 1, depthBias = 0;
+			std::uint32_t stencil = 2, stencilRef = 0xff;  // the colour pass writes stencil bit 0 everywhere it draws
 			float alphaRef = 0.0f;
 		};
 		/**
@@ -408,13 +409,58 @@ namespace DCLF::Features::MenuViews::Scenes
 		 */
 		bool BoneRows(const RE::BSGeometry& a_geometry, std::span<std::byte, kBonesBytes> a_out);
 
+		/** @brief What a Utility draw of a menu model is drawn for: the depth pass with the menu camera, or a shadow light's map. */
+		struct UtilityView
+		{
+			View view = View::MenuDepth;
+			std::uint32_t renderMode = 0;              // the accumulator's render mode: the technique's mode bits for a shadow map
+			RE::NiPoint3 eye{};                        // the camera's eye, SetCameraData's posAdjust
+			std::array<float, 2> parabola{};           // ParabolaParam for a paraboloid's map: 1 / radius, and 1 or -1 by hemisphere
+			std::uint32_t slice = 0;                   // the shadow map slice it draws into
+			std::uint32_t textureTransformBuffer = 0;  // the material's TexcoordOffset buffer (MaterialFrame)
+			Family::Viewport viewport;
+			float frame[kFrameRows][4]{};  // FrameBuffer (b12) as SetCameraData writes it for the camera
+		};
+
+		/** @brief A Utility draw as BSUtilityShader's Setup functions would bind it: its rows, which floats are written, technique, states, t0. */
+		struct UtilityResult
+		{
+			UtilitySceneConstants constants{};
+			UtilitySceneConstants written{};
+			std::uint32_t technique = 0, vertex = 0;
+			DrawState state;
+			const RE::NiSourceTexture* texture = nullptr;  // t0, the diffuse an alpha-tested draw samples
+			std::uint32_t address = 0, filter = 0;
+		};
+
 		/**
-		 * @brief Whether CS draws a light scheme's menu scene natively (native mode, a scheme whose draws CS computes), for a render with or
-		 * without its depth pass (a_keepDepth, UI3DSceneManager::Render's fourth argument).
+		 * @brief The Utility pass a_geometry registers into a_view's accumulator (GetRenderPasses in the depth or shadow map render mode),
+		 * with its constants (BSUtilityShader::SetupTechnique AE 0x1414fa160, SetupMaterial 0x1414faa60, SetupGeometry 0x1414fae40). False
+		 * with an empty a_why when the geometry has no pass there; false with a_why when CS cannot compute it.
 		 */
-		bool Owns(std::int32_t a_scheme, bool a_keepDepth);
-		/** @brief Notes a render's scheme and depth pass flag, for the detector's ownership (MenuViews::NativeOwns). Main thread. */
-		void NoteRender(std::int32_t a_scheme, bool a_keepDepth);
+		bool ComputeUtility(const UtilityView& a_view, const RE::BSGeometry& a_geometry, UtilityResult& a_out, std::string& a_why);
+
+		/**
+		 * @brief Appends a_geometry's Utility draw in a_view to a_run (none when it has no pass there). Null when added or when it has none,
+		 * else why not; LeftOut tells the reasons that leave a draw out of this render only.
+		 */
+		const char* AddUtility(const UtilityView& a_view, const RE::BSGeometry& a_geometry, Run& a_run, std::string& a_detail);
+		/** @brief Whether a draw's refusal only leaves it out of this render: a program still building, no buffers yet, a streaming texture. */
+		bool LeftOut(const char* a_why);
+
+		/** @brief FrameBuffer rows for a camera: SetCameraData's camera rows, no previous camera, the frame's ratios. */
+		void UtilityFrameRows(const RE::NiCamera& a_camera, float (*a_out)[4]);
+
+		/**
+		 * @brief A loading model's shadow lights, depth pass and shadow masks for a native render of scheme 4 with its depth pass, in
+		 * UI3DSceneManager::Render's order (MenuScenesShadows.cpp): FUN_140973210's light loop by CS's ports (camera update, keep, mask
+		 * index, scissor, Accumulate's bookkeeping, Render's targets, slices and light transforms) with each map drawn from the menu
+		 * geometry, then the depth pass into kMAIN's depth, then the menu masks. Fatal when a draw CS cannot compute is met.
+		 */
+		void RenderShadowsAndDepth(const RE::UI3DSceneManager& a_manager, const RE::NiCamera& a_camera, RE::NiAVObject* a_root, const Inputs& a_in);
+
+		/** @brief Whether CS draws a light scheme's menu scene natively (native mode, a scheme whose draws CS computes). */
+		bool Owns(std::int32_t a_scheme);
 
 		/**
 		 * @brief UI3DSceneManager::Render (AE 52727) in native mode for a scheme CS owns: its update half (lights, the root's update, the
@@ -438,6 +484,9 @@ namespace DCLF::Features::MenuViews::Scenes
 			std::uint32_t a_stencil, std::uint32_t a_stencilRef, std::uint32_t a_fill, std::uint32_t a_cull, std::uint32_t a_depthBias, float a_alphaRef,
 			const Family::Viewport& a_viewport, std::int32_t a_target);
 		void Bones(const RE::BSRenderPass* a_pass, std::span<const std::byte> a_engine);
+		/** @brief A latched Utility draw (depth pass or shadow map) against CS's: technique, rows, frame, states, viewport and t0. */
+		void Utility(const RE::BSRenderPass* a_pass, const UtilitySceneConstants& a_engine, const float (*a_frame)[4], std::uint32_t a_vertex, std::uint32_t a_slice,
+			const Native::DrawState& a_state, const Family::Viewport& a_viewport, const ID3D11ShaderResourceView* a_t0, std::uint32_t a_address, std::uint32_t a_filter);
 		void Report();
 	}
 
@@ -452,7 +501,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		/** @brief How a_view's client reads the published id a bound slot exports. */
 		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
 		/** @brief The program for a key, one per shader. Null when it cannot be built. */
-		std::shared_ptr<const void> UtilityProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
+		std::shared_ptr<const void> UtilityProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
 		/** @brief a_building, when given, is set when null means the program is still building on the program service. */
 		std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);
 		std::shared_ptr<const void> EffectProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader, bool* a_building = nullptr);

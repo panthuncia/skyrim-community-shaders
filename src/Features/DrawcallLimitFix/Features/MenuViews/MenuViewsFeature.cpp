@@ -24,8 +24,7 @@ namespace DCLF::Features::MenuViews
 				// A scheme CS draws natively: the engine's function is not entered.
 				if (a_manager) {
 					const auto current = static_cast<std::int32_t>(a_manager->currentlightScheme);
-					Scenes::Native::NoteRender(current, a_arg4);
-					if (Scenes::Native::Owns(current, a_arg4) && (a_scheme == 0 || a_scheme == current))
+					if (Scenes::Native::Owns(current) && (a_scheme == 0 || a_scheme == current))
 						return Scenes::Native::Render(a_manager, a_scheme, a_camera, a_arg4);
 				}
 				PassCapture::MenuSceneScope menuScene;

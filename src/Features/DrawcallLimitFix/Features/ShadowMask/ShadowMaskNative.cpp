@@ -137,17 +137,6 @@ namespace DCLF::Features::ShadowMask::Native
 			return (bits | 0x2002u) + 0x2B;
 		}
 
-		/** @brief FUN_1415221e0: the vertex descriptor of a raw technique. */
-		std::uint32_t VertexDescriptorOf(std::uint32_t a_raw)
-		{
-			std::uint32_t d = a_raw & 0xF7E5FF9Fu;
-			if (Global<bool>(Address::kSceneShadows) && (a_raw & 0x1E00000u) && (Engine::Running() == Engine::Runtime::Se1597 || (d & 0x2000u)))
-				d = (a_raw & 0x1E00000u) | 0x2002u;
-			if ((d & 0x14000u) != 0x14000u && ((d & 0x20004000u) == 0x4000u || (d & 0x1E02000u) == 0x2000u) && !(d & 0x80u) && (d & 0x14000u) != 0x10000u)
-				d &= 0xDFFFE1E4u;
-			return d;
-		}
-
 		/** @brief FUN_141522260: the pixel descriptor of a mask technique, with the filter's bits. */
 		std::uint32_t PixelDescriptorOf(std::uint32_t a_raw)
 		{
@@ -263,7 +252,7 @@ namespace DCLF::Features::ShadowMask::Native
 			bool focusTargets = false;
 			Family::Viewport viewport;
 
-			bool Read(View a_view, std::string& a_why)
+			bool Read(View a_view, const RE::NiPoint3* a_menuEye, std::string& a_why)
 			{
 				view = a_view;
 				state = globals::state;
@@ -288,8 +277,12 @@ namespace DCLF::Features::ShadowMask::Native
 				}
 				// Native: the world view's camera is the snapshot's main camera, which RenderShadowMasks would set (SetCameraData, the
 				// current camera). The scene's shadows are on whenever the world view's masks draw, so there is no lighting offset.
-				const bool native = Snapshot::FrameCamera::Owned() && a_view == View::World;
-				if (native) {
+				const bool native = Snapshot::FrameCamera::Owned() && (a_view == View::World || a_menuEye);
+				if (a_menuEye) {
+					// A native menu scene: the menu camera's eye, which its SetCameraData would make the posAdjust. A menu has no cascades,
+					// so the camera's planes are not read.
+					adjust = *a_menuEye;
+				} else if (native) {
 					const auto& eye = Snapshot::FrameCamera::Main().data.CameraPosAdjust;
 					adjust = { offset.x + eye.x, offset.y + eye.y, offset.z + eye.z };
 					if (const auto& snapshot = Snapshot::Current()) {
@@ -571,13 +564,23 @@ namespace DCLF::Features::ShadowMask::Native
 		}
 	}
 
-	bool Build(View a_view, Run& a_run, std::vector<RE::BSShadowLight*>& a_lights, std::string& a_why)
+	std::uint32_t VertexDescriptorOf(std::uint32_t a_raw)
+	{
+		std::uint32_t d = a_raw & 0xF7E5FF9Fu;
+		if (Global<bool>(Address::kSceneShadows) && (a_raw & 0x1E00000u) && (Engine::Running() == Engine::Runtime::Se1597 || (d & 0x2000u)))
+			d = (a_raw & 0x1E00000u) | 0x2002u;
+		if ((d & 0x14000u) != 0x14000u && ((d & 0x20004000u) == 0x4000u || (d & 0x1E02000u) == 0x2000u) && !(d & 0x80u) && (d & 0x14000u) != 0x10000u)
+			d &= 0xDFFFE1E4u;
+		return d;
+	}
+
+	bool Build(View a_view, Run& a_run, std::vector<RE::BSShadowLight*>& a_lights, std::string& a_why, const RE::NiPoint3* a_menuEye)
 	{
 		DCLF_ZONE("CS.DCLF.ShadowMask.Build");
 		++s_builds;
 		a_lights.clear();
 		Frame frame;
-		if (!frame.Read(a_view, a_why))
+		if (!frame.Read(a_view, a_menuEye, a_why))
 			return false;
 		auto* node = a_view == View::World ? Global<RE::ShadowSceneNode*>(Address::kWorldNode) : CS_ENGINE_READ(ShaderManagerState, RecordTime, RE::BSShaderManager::State::GetSingleton()).shadowSceneNode[1];
 		if (!node) {
@@ -586,7 +589,8 @@ namespace DCLF::Features::ShadowMask::Native
 		}
 		const auto& casters = node->GetRuntimeData().shadowLightsAccum;
 		const bool native = Snapshot::FrameCamera::Owned() && a_view == View::World;
-		auto modes = native ? Modes::WorldStart() : Modes::Current();
+		// A native menu scene starts from the same modes: nothing engine-side ran before it.
+		auto modes = native || a_menuEye ? Modes::WorldStart() : Modes::Current();
 		// The loop's walk: each light takes as many slots as it has maps.
 		for (std::uint32_t slot = 0; slot < casters.size();) {
 			auto* light = casters[slot];

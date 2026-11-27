@@ -31,6 +31,12 @@ namespace DCLF::Features::Shadows::Engine
 	 * a_index advanced as its Render would. False when DCLF cannot draw its views: then nothing is drawn and nothing reaches the engine.
 	 */
 	bool RenderLightNatively(RE::BSShadowLight& a_light, std::uint32_t& a_index);
+	/**
+	 * @brief Render thread, in a native menu scene render: a_light's Render bookkeeping (each descriptor's target and slice, the slice's
+	 * clear and its light transform), with no view captured and no camera state left behind. A frustum or paraboloid light only; the
+	 * caller draws the maps. a_index advances as its Render would.
+	 */
+	void RenderMenuLight(RE::BSShadowLight& a_light, std::uint32_t& a_index);
 	/** @brief Render thread. Set while Main::RenderShadowMaps runs, between DCLF's shadow map points. */
 	void SetShadowMapsOpen(bool a_open);
 	// Checks the casters' three calls before any hook is written. They must be CALLs, as the thunks chain.

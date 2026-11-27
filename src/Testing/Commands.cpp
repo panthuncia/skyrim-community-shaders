@@ -892,6 +892,64 @@ namespace Testing
 				queue->AddMessage(RE::BSFixedString(a_arg.substr(0, equals)), a_arg.substr(equals + 1) == "show" ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
 				return true;
 			});
+			// "lockpick": the nearest door or container within 4096 units of the player gets a novice lock, the player a lockpick, and the
+			// player activates it, so the lockpicking menu opens with its 3D lock (UI3DSceneManager's scheme 7).
+			RegisterCommand("lockpick", [](const std::string&, std::string&) {
+				AddTask([] {
+					auto* player = RE::PlayerCharacter::GetSingleton();
+					auto* tes = RE::TES::GetSingleton();
+					if (!player || !tes)
+						return;
+					RE::TESObjectREFR* nearest = nullptr;
+					float best = 0.0f;
+					tes->ForEachReferenceInRange(player, 4096.0f, [&](RE::TESObjectREFR* a_ref) {
+						const auto* base = a_ref ? a_ref->GetBaseObject() : nullptr;
+						if (base && (base->Is(RE::FormType::Door) || base->Is(RE::FormType::Container)) && !a_ref->IsDisabled()) {
+							const float distance = a_ref->GetPosition().GetSquaredDistance(player->GetPosition());
+							if (!nearest || distance < best) {
+								nearest = a_ref;
+								best = distance;
+							}
+						}
+						return RE::BSContainer::ForEachResult::kContinue;
+					});
+					auto* lock = nearest ? (nearest->GetLock() ? nearest->GetLock() : nearest->AddLock()) : nullptr;
+					if (!lock) {
+						logger::warn("[TEST] lockpick: no door or container near the player to lock");
+						return;
+					}
+					lock->baseLevel = 1;
+					lock->key = nullptr;
+					lock->SetLocked(true);
+					if (auto* pick = RE::TESForm::LookupByID<RE::TESBoundObject>(0x0000000A))
+						player->AddObjectToContainer(pick, nullptr, 1, nullptr);
+					nearest->ActivateRef(player, 0, nullptr, 0, false);
+					logger::info("[TEST] lockpick: {:08X} ({}) locked and activated", nearest->GetFormID(), nearest->GetName());
+				});
+				return true;
+			});
+			// "book": [<form id, hex>], a book opened in the book menu as reading it from the inventory does; without an id, the first
+			// book that teaches nothing and is no note.
+			RegisterCommand("book", [](const std::string& a_arg, std::string&) {
+				const auto id = a_arg.empty() ? 0u : static_cast<RE::FormID>(std::strtoul(a_arg.c_str(), nullptr, 16));
+				AddTask([id] {
+					RE::TESObjectBOOK* book = id ? RE::TESForm::LookupByID<RE::TESObjectBOOK>(id) : nullptr;
+					if (!id)
+						if (auto* data = RE::TESDataHandler::GetSingleton())
+							for (auto* candidate : data->GetFormArray<RE::TESObjectBOOK>())
+								if (candidate && !candidate->TeachesSpell() && !candidate->TeachesSkill() && !candidate->IsNoteScroll()) {
+									book = candidate;
+									break;
+								}
+					if (!book) {
+						logger::warn("[TEST] book: no book {:08X}", id);
+						return;
+					}
+					RE::BookMenu::OpenMenuFromBaseForm(book);
+					logger::info("[TEST] book: {:08X} ({}) opened", book->GetFormID(), book->GetName());
+				});
+				return true;
+			});
 			// "key": <menu user event>, a key press queued as the keyboard's: Right, Left, Up, Down or Accept. Menus act on the user event,
 			// so this moves an open menu's selection (the inventory's item list, for its 3D item). Only the press is sent.
 			RegisterCommand("key", [](const std::string& a_arg, std::string& a_error) {

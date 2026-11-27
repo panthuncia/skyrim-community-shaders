@@ -1,0 +1,42 @@
+# A loading screen's model with its shadow lights (MistMenu, scheme 4 with its depth pass): one load screen forced for every load
+# (`loadscreen`, the first whose model path holds "loadscreen") before the save's load, a shot in that loading screen, then one in
+# the world. The forced model makes the loading shots comparable between
+# runs (it still turns with time). Compose it: native-vulkan+menu-loading, guest+menu-loading.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "data-loaded"
+frames = 0
+do = "loadscreen"
+arg = "loadscreen"
+
+[[steps]]
+at = "held-frame"
+frames = 0
+do = "shot"
+arg = "loading-model"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "shot"
+arg = "world"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["loading-model", "world"]
+shot_refs = ["loading-model", "world"]
