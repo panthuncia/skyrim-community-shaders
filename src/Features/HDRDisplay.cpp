@@ -14,6 +14,7 @@
 #include "Utils/VersionedRelocation.h"
 #include "PostProcessing.h"
 #include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Frame/Variables.h"
@@ -266,6 +267,9 @@ namespace
 	{
 		static void thunk(int64_t a1)
 		{
+			// Native: CS's UI point does this work (Scaleform::ReplaySnapshotUi).
+			if (RenderGraph::Engine::Scaleform::OwnsUiPoint())
+				return func(a1);
 			globals::features::screenshotFeature.SnapshotCleanScene();
 			globals::features::hdrDisplay.SetUIBuffer();
 			func(a1);

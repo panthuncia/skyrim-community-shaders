@@ -1203,6 +1203,9 @@ namespace Hooks
 	{
 		static void thunk(int64_t a1)
 		{
+			// Native: CS's UI point turns it off around the UI's replay (Scaleform::ReplaySnapshotUi).
+			if (RenderGraph::Engine::Scaleform::OwnsUiPoint())
+				return func(a1);
 			const bool temporal = Util::GetTemporal();
 			Util::SetTemporal(false);
 			func(a1);

@@ -20,6 +20,7 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/Variables.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Switches.h"
@@ -2131,6 +2132,10 @@ void Upscaling::Main_UpdateJitter::thunk(RE::BSGraphics::State* a_state)
 
 void Upscaling::MenuManagerDrawInterfaceStartHook::thunk(int64_t a1)
 {
+	// Native: CS's UI point does this work (Scaleform::ReplaySnapshotUi).
+	if (RenderGraph::Engine::Scaleform::OwnsUiPoint())
+		return func(a1);
+
 	auto& upscaling = globals::features::upscaling;
 
 	upscaling.PostDisplay();

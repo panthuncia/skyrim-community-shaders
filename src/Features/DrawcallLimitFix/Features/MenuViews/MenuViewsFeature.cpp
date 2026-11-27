@@ -2,6 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
@@ -21,6 +22,7 @@ namespace DCLF::Features::MenuViews
 		{
 			static DWORD thunk(RE::UI3DSceneManager* a_manager, int a_scheme, RE::NiCamera* a_camera, bool a_arg4)
 			{
+				RenderGraph::Engine::Scaleform::NoteOtherUiWork("a menu scene");
 				// A scheme CS draws natively: the engine's function is not entered.
 				if (a_manager) {
 					const auto current = static_cast<std::int32_t>(a_manager->currentlightScheme);
@@ -38,6 +40,7 @@ namespace DCLF::Features::MenuViews
 		{
 			static void thunk(void* a_renderer)
 			{
+				RenderGraph::Engine::Scaleform::NoteOtherUiWork("the local map's render");
 				PassCapture::MenuSceneScope menuScene;
 				func(a_renderer);
 			}
