@@ -337,7 +337,7 @@ namespace RenderGraph::Frame::PostChain
 			fields.bloom = static_cast<std::uint8_t>(std::clamp(static_cast<std::int32_t>(in->At(kBloomRadius)) - 1, 0, 6));
 			fields.fade = in->At(kFade) > 0.0f;
 			fields.adapt = Global<std::int32_t>(kAdaptTarget) >= 0;
-			fields.screenshot = in->screenshot;
+			fields.screenshot = Engine::ImageSpace::SaveScreenshotDue();
 		}
 		// Upscaling turns the engine's TAA on just before the end-of-frame effects and off after, so the flag at Begin says nothing.
 		auto& upscaling = globals::features::upscaling;
