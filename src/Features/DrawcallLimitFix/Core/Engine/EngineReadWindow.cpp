@@ -76,6 +76,8 @@ namespace DCLF
 
 	EngineReadWindow::Lease::Lease()
 	{
+		if (renderSideJob)
+			renderSideJobLeases.fetch_add(1, std::memory_order_relaxed);
 		// Count the lease and check open-and-not-suspended in one step, so Close and Suspend cannot miss it.
 		if ((state.fetch_add(1, std::memory_order_acq_rel) & (kOpen | kSuspended)) == kOpen) {
 			held = true;
@@ -112,7 +114,8 @@ namespace DCLF
 		c.suspendWaitedUs = static_cast<double>(suspendWaitedUs.exchange(0, std::memory_order_relaxed));
 		c.suspendWaitedMaxUs = static_cast<double>(suspendWaitedMaxUs.exchange(0, std::memory_order_relaxed));
 		c.mainThreadLeases = mainThreadLeases.exchange(0, std::memory_order_relaxed);
-		if (!closes && !c.unleased && !c.suspends && !c.mainThreadLeases)
+		c.renderSideJobLeases = renderSideJobLeases.exchange(0, std::memory_order_relaxed);
+		if (!closes && !c.unleased && !c.suspends && !c.mainThreadLeases && !c.renderSideJobLeases)
 			return c;
 		c.any = true;
 		c.closes = closes;

@@ -32,8 +32,9 @@ namespace DCLF::Reports
 		}
 		return fmt::format(
 			"[DCLF] engine-read window: {} closes, {} of them waited for items in flight ({:.1f} us in all, max {:.1f} us){}; "
-			"{} leases refused (work left for the next window); main-thread leases {}{}; scene work engine accesses without a lease {}{}{}",
+			"{} leases refused (work left for the next window); main-thread leases {}{}; render-side job leases {}{}; scene work engine accesses without a lease {}{}{}",
 			c.closes, c.closesWaited, c.waitedUs, c.waitedMaxUs, writers, c.refused, c.mainThreadLeases, c.mainThreadLeases ? " <- RENDER-SIDE LEASE" : " <- OK",
+			c.renderSideJobLeases, c.renderSideJobLeases ? " <- RENDER-SIDE LEASE" : " <- OK",
 			c.unleased, c.unleased ? " <- LANE ENGINE ACCESS; first: " : " <- OK", c.unleasedFirst ? c.unleasedFirst : "");
 	}
 

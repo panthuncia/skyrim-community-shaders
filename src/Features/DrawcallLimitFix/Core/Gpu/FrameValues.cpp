@@ -2545,6 +2545,7 @@ namespace DCLF
 		s.kicked = true;
 		if (!::RenderGraph::Frame::SharedExecutor().DispatchFrameCritical(SceneScheduler::Scope(),
 				"frame values", [&s, job = std::move(job)](const auto&) mutable {
+					const EngineReadWindow::RenderSideJob renderSide;
 					s.Run(job);
 					if (!job.refusedShading.empty()) {
 						std::vector<ShadingItem> refused;
