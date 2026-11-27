@@ -304,6 +304,9 @@ go at once. A run takes the first free slot (`lab\slot-<n>.lock`); `--wait S` wa
 so no other game runs beside it: `run.exclusive = true` (the perf and VRAM configs, `fg-dlss`), and every run with `game.uncapped` or
 `fg.presentmon`. Only an exclusive run focuses its game, and not with `CS_TEST_BACKGROUND=1`.
 
+**Power.** A run keeps the system awake but lets the displays sleep: perf-taa runs at the same frame rate with the monitors
+off. `CS_TEST_KEEP_DISPLAY_ON=1` also keeps the displays on.
+
 **Starting.** One game starts at a time (`lab\launch.lock`), until its helper reports kPostLoad (every plugin's `SKSEPlugin_Load` has
 returned) or it ends. CommonLib keeps
 the Address Library table in shared memory that the first game fills, and a second game that opens it while it is being filled

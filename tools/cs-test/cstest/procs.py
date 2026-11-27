@@ -2,6 +2,7 @@
 
 import csv
 import io
+import os
 import subprocess
 from pathlib import Path
 import sys
@@ -139,11 +140,13 @@ def focus(pid):
 
 
 def keep_display_awake(on):
-    """With the displays off, Present throttles to a few frames a second (cs-ab.ps1 did the same)."""
+    """Keeps the system awake during a run. The displays may sleep: on 2026-11-27 perf-taa ran at the same frame rate
+    with the monitors off (D3) and on (D0). CS_TEST_KEEP_DISPLAY_ON=1 also keeps the displays on, as runs used to."""
     if not IS_WINDOWS:
         return
     ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED = 0x80000000, 0x1, 0x2
-    _kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED if on else ES_CONTINUOUS)
+    display = ES_DISPLAY_REQUIRED if os.environ.get("CS_TEST_KEEP_DISPLAY_ON") == "1" else 0
+    _kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | display if on else ES_CONTINUOUS)
 
 
 def nudge_mouse():
