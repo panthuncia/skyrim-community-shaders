@@ -144,7 +144,7 @@ All on stage `s7-prep2` (Dev-Fast; built from 3d53a6b12, plus clang-format and n
 | native-vulkan+quick, `CS_SNAPSHOT_DETECT=1` | s7-prep2-nvk-quick | passed (shot reference); live reads 639 a world frame, engine render calls 1 a world frame |
 | native-d3d12-quick | s7-prep2-nd12-quick | passed (shot reference) |
 | native-vulkan+menu-scenes | s7-prep2-nvk-menuscenes | hang at the loading screen: data-loaded took 119 s, and the main thread was stuck in engine code with no CS frame on any stack (the machine was busy) |
-| native-vulkan+menu-scenes | s7-prep2-nvk-menuscenes2 | see the report |
+| native-vulkan+menu-scenes | s7-prep2-nvk-menuscenes2 | passed (5 shots) |
 | native-vulkan+window-resize-stress-taa | s7-prep2-nvk-wrstaa | passed (13 shots) |
 | guest+menu-ui | s7-prep2-guest-menuui | passed; every cs-ui-expect holds |
 | native-vulkan+menu-ui, `CS_SNAPSHOT_DETECT=1` | s7-prep2-nvk-menuui, s7-prep2-nvk-menuui2 | passed both; every cs-ui-expect holds, `ui-writes=0` |
