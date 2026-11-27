@@ -36,7 +36,7 @@ namespace DCLF::Features::Grass
 		void Serve(const Api::DrawFamilyFrame& a_frame)
 		{
 			GrassShared::SetDclfOwned(false);
-			RenderMirror().Drain(a_frame.frame);
+			RenderMirror().Drain(a_frame.frame, TakenFadeClock());
 		}
 
 		// The tg console command hides BGSGrassManager's grass node (+0xF4 bit 0).

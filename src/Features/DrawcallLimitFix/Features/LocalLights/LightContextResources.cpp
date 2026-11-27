@@ -265,7 +265,9 @@ namespace DCLF::Features::LocalLights
 				try {
 					auto publication = std::make_shared<LightContextPublication>();
 					publication->frame = a_commit.frame;
-					publication->generation = DCLF::Portals::ValidateContexts(words, a_commit.frame);
+					// The contexts carry the step of the walks that made them: the selection's. In native that is the ticket's game half,
+					// which a repeated render or a render after another step does not share.
+					publication->generation = DCLF::Portals::ValidateContexts(words, selection->sceneFrame);
 					publication->words = words;
 					auto backings = std::make_shared<PublicationBackings>();
 					backings->atlas = Upload(*scene, a_commit, words, "cs.dclf.light-contexts.atlas", *scene->atlasVersions, publication->descriptor);

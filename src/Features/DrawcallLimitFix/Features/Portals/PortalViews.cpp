@@ -1190,6 +1190,17 @@ namespace DCLF
 		std::swap(camera, light);
 	}
 
+	void PortalViews::StampMainStep(std::uint32_t a_step)
+	{
+		frame.sceneFrame = a_step;
+		// Contexts are immutable once made, so the stamped one is a copy.
+		if (mainContext && mainContext->frame != a_step) {
+			auto stamped = std::make_shared<Portals::Context>(*mainContext);
+			stamped->frame = a_step;
+			mainContext = std::move(stamped);
+		}
+	}
+
 	void PortalViews::CommitLightWalk()
 	{
 		if (std::exchange(lightFlagsPending, false))

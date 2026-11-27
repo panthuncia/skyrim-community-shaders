@@ -94,4 +94,6 @@ namespace DCLF::Features::Grass
 	GrassTables* TablesOf(const Draws::SceneBuffers& a_scene);
 	std::shared_ptr<GrassTables> SharedTablesOf(const Draws::SceneBuffers& a_scene);
 	Api::SceneResourcesId TablesId();
+	/** @brief The spawn fade's clock as the frame's globals took it: the engine's frame times summed over the game updates. */
+	float TakenFadeClock();
 }

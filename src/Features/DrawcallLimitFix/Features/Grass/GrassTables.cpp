@@ -68,7 +68,8 @@ namespace DCLF::Features::Grass
 			kCameraPosition,
 			kCameraTop = kCameraPosition + 3,
 			kAlphaParams,  // two floats
-			kGameValues = kAlphaParams + 2,
+			kFadeClock = kAlphaParams + 2,  // the engine's frame times (BSShaderManager::State timerValues[1]) summed over the captures
+			kGameValues,
 		};
 		Api::FrameGlobalsSlot gameSlot;  // install
 
@@ -99,6 +100,11 @@ namespace DCLF::Features::Grass
 			}
 			a_out[kAlphaParams] = Engine::Global<float>(Address::kAlphaParams);
 			a_out[kAlphaParams + 1] = Engine::Global<float>(Address::kAlphaParams + 4);
+			// Once per capture (each game update's frame start), so a repeated render or a ticket that is never rendered changes nothing.
+			static float fadeClock = 0.0f;
+			if (state)
+				fadeClock += state->timerValues[1];
+			a_out[kFadeClock] = fadeClock;
 		}
 
 		/** @brief A game value as the frame's ticket took it. */
@@ -558,6 +564,11 @@ namespace DCLF::Features::Grass
 	std::shared_ptr<GrassTables> SharedTablesOf(const Draws::SceneBuffers& a_scene)
 	{
 		return Extensions::SharedSceneResourcesOf<GrassTables>(a_scene, tablesId);
+	}
+
+	float TakenFadeClock()
+	{
+		return Taken(kFadeClock);
 	}
 
 	Api::SceneResourcesId TablesId()

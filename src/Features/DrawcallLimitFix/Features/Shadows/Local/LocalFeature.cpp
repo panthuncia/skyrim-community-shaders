@@ -3,6 +3,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "Features/DrawcallLimitFix/Features/Portals/PortalViews.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/SunExclusion.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/ExclusionBuild.h"
 #include "Features/DrawcallLimitFix/Features/Shadows/Local/FocusViews.h"
@@ -32,8 +33,16 @@ namespace DCLF::Features::Shadows::Local
 				FocusViews::Get().Install();
 		}
 
-		/** @brief At frame start, the point lights' culls select the exclusion the shadow epoch published. */
-		void PointFrameStart(std::uint32_t) { LocalLightCull::SelectFrame(ParabolicExclusionSlot::Get().Pending()); }
+		/**
+		 * @brief At frame start, the point lights' culls select the exclusion the shadow epoch published. Native's game half also stamps
+		 * the main portal walk, which Main::Update ran before this step was taken, with the step: the light contexts carry it too.
+		 */
+		void PointFrameStart(std::uint32_t a_frame)
+		{
+			if (Scene::FrameView::InGameHalf())
+				PortalViews::Get().StampMainStep(a_frame);
+			LocalLightCull::SelectFrame(ParabolicExclusionSlot::Get().Pending());
+		}
 
 		/** @brief Puts the shadow epoch's exclusion of a_source into its slot. */
 		void PublishExclusion(Api::ShadowSource a_source, std::shared_ptr<void> a_exclusion)

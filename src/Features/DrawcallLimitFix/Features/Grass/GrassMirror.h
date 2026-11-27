@@ -182,7 +182,8 @@ namespace DCLF::Features::Grass
 		// The queue's reorder window is a drain or two, so removals are remembered for longer than that.
 		static constexpr std::uint32_t kTombstoneDrains = 16;
 
-		void Drain(std::uint32_t a_frame);
+		/** @brief Applies the queued events. a_fadeClock is the frame's spawn fade clock (TakenFadeClock), which new spawns start at. */
+		void Drain(std::uint32_t a_frame, float a_fadeClock);
 		std::size_t Size() const { return shapes.size(); }
 		std::uint64_t InstanceCount() const { return instanceCount; }
 		std::size_t BucketCount() const { return bucketIndex.size(); }

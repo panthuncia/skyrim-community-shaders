@@ -22,6 +22,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
+#include "RenderGraph/Engine/Targets/EngineTargetSet.h"
 
 #include <memory>
 #include <utility>
@@ -49,23 +50,19 @@ namespace DCLF::Features::FirstPerson
 			return latch;
 		}
 
-		// The colour targets are kMAIN and the motion vectors, as FUN_1414cb6d0 binds them. Returns true when they changed.
+		// The colour targets are kMAIN and the motion vectors, as FUN_1414cb6d0 binds them. The depth is kPOST_ZPREPASS_COPY's DSV
+		// format from CS's target set, not the renderer's table, which a resize rewrites. Returns true when they changed.
 		bool CaptureFirstPersonTargets(const TargetFormats& a_formats)
 		{
-			auto* renderer = CS_ENGINE_READ(Renderer, CapturePoint, globals::game::renderer);
-			if (renderer && a_formats.colorCount >= 2) {
-				const auto& copy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
-				if (copy.views[0]) {
-					D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
-					copy.views[0]->GetDesc(&dsvDesc);
-					ForwardTargets targets;
-					targets.colour = a_formats.colors[0];
-					targets.colour2 = a_formats.colors[1];
-					targets.depth = dsvDesc.Format;
-					return IndirectDraws::Get().SetViewTargets(kView, targets);
-				}
-			}
-			return false;
+			namespace Targets = RenderGraph::Engine::Targets;
+			const auto depth = Targets::ViewFormat(Targets::Depth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY, Targets::View::Dsv));
+			if (a_formats.colorCount < 2 || depth == DXGI_FORMAT_UNKNOWN)
+				return false;
+			ForwardTargets targets;
+			targets.colour = a_formats.colors[0];
+			targets.colour2 = a_formats.colors[1];
+			targets.depth = depth;
+			return IndirectDraws::Get().SetViewTargets(kView, targets);
 		}
 
 		/** @brief The game half's walk of the skeleton, kept between updates (game thread only). */
