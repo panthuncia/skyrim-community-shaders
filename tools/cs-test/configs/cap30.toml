@@ -1,0 +1,4 @@
+# The update-rate cap at 30 game updates a second, with no steps of its own: native renders each snapshot two or more times
+# (repeats). Compose it after a scenario, native-vulkan+flicker-scenes+cap30.
+[saved_settings.Advanced]
+"Update Rate Cap" = 30

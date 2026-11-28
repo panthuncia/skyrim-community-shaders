@@ -1,13 +1,34 @@
-# Riverwood's river (river.toml) for water flicker: 30 shots on consecutive frames down at the water, then 30 along it, then exit.
-# Score them with a tile flicker scorer. Compose it: guest+river-flicker, native-vulkan+river-flicker.
+# Water flicker at Riverwood's river (river.toml's pinned scene): a 120-frame burst (consecutive rendered frames, scored by
+# cstest/flicker.py) down at the water and one along it, then exit. Compose it: d3d11+river-flicker (the reference),
+# guest+river-flicker, native-vulkan+river-flicker, native-vulkan+river-flicker+cap30.
 extends = ["base"]
 
 [run]
 timeout_s = 420
 
+# God mode and AI off (the save is a guard fight; NPCs wander), so the bursts compare between modes.
 [[steps]]
 at = "world-ready"
-frames = 200
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+# tai alone leaves combat running: the save's guard keeps fighting. tcai stops it.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 199
 do = "console"
 arg = "set timescale to 0"
 
@@ -62,182 +83,8 @@ arg = "player.setangle z 0"
 [[steps]]
 at = "previous"
 frames = 390
-do = "shot"
-arg = "a00"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a01"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a02"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a03"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a04"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a05"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a06"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a07"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a08"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a09"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a10"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a11"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a12"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a13"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a14"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a15"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a16"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a17"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a18"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a19"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a20"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a21"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a22"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a23"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a24"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a25"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a26"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a27"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a28"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "a29"
+do = "burst"
+arg = "river:120"
 
 [[steps]]
 at = "previous"
@@ -248,182 +95,8 @@ arg = "player.setangle z 90"
 [[steps]]
 at = "previous"
 frames = 290
-do = "shot"
-arg = "b00"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b01"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b02"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b03"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b04"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b05"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b06"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b07"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b08"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b09"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b10"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b11"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b12"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b13"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b14"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b15"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b16"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b17"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b18"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b19"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b20"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b21"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b22"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b23"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b24"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b25"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b26"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b27"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b28"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "b29"
+do = "burst"
+arg = "river-east:120"
 
 [[steps]]
 at = "previous"
@@ -432,4 +105,9 @@ do = "exit"
 
 [expect]
 reach = "world-ready"
-shots = ["a00", "a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a11", "a12", "a13", "a14", "a15", "a16", "a17", "a18", "a19", "a20", "a21", "a22", "a23", "a24", "a25", "a26", "a27", "a28", "a29", "b00", "b01", "b02", "b03", "b04", "b05", "b06", "b07", "b08", "b09", "b10", "b11", "b12", "b13", "b14", "b15", "b16", "b17", "b18", "b19", "b20", "b21", "b22", "b23", "b24", "b25", "b26", "b27", "b28", "b29"]
+
+# Calibrated on d3d11 and guest at these scenes (post-flicker.md): their worst spike was 14.8 (Riverwood's turning water
+# wheel at 25 frames a second), with at most 3 tiles flickering twice; native's flickering river reached 54 and 68-138 tiles.
+[expect.flicker]
+max_spike = 20
+max_tiles = 8
