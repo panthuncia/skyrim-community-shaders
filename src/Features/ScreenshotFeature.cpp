@@ -17,6 +17,7 @@
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "RenderGraph/Switches.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 #include "State.h"
 #include "Utils/Clipboard.h"
@@ -939,8 +940,12 @@ void ScreenshotFeature::ProcessCaptureRequest()
 		} else {
 			captureDeferred = false;
 			// A scripted shot names the snapshot its frame rendered (cs-test's cadence comparison reads it).
-			if (!captureOutputPath.empty())
-				logger::info("[TEST] shot {} rendered snapshot {} (render frame {})", captureOutputPath.stem().string(), Snapshot::CurrentId(), Snapshot::Render().frame);
+			if (!captureOutputPath.empty()) {
+				// The eye the frame drew with, to compare with the player's place the shot step logged.
+				const auto& eye = Snapshot::FrameCamera::Main().GetCameraPosAdjust();
+				logger::info("[TEST] shot {} rendered snapshot {} (render frame {}), eye {:.0f} {:.0f} {:.0f}", captureOutputPath.stem().string(),
+					Snapshot::CurrentId(), Snapshot::Render().frame, eye.x, eye.y, eye.z);
+			}
 			try {
 				Capture();
 			} catch (const std::exception& e) {

@@ -115,6 +115,38 @@ namespace Testing
 			return a_index < actors.size() ? std::pair{ actors[a_index].second, actors[a_index].first } : std::pair<RE::Actor*, float>{};
 		}
 
+		/**
+		 * @brief Logs where the player and the camera are, the player's cell and the land under the player. Main thread.
+		 * A shot that shows the wrong place tells from this whether the player moved (fell through the land) or the frame is wrong.
+		 */
+		void LogPlace(std::string_view a_why)
+		{
+			auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
+			if (!player)
+				return;
+			const auto position = player->GetPosition();
+			auto* cell = player->GetParentCell();
+			std::string cellText = "no cell";
+			if (cell) {
+				const auto* land = cell->GetRuntimeData().cellLand;
+				const bool landLoaded = land && land->loadedData;
+				cellText = fmt::format("cell {:08X} {} attached {}, land {}", cell->GetFormID(), cell->IsExteriorCell() ? "exterior" : "interior",
+					cell->IsAttached(), !land ? "none" : landLoaded ? "loaded" : "not loaded");
+				if (const auto* exterior = cell->IsExteriorCell() ? cell->GetCoordinates() : nullptr)
+					cellText += fmt::format(", grid {},{}", exterior->cellX, exterior->cellY);
+			}
+			std::string landText = "no land height";
+			float landHeight = 0.0f;
+			if (auto* tes = CS_ENGINE_READ(Data, Other, RE::TES::GetSingleton()); tes && tes->GetLandHeight(position, landHeight))
+				landText = fmt::format("land height {:.0f} ({:+.0f} to the player)", landHeight, position.z - landHeight);
+			std::string cameraText;
+			if (auto* camera = CS_ENGINE_READ(Camera, Other, RE::PlayerCamera::GetSingleton()); camera && camera->cameraRoot) {
+				const auto& at = camera->cameraRoot->world.translate;
+				cameraText = fmt::format(", camera {:.0f} {:.0f} {:.0f}", at.x, at.y, at.z);
+			}
+			logger::info("[TEST] place at {}: player {:.0f} {:.0f} {:.0f}{}, {}; {}", a_why, position.x, position.y, position.z, cameraText, cellText, landText);
+		}
+
 		bool IsFemale(RE::Actor& a_actor)
 		{
 			auto* base = a_actor.GetActorBase();
@@ -449,6 +481,7 @@ namespace Testing
 			const std::uint64_t minSnapshot = Snapshot::InGameUpdate() ? Snapshot::LastGameId() + 1 : 0;
 			globals::features::screenshotFeature.RequestCapture(directory / (a_arg + ".png"), minSnapshot);
 			logger::info("[TEST] shot {} asked at game snapshot {}: renders snapshot {} or newer", a_arg, Snapshot::LastGameId(), minSnapshot);
+			LogPlace(fmt::format("shot {}", a_arg));
 			auto& run = Run();
 			std::scoped_lock lock(run.mutex);
 			run.shots.push_back(a_arg);
@@ -764,6 +797,10 @@ namespace Testing
 				return true;
 			});
 			RegisterCommand("shot", Shot);
+			RegisterCommand("place", [](const std::string& a_arg, std::string&) {
+				LogPlace(a_arg.empty() ? std::string_view("place step") : std::string_view(a_arg));
+				return true;
+			});
 			RegisterCommand("loadscreen", ForceLoadScreen);
 			RegisterCommand("loadscreens", LoadScreenCycle::Start);
 			RegisterCommand("window", Window);
