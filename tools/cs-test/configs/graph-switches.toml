@@ -1,0 +1,108 @@
+# Graph-condition switches in a loop: twelve cocs between Dragonsreach (interior, CPU pipeline) and Whiterun's exterior
+# (GPU-driven), each 150 game frames after the last load's world-ready. Each one attaches staged DCLF graphs at a load hold's
+# release (snap7-devloss7). No shots. Native only: native-vulkan+graph-switches.
+extends = ["base"]
+
+[run]
+timeout_s = 600
+
+[snapshot]
+cadence = "drop:3"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "world-ready"
+frames = 150
+do = "exit"
+
+[expect]
+reach = "world-ready"
