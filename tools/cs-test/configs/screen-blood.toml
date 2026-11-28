@@ -95,9 +95,8 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["blood", "blood2"]
+shot_refs = ["blood", "blood2"]   # the splatters are random: these hold only the coarse check (8 wrong tiles at most between native runs)
 no_log = ["frame tap error", "blood splatter: a native draw is left out: the flare", "blood splatter: a native draw is left out: no"]
 
 [expect.graph_frames.min]
 "cs.blood-splatter" = 1
-
-shot_refs = ["blood", "blood2"]   # the splatters are random: these hold only the coarse check (8 wrong tiles at most between native runs)

@@ -56,6 +56,20 @@ frames = 1
 do = "weather"
 arg = "SkyrimClear"
 
+# The save's guard may have opened the Health Low tutorial before god mode, which pauses the game and keeps the steps below
+# from moving the player: health back up, the tutorial closed.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.restoreav health 1000"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "menu"
+arg = "Tutorial Menu=hide"
+
 # The player put back where the save has it (Save95's player location), facing one way: the fight moves and turns the
 # player before AI goes off.
 [[steps]]
@@ -276,6 +290,8 @@ do = "exit"
 reach = "world-ready"
 shots = ["pp-base", "bloom-blend", "bloom-mips", "dof-on", "dof-rings", "dof-legacy", "glare-on", "glare-fft", "glare-pupil", "flare-mode",
 	"flare-fft", "list-on", "list-off"]
+shot_refs = ["pp-base", "bloom-blend", "bloom-mips", "dof-on", "dof-rings", "dof-legacy", "glare-on", "glare-fft", "glare-pupil", "flare-mode",
+	"flare-fft", "list-on", "list-off"]
 no_log = ["the chain could not be built", "stale recording", "fatal: frame declaration:", "missed settings writer:", "the chain runs on D3D11",
 	"fatal: Post Processing:", "the post stage will never hold the chain"]
 
@@ -283,5 +299,3 @@ no_log = ["the chain could not be built", "stale recording", "fatal: frame decla
 # in most frames of the run.
 [expect.graph_frames]
 min = { "cs.pp" = 300 }
-
-shot_refs = ["pp-base", "bloom-blend", "bloom-mips", "dof-on", "dof-rings", "dof-legacy", "glare-on", "glare-fft", "glare-pupil", "flare-mode", "flare-fft", "list-on", "list-off"]

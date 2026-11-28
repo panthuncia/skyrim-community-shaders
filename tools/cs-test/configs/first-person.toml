@@ -49,6 +49,20 @@ frames = 1
 do = "weather"
 arg = "SkyrimClear"
 
+# The save's guard may have opened the Health Low tutorial before god mode, which pauses the game and keeps the steps below
+# from moving the player: health back up, the tutorial closed.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.restoreav health 1000"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "menu"
+arg = "Tutorial Menu=hide"
+
 # The player put back where the save has it (Save95's player location), facing one way: the fight moves and turns the
 # player before AI goes off.
 [[steps]]

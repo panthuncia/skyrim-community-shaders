@@ -221,6 +221,42 @@
     "run": "1127-172158-post-refs-native-vulkan-lens-post-refs-n1-lens",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+llf-local-shadows/off": {
+    "sha256": "5f36c10ebcac306bf98c0c854033b02519f7197aaa0ef15ecd5ecf4e8fa6ee68",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/on": {
+    "sha256": "77306b3a9e21ecfd370e006b1fa6a468e5ea500e4ec8f0d2516b30a3ae8ea5c3",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/res512": {
+    "sha256": "0b364437739d10a1ff6bc08e6cd7f8487c33935cd0c57acb3ae3713f03d5f797",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/restored": {
+    "sha256": "6e28e0b7f435f8beec9bf7a0bd7e7f0fc20cdc343f1008600e6570ff8e4a3bcc",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/slots32": {
+    "sha256": "f9536460f9d3d778efc6d7fb779d1ba52d6d10ede9cd90e9c961accf2441a92d",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/start": {
+    "sha256": "62531cd35675527c65d60990477ca0dbd1af00ae10b62ccf6581b86660becc89",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+map-local/localmap": {
     "sha256": "6234b7e578d4e82b56a0c11bbb38590969c66db6bc8799be8c174974498fe620",
     "size": "1920x1080",
