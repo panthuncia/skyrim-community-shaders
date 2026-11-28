@@ -750,6 +750,12 @@ namespace DCLF
 		return snapshot ? snapshot->publication : nullptr;
 	}
 
+	std::uint64_t IndirectDraws::SerialOf(const std::shared_ptr<const void>& a_scene)
+	{
+		const auto* snapshot = static_cast<const Impl::SceneSnapshot*>(a_scene.get());
+		return snapshot ? snapshot->serial : 0;
+	}
+
 	void IndirectDraws::SceneTaken(const std::shared_ptr<const void>& a_scene)
 	{
 		if (!impl)

@@ -256,6 +256,9 @@ namespace RenderGraph::Frame::Revision
 			// Render thread: whether the builds for its reshapes were asked for, and the epochs asked.
 			bool reshapeBuildsAsked = false;
 			std::vector<std::uint32_t> reshapeEpochs;
+			// Render thread: the step Advance stopped at last, and whether a long wait was logged.
+			std::string blocked;
+			bool stuckLogged = false;
 		};
 
 		struct RevisionStats
@@ -1402,16 +1405,22 @@ namespace RenderGraph::Frame::Revision
 				// A revision of variables alone has no recordings to make.
 				if (inputsReady)
 					Adopt(a_coordinator, a_frame, {});
+				else
+					revision.blocked = "input waits";
 				return;
 			}
 			// The zero fills and uploads run on the uploader's queue. Recordings wait for nothing, but the revision is adopted only once they are done.
 			const bool texturesReady = FragmentReady(revision, revision.made ? revision.made->fragment.get() : nullptr, "texture versions' fills");
 			const bool buffersReady = FragmentReady(revision, revision.buffersFragment.get(), "buffer uploads");
-			if (!texturesReady || !buffersReady)
+			if (!texturesReady || !buffersReady) {
+				revision.blocked = !texturesReady ? "texture versions' fills" : "buffer uploads";
 				return;
+			}
 			// A new slice count records and adopts only on graphs built for it. Frames keep the adopted revision meanwhile.
-			if (!ReshapeBuildsReady(revision))
+			if (!ReshapeBuildsReady(revision)) {
+				revision.blocked = "graphs for a new slice count";
 				return;
+			}
 			std::vector<std::shared_ptr<org::VersionedBuffer>> held;
 			if (!revision.recordings) {
 				std::shared_ptr<const org::IResourceVersions> textures = revision.made ? revision.made->named : nullptr;
@@ -1455,8 +1464,10 @@ namespace RenderGraph::Frame::Revision
 																 progress.dropReasons.empty() ? "none" : progress.dropReasons, progress.waiting),
 							static_cast<SegmentId>(progress.missing)))
 						break;
-			if (!progress.ready || !inputsReady)
+			if (!progress.ready || !inputsReady) {
+				revision.blocked = !progress.ready ? fmt::format("recordings (missing [{}])", progress.waiting) : std::string("input waits");
 				return;
+			}
 			// The graphs an attach replaces are released once their GPU work is done and their own tasks have drained, which can
 			// take seconds while the workers wait for a busy CPU. A revision with staged builds waits while many are still held,
 			// so attaches never pile them up. Frames keep the adopted revision meanwhile.
@@ -1464,6 +1475,7 @@ namespace RenderGraph::Frame::Revision
 			if (const auto retired = revision.host->RetiredGraphCount(); progress.builds && retired >= kMaxRetiredGraphs) {
 				static Util::ReasonLog s_retired("[ORG] frame revision: a revision with staged builds waits for replaced graphs to be released");
 				s_retired.Report("too many held", fmt::format("{} held", retired));
+				revision.blocked = fmt::format("{} replaced graphs still held", retired);
 				return;
 			}
 			// With a source's epochs in its closure, the revision takes the source's fragment recorded against its versions while the
@@ -1476,6 +1488,7 @@ namespace RenderGraph::Frame::Revision
 				if (HasSourceMember(&revision, s) && state.drawing && !state.held) {
 					static Util::ReasonLog s_noFragment("[ORG] frame revision: a revision waits for a drawing source's fragment");
 					s_noFragment.Report(fmt::format("source {}{}", s, revision.pipelineGeneration ? " (shader reload)" : ""));
+					revision.blocked = fmt::format("a fragment of drawing source {}", s);
 					return;
 				}
 				// After a new slice count the fragment must be on the graphs built for it. The source records one on them, as they are
@@ -1483,6 +1496,7 @@ namespace RenderGraph::Frame::Revision
 				if (!revision.reshapeEpochs.empty() && HasSourceMember(&revision, s) && state.held && !FragmentOnReshapeBuilds(revision, *state.held)) {
 					static Util::ReasonLog s_reshapeFragment("[ORG] new slice count: the revision waits for a fragment on the graphs built for it");
 					s_reshapeFragment.Report(fmt::format("source {}", s));
+					revision.blocked = fmt::format("a fragment of source {} on the graphs for a new slice count", s);
 					return;
 				}
 				// After a shader reload the fragment must be on the rebuilt graphs. The source records one on them once they are
@@ -1490,6 +1504,7 @@ namespace RenderGraph::Frame::Revision
 				if (revision.pipelineGeneration && HasSourceMember(&revision, s) && state.held && !FragmentPinned(*state.held, revision.pipelineGeneration)) {
 					static Util::ReasonLog s_unpinned("[ORG] shader reload: the revision waits for a fragment on the rebuilt graphs");
 					s_unpinned.Report(fmt::format("source {}", s));
+					revision.blocked = fmt::format("a fragment of source {} on the rebuilt graphs", s);
 					return;
 				}
 			}
@@ -1506,12 +1521,39 @@ namespace RenderGraph::Frame::Revision
 					for (std::uint32_t o = 0; o < a_coordinator.sourceCount; ++o)
 						if (o != s && fragments[o])
 							a_coordinator.sources[o]->held = std::move(fragments[o]);
+					revision.blocked = fmt::format("source {}'s fragment was dropped for its builds", s);
 					return;
 				}
 			}
 			revision.recordingCount = progress.recordings;
 			revision.buildCount = progress.builds;
 			Adopt(a_coordinator, a_frame, std::span<const std::optional<Fragment>>(fragments.data(), a_coordinator.sourceCount));
+		}
+
+		/**
+		* @brief Logs once when the revision in preparation has not been adopted long after it was planned: the step it stops at and
+		* where each fragment source stands. Frames keep the adopted revision meanwhile, so nothing else shows the wait. Render thread.
+		*/
+		void ReportStuck(Coordinator& a_coordinator, std::uint64_t a_frame)
+		{
+			constexpr std::uint64_t kStuckFrames = 600;
+			auto* revision = a_coordinator.preparing.get();
+			if (!revision || revision->stuckLogged || a_frame < revision->planned + kStuckFrames)
+				return;
+			revision->stuckLogged = true;
+			std::string sources;
+			for (std::uint32_t s = 0; s < a_coordinator.sourceCount; ++s) {
+				const auto& state = *a_coordinator.sources[s];
+				sources += fmt::format("{}{} ({}): member {}, drawing {}, held {}, adopted versions {}", s ? "; " : "", s, state.source.name,
+					HasSourceMember(revision, s), state.drawing,
+					state.held ? fmt::format("fragment {} on versions {}", state.held->serial, state.held->frameVersions) : std::string("none"),
+					state.adoptedVersions);
+			}
+			const std::string blocked = !revision->done.load(std::memory_order_acquire) ? std::string("the lane") :
+			                            revision->blocked.empty()                       ? std::string("nothing named") :
+			                                                                              revision->blocked;
+			logger::warn("[ORG] frame revision {} is not adopted {} frames after it was planned (frame {}; variables [{}]): waits for {}; sources: {}",
+				revision->serial, a_frame - revision->planned, revision->planned, revision->changedVariables, blocked, sources.empty() ? "none" : sources);
 		}
 
 		std::string Percentiles(std::vector<std::uint64_t> a_values)
@@ -1643,6 +1685,7 @@ namespace RenderGraph::Frame::Revision
 		}
 		if (coordinator.preparing && coordinator.preparing->done.load(std::memory_order_acquire))
 			Advance(coordinator, frame);
+		ReportStuck(coordinator, frame);
 		// A revision of builds alone needs no lane, so it is advanced in the Begin that starts it.
 		const bool idle = !coordinator.preparing;
 		StartPreparation(coordinator, frame);
@@ -1804,6 +1847,19 @@ namespace RenderGraph::Frame::Revision
 			RenderGraph::Fatal("frame revision", fmt::format("a fragment was taken for source {}, which is not registered", a_source));
 		auto posted = coordinator.sources[a_source]->posted.Take();
 		return posted ? std::optional<Fragment>(std::move(*posted)) : std::nullopt;
+	}
+
+	bool ReturnPostedFragment(FragmentSourceId a_source, Fragment a_fragment)
+	{
+		auto& coordinator = GetCoordinator();
+		if (a_source >= coordinator.sourceCount)
+			RenderGraph::Fatal("frame revision", fmt::format("a fragment was returned for source {}, which is not registered", a_source));
+		auto returned = std::make_unique<Fragment>(std::move(a_fragment));
+		Fragment* empty = nullptr;
+		if (!coordinator.sources[a_source]->posted.slot.compare_exchange_strong(empty, returned.get(), std::memory_order_acq_rel))
+			return false;
+		returned.release();
+		return true;
 	}
 
 	AdoptionMark Mark()

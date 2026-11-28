@@ -473,7 +473,8 @@ namespace DCLF::Features::Grass
 		}
 
 		// Counts are zeroed once here when grass becomes DCLF's. After that grass.args-colour zeroes them every frame.
-		void WriteDrawRow(const Draws::NamedVersions& a_sealed, const Mirror& a_mirror, GrassTables& a_tables, Draws::LatchedUploads& a_uploads, bool a_draw)
+		void WriteDrawRow(const Draws::NamedVersions& a_sealed, const Mirror& a_mirror, GrassTables& a_tables, Draws::LatchedUploads& a_uploads, bool a_draw,
+			std::uint32_t a_frame)
 		{
 			OwnedRow<DrawRow> owned;
 			auto& row = owned.Plain();
@@ -485,8 +486,14 @@ namespace DCLF::Features::Grass
 			row.frame = DCLF::RefOf(a_sealed.Of(*a_tables.frame));
 			row.visible = DCLF::RefOf(a_sealed.Of(*a_tables.visible));
 			SampleWind(row.windVector);
-			row.timeBase = WindTimeBase();
-			row.prevTimeBase = std::exchange(a_tables.prevTimeBase, row.timeBase);
+			// A repeated render's time is its ticket's, so it draws the wind still. New tables start without motion.
+			if (const auto last = std::exchange(a_tables.timeFrame, a_frame); last != a_frame) {
+				const float now = WindTimeBase();
+				a_tables.prevTimeBase = last == ~0u ? now : a_tables.timeBase;
+				a_tables.timeBase = now;
+			}
+			row.timeBase = a_tables.timeBase;
+			row.prevTimeBase = a_tables.prevTimeBase;
 			row.fadeNow = a_mirror.FadeClock();
 			static const float fadeIn = IniFloat("fGrassFadeInTime:Grass", 0.0f);
 			row.fadeInTimeRcp = fadeIn > 0.0f ? 1.0f / fadeIn : 1e6f;
@@ -512,7 +519,7 @@ namespace DCLF::Features::Grass
 
 		// When the mirror outgrows the tables, it keeps its changes and the commit draws the last sent state until growth is adopted.
 		void UploadGrass(const Draws::NamedVersions& a_sealed, Mirror& a_mirror, GrassTables& a_tables, Draws::LatchedUploads& a_uploads,
-			std::vector<std::shared_ptr<const void>>& a_owners, bool a_owned)
+			std::vector<std::shared_ptr<const void>>& a_owners, bool a_owned, std::uint32_t a_frame)
 		{
 			a_tables.ready.store(false, std::memory_order_release);
 			if (!a_tables.cull || !a_tables.instances)
@@ -533,7 +540,7 @@ namespace DCLF::Features::Grass
 			else
 				++a_tables.outgrown;
 			++a_tables.uploads;
-			WriteDrawRow(a_sealed, a_mirror, a_tables, a_uploads, a_owned && a_mirror.BucketSlots() <= kMaxBuckets);
+			WriteDrawRow(a_sealed, a_mirror, a_tables, a_uploads, a_owned && a_mirror.BucketSlots() <= kMaxBuckets, a_frame);
 		}
 
 		// See dclf-architecture.md, "Grass: the draws".
@@ -546,7 +553,7 @@ namespace DCLF::Features::Grass
 				return;
 			auto& mirror = RenderMirror();
 			const bool owned = IndirectDraws::Get().DrawFamilyOwned(Api::DrawFamily::Grass);
-			UploadGrass(a_commit.adopted, mirror, *tables, *a_commit.latched, a_commit.executionOwners, owned);
+			UploadGrass(a_commit.adopted, mirror, *tables, *a_commit.latched, a_commit.executionOwners, owned, a_commit.frame);
 			// The engine's passes were withheld, so grass that cannot draw here leaves a visible hole.
 			if (owned && mirror.InstanceSlots() && !tables->ready.load(std::memory_order_acquire))
 				Diagnostics::Notify(GrassMissed{ a_commit.frame, mirror.InstanceSlots(), a_commit.adopted.Of(*tables->instances).units, mirror.BucketSlots(),
