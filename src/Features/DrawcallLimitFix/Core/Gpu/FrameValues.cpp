@@ -491,16 +491,18 @@ namespace DCLF
 		std::atomic<std::uint64_t> chainKicked{ 0 }, chainDone{ 0 };
 		// The rows the built-in backings must hold, raised by each sampling kick. The kept arrays never shrink, so neither do these.
 		std::array<std::atomic<std::uint64_t>, kBuiltInPools> neededRows{};
-		// Chain: the floors the last upload leased at, which the next sampling jobs open their builds at. Floors only rise, so an older one
-		// trims less and stays safe.
-		std::array<std::optional<std::uint64_t>, kBuiltInPools> sampleFloors;
+		// Chain: the floors the last upload leased at. Applying staged tickets outside an upload opens the drawn builds at them. Floors
+		// only rise, so an older one trims less and stays safe.
+		std::array<std::optional<std::uint64_t>, kBuiltInPools> drawnFloors;
 		std::uint64_t pendingSampleUs = 0;  // chain: the sampling time since the last upload
 		bool unavailableLogged = false;
 
+		// The sampled rows: what the newest sampling job read. Only the sampling jobs read and write them. Each job stages what it
+		// changed for the uploads (Staged), so a render never sends a later ticket's rows than its own.
 		KeptWholeArray<BindlessPlacement> rows;
 		KeptWholeArray<PaletteRow> palettes;
 		KeptWholeArray<BindlessShading> shading;
-		// The render's views of them, taken by its upload job before done. The render thread reads them once done reaches seq and lets
+		// The render's views of the drawn rows, taken by its upload job before done. The render thread reads them once done reaches seq and lets
 		// them go at EndFrame; the next upload job replaces them only after the next Kick.
 		org::async::KeptElements<BindlessPlacement> renderRows;
 		org::async::KeptElements<PaletteRow> renderPalettes;
@@ -513,22 +515,66 @@ namespace DCLF
 		// Written slots whose previous transform still differs from the current. Resampled until equal.
 		std::vector<Plan::Item> settling;
 		std::vector<std::uint32_t> listedSlots, listedBlocks;
-		std::vector<const void*> rowOwner;
-		// Native: every previous value is what the last render drew (Drawn). Chain owned.
+		std::vector<const void*> rowOwner, blockOwner;
+		// How the drawn rows take a staged row's previous transform. Natively a written row's previous is what the last render drew.
+		enum RowPrevious : std::uint8_t
+		{
+			kKeepPrevious,     // no sample wrote the transform (a root's sun entry or fade node): keep the drawn row's previous
+			kDrawnPrevious,    // a continued object: what the last upload drew
+			kSampledPrevious,  // the sampled one: a new object, a billboard's base, LOD, or guest
+		};
+		// By slot, written by the sampling job for the rows it writes. Staging moves them into the staged rows and clears them.
+		std::vector<std::uint8_t> rowPrevious;
+		/** @brief A palette block a sampling job wrote: both halves, and whether its previous half is what was drawn (natively). */
+		struct StagedBlock
+		{
+			std::uint32_t offset = 0, rows = 0;
+			bool drawnPrevious = false;
+		};
+		std::vector<StagedBlock> sampledBlocks;  // the running job's
+		std::vector<std::pair<std::uint64_t, std::shared_ptr<const void>>> sampledFieldOwners;  // the running job's, null erases
+		/**
+		 * @brief What one sampling job changed in the sampled rows, kept until an upload of its ticket or a later one applies it to the
+		 * drawn rows. The game half samples update n+1 while the render thread may still draw ticket n; staging keeps n+1's rows away
+		 * from those renders, so each render draws one ticket's objects with that ticket's camera.
+		 */
+		struct Staged
+		{
+			std::uint64_t seq = 0;  // the sampling job's
+			std::size_t rowCount = 0, paletteCount = 0, shadingCount = 0;  // the sampled arrays' sizes after it
+			std::vector<std::pair<std::uint32_t, std::uint32_t>> rowRuns, paletteRuns, shadingRuns;  // (first, count)
+			std::vector<BindlessPlacement> rowData;
+			std::vector<RowPrevious> rowModes;  // by element of rowData
+			std::vector<PaletteRow> paletteData;
+			std::vector<BindlessShading> shadingData;
+			std::vector<StagedBlock> blocks;
+			std::vector<std::pair<std::uint64_t, std::shared_ptr<const void>>> fieldOwners;
+		};
+		std::deque<Staged> staged;
+		// Tickets no upload took pile up only without renders. Past this many the oldest go to the drawn rows early.
+		static constexpr std::size_t kMaxStaged = 8;
+		void StageSampled(std::uint64_t a_seq);
+		void ApplyStaged(std::uint64_t a_through);
+		void ApplyOne(const Staged& a_staged, bool a_native);
+		void OpenDrawnBuilds(const std::array<std::optional<std::uint64_t>, kBuiltInPools>& a_floors);
+		// The rows uploads send: the staged tickets applied in order, never past the uploading render's ticket. Natively every previous
+		// value is what the last upload drew. Chain owned.
 		struct Drawn
 		{
-			// The sampling job that last wrote each slot and palette block. Written after the last upload means not drawn yet:
+			KeptWholeArray<BindlessPlacement> rows;
+			KeptWholeArray<PaletteRow> palettes;
+			KeptWholeArray<BindlessShading> shading;
+			// The sampling job whose staging last wrote each slot and palette block. Applied after the last upload means not drawn yet:
 			// then the row's previous already holds what was drawn.
 			std::vector<std::uint64_t> rowSerial, blockSerial;
-			std::vector<const void*> blockOwner;
-			std::uint64_t serial = 0;    // the newest sampling job
-			std::uint64_t uploaded = 0;  // the newest sampling job an upload sent
-			// Rows (slot, layer slot) and palette blocks (first row, rows) written moving. The next upload draws them; the one after
-			// draws them still unless a sample wrote them again.
-			std::vector<std::pair<std::uint32_t, std::uint32_t>> rows, blocks, drawnRows, drawnBlocks;
+			std::uint64_t applied = 0;   // the newest sampling job applied
+			std::uint64_t uploaded = 0;  // the newest applied when the last upload sent
+			// Slots and palette blocks (offset, rows) applied moving. The next upload draws them; the one after draws them still unless
+			// a newer ticket wrote them again.
+			std::vector<std::uint32_t> moving, drawnMoving;
+			std::vector<std::pair<std::uint32_t, std::uint32_t>> movingBlocks, drawnMovingBlocks;
 		} drawn;
-		std::atomic<std::uint64_t> stillRows{ 0 }, stillBlocks{ 0 }, aheadUploads{ 0 };
-		const FrameGlobals* sampledGlobals = nullptr;  // the newest sampling job's ticket's, only compared
+		std::atomic<std::uint64_t> stillRows{ 0 }, stillBlocks{ 0 }, aheadUploads{ 0 }, heldBack{ 0 };
 		void DrawStill();
 		std::vector<std::array<float, 4>> lastSphere;
 		std::vector<std::uint64_t> sphereSeq;
@@ -623,6 +669,7 @@ namespace DCLF
 			bool upload = false;      // the render's upload job, else a ticket's sampling job
 			std::uint64_t chain = 0;  // its place on the chain
 			std::uint64_t seq = 0;    // the upload's frame wait value, or the sampling job's own sequence
+			std::uint64_t ticketSample = 0;  // an upload's: its ticket's sampling job, the newest staged ticket it may apply
 			const Plan* plan = nullptr;
 			std::uint64_t planSerial = 0;
 			std::vector<const Plan*> written;
@@ -682,7 +729,7 @@ namespace DCLF
 			std::vector<std::pair<std::uint32_t, std::uint32_t>> paletteRuns;  // (first row, rows)
 			std::vector<const Plan::Item*> settling;
 			std::vector<const void*> owed;
-			std::vector<std::pair<std::uint32_t, std::uint32_t>> movedRows, movedBlocks;  // Drawn::rows and Drawn::blocks
+			std::vector<StagedBlock> blocks;
 			std::uint64_t skins = 0, defects = 0;
 			void Clear()
 			{
@@ -690,8 +737,7 @@ namespace DCLF
 				paletteRuns.clear();
 				settling.clear();
 				owed.clear();
-				movedRows.clear();
-				movedBlocks.clear();
+				blocks.clear();
 				skins = defects = 0;
 			}
 		};
@@ -706,21 +752,15 @@ namespace DCLF
 		{
 			std::vector<BindlessPlacement>& out;
 			std::vector<PaletteRow>& paletteOut;
-			Drawn& drawn;
-			bool native = false;  // previous values come from what was drawn
+			std::vector<std::uint8_t>& rowPrevious;  // Impl::rowPrevious
+			bool native = false;  // the drawn rows take previous values from what was drawn
 		};
-		/** @brief The world the last render drew in a_slot: the row's previous while no upload sent the row yet, else its world. */
-		static const float* DrawnWorld(const SampleOut& a_out, std::uint32_t a_slot)
-		{
-			const auto& held = a_out.out[a_slot];
-			return a_out.drawn.rowSerial[a_slot] > a_out.drawn.uploaded ? held.previousWorld : held.world;
-		}
 		/**
-		 * @brief Writes a skin's palette block if it changes: a_current, and a_previous or, natively for a continued block, the rows the
-		 * last render drew. Returns whether it wrote.
+		 * @brief Writes a skin's palette block if it changes: a_current and a_previous. Lists the block in a_blocks, natively with a
+		 * continued block's previous half to come from what was drawn. Returns whether it wrote.
 		 */
 		static bool WritePalette(const SampleOut& a_out, std::uint32_t a_offset, std::uint32_t a_rows, bool a_continued, const void* a_current,
-			const void* a_previous, std::vector<std::pair<std::uint32_t, std::uint32_t>>& a_moved, std::vector<std::pair<std::uint32_t, std::uint32_t>>& a_runs);
+			const void* a_previous, std::vector<StagedBlock>& a_blocks, std::vector<std::pair<std::uint32_t, std::uint32_t>>& a_runs);
 		struct PaletteRun
 		{
 			const Extensions::PaletteRowsEntry* entry = nullptr;
@@ -793,7 +833,7 @@ namespace DCLF
 		void RunUpload(Job& a_job);
 		void Sample(const Job& a_job);
 		void ApplyPlans(const Job& a_job);
-		void TrackSpheres(std::uint64_t a_seq, const std::vector<BindlessPlacement>& a_out);
+		void TrackSphere(std::uint64_t a_seq, std::uint32_t a_slot, const BindlessPlacement& a_row);
 		void PostSnapshotSpheres(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
 		static void StoreLiveSpheres(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
 		void StoreForwardRows(const Job& a_job, const std::vector<BindlessPlacement>& a_out);
@@ -821,10 +861,11 @@ namespace DCLF
 			std::span<const org::StreamingUploadRange> a_overrides = {});
 		template <class T>
 		void SendLate(const Job& a_job, Part a_part, const KeptWholeArray<T>& a_rows, std::span<const org::StreamingUploadRange> a_overrides);
+		/** @brief A sampling job's build of a sampled array. Its journal keeps only this build's changes, which staging reads. */
 		template <class T>
-		static void BeginBuild(const Job& a_job, Part a_part, KeptWholeArray<T>& a_rows)
+		static void BeginSampledBuild(KeptWholeArray<T>& a_rows)
 		{
-			a_rows.BeginBuild(a_job.oldestContentEpochs[a_part] ? *a_job.oldestContentEpochs[a_part] : a_rows.ContentEpoch());
+			a_rows.BeginBuild(a_rows.ContentEpoch());
 		}
 	};
 
@@ -865,8 +906,7 @@ namespace DCLF
 		WaitTurn(a_job.chain);
 		NoteLongWait(queued, "the sampling job's wait for its chain turn", a_job.seq);
 		pendingFieldValues.insert(pendingFieldValues.end(), a_job.fieldValues.begin(), a_job.fieldValues.end());
-		// The builds open at the floors the last upload leased at.
-		a_job.oldestContentEpochs = sampleFloors;
+		// Game-side pools' builds open at the floors the last upload leased at.
 		for (std::size_t i = 0; i < a_job.registered.size(); ++i)
 			a_job.registered[i].oldestContentEpoch = registered[i].sampleFloor;
 		const auto start = std::chrono::steady_clock::now();
@@ -877,7 +917,12 @@ namespace DCLF
 				logger::error("[DCLF] frame values' sampling {} failed: {}; the next upload sends the rows as they are", a_job.seq, e.what());
 		}
 		MarkSampled(a_job.seq);
-		sampledGlobals = a_job.globals.get();
+		// Staged even after a failure: what the job wrote is in the sampled rows, and the next job's build forgets it.
+		StageSampled(a_job.seq);
+		if (staged.size() > kMaxStaged) {
+			OpenDrawnBuilds(drawnFloors);
+			ApplyStaged(staged[staged.size() - kMaxStaged - 1].seq);
+		}
 		const auto us = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
 		sampleUs += us;
 		pendingSampleUs += us;
@@ -890,7 +935,7 @@ namespace DCLF
 		WaitTurn(a_job.chain);
 		// It reads only sampled rows and render-side state: a lease asked for here is counted as a defect.
 		const EngineReadWindow::RenderSideJob renderSide;
-		sampleFloors = a_job.oldestContentEpochs;
+		drawnFloors = a_job.oldestContentEpochs;
 		for (std::size_t i = 0; i < a_job.registered.size(); ++i)
 			registered[i].sampleFloor = a_job.registered[i].oldestContentEpoch;
 		std::erase_if(backingFieldOwners, [](const auto& entry) { return entry.second.backing.expired(); });
@@ -900,20 +945,20 @@ namespace DCLF
 				entry.resources.reset();
 		if (const auto previous = backingFieldOwners.find(a_job.leases[kShading]->generation); previous != backingFieldOwners.end())
 			a_job.fieldResources->push_back(previous->second.resources);
-		// A sampling job of a later ticket ran before this render's upload: the render draws that ticket's rows.
-		if (sampledGlobals && a_job.globals && sampledGlobals != a_job.globals.get())
-			++aheadUploads;
 		const auto start = std::chrono::steady_clock::now();
 		try {
-			// Native: open builds here too, so what this upload marks is a new content epoch every backing is sent.
-			if (Snapshot::FrameCamera::Owned()) {
-				BeginBuild(a_job, kPlacements, rows);
-				BeginBuild(a_job, kPalettes, palettes);
-			}
+			// Each upload opens its own builds of the drawn rows, so what it applies and marks is a new content epoch every backing is sent.
+			OpenDrawnBuilds(a_job.oldestContentEpochs);
+			// Only forced early applies (kMaxStaged) can have sent a later ticket's rows than this render's.
+			if (drawn.applied > a_job.ticketSample)
+				++aheadUploads;
+			ApplyStaged(a_job.ticketSample);
+			if (!staged.empty())
+				++heldBack;
 			// The late copies' rows of the last upload go back to the plain rows in every backing that held them.
 			MarkLateDirty();
 			DrawStill();
-			const auto& out = rows.Get();
+			const auto& out = drawn.rows.Get();
 			StoreLiveSpheres(a_job, out);
 			StoreForwardRows(a_job, out);
 			PostSnapshotSpheres(a_job, out);
@@ -947,9 +992,9 @@ namespace DCLF
 		                   static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
 		for (auto max = maxTotalUs.load(std::memory_order_relaxed); total > max && !maxTotalUs.compare_exchange_weak(max, total, std::memory_order_relaxed);) {}
 		++frames;
-		renderRows = rows.Shared();
-		renderPalettes = palettes.Shared();
-		renderShading = shading.Shared();
+		renderRows = drawn.rows.Shared();
+		renderPalettes = drawn.palettes.Shared();
+		renderShading = drawn.shading.Shared();
 		done.store(a_job.seq, std::memory_order_release);
 		done.notify_all();
 		EndTurn(a_job.chain);
@@ -1369,8 +1414,8 @@ namespace DCLF
 		DCLF_ZONE("CS.DCLF.FrameValues.Sample");
 		const auto& work = *a_job.plan;
 		TracyCZoneN(sBegin, "CS.DCLF.FV.S.BeginBuild", true);
-		BeginBuild(a_job, kPlacements, rows);
-		BeginBuild(a_job, kPalettes, palettes);
+		BeginSampledBuild(rows);
+		BeginSampledBuild(palettes);
 		auto& out = rows.Mutable();
 		if (out.size() < work.slots) {
 			const std::size_t first = out.size();
@@ -1384,13 +1429,10 @@ namespace DCLF
 			paletteOut.resize(paletteRows, PaletteRow{});
 			palettes.MarkRange(first, paletteRows - first);
 		}
-		++drawn.serial;
-		if (drawn.rowSerial.size() < out.size())
-			drawn.rowSerial.resize(out.size(), 0);
-		if (drawn.blockSerial.size() < paletteOut.size() / 2) {
-			drawn.blockSerial.resize(paletteOut.size() / 2, 0);
-			drawn.blockOwner.resize(paletteOut.size() / 2, nullptr);
-		}
+		if (rowPrevious.size() < out.size())
+			rowPrevious.resize(out.size(), kKeepPrevious);
+		if (blockOwner.size() < paletteOut.size() / 2)
+			blockOwner.resize(paletteOut.size() / 2, nullptr);
 		TracyCZoneEnd(sBegin);
 		MarkDue(a_job);
 		TracyCZoneN(sList, "CS.DCLF.FV.S.ListItems", true);
@@ -1428,7 +1470,7 @@ namespace DCLF
 		TracyCZoneEnd(sList);
 		TracyCZoneN(sRoots0, "CS.DCLF.FV.S.MarkRootsAndRootView", true);
 		MarkSampledRoots();
-		const SampleOut sampleOut{ out, paletteOut, drawn, Snapshot::FrameCamera::Owned() };
+		const SampleOut sampleOut{ out, paletteOut, rowPrevious, Snapshot::FrameCamera::Owned() };
 		std::uint64_t rootViewMarked = 0, rootViewPaletteMarked = 0;
 		ApplyRootViewSamples(a_job, sampleOut, rootViewMarked, rootViewPaletteMarked);
 		auto& changed = sampleChanged;
@@ -1460,8 +1502,6 @@ namespace DCLF
 		rootsDue += dueRoots.size();
 		if (const auto refusals = refusedHere.load())
 			refused += refusals;
-		// Sampled for the next upload: done holds the last upload's sequence.
-		TrackSpheres(done.load(std::memory_order_acquire) + 1, out);
 		for (const auto slot : listedSlots)
 			listed[slot] = 0;
 		for (const auto block : listedBlocks)
@@ -1474,22 +1514,17 @@ namespace DCLF
 		ForEachRegistered(a_job, Pools::GameSide, [](const Extensions::FrameValuePoolEntry& a_entry, Api::FrameValuePoolProducer& a_producer) { a_entry.sample(a_producer); });
 	}
 
-	void FrameValues::Impl::TrackSpheres(std::uint64_t a_seq, const std::vector<BindlessPlacement>& a_out)
+	void FrameValues::Impl::TrackSphere(std::uint64_t a_seq, std::uint32_t a_slot, const BindlessPlacement& a_row)
 	{
-		// Only slots sampled this frame can have moved their bound.
-		if (lastSphere.size() < a_out.size()) {
-			lastSphere.resize(a_out.size(), std::array<float, 4>{});
-			sphereSeq.resize(a_out.size(), 0);
+		// Only slots a ticket wrote can have moved their bound.
+		if (lastSphere.size() <= a_slot) {
+			lastSphere.resize(std::size_t(a_slot) + 1, std::array<float, 4>{});
+			sphereSeq.resize(std::size_t(a_slot) + 1, 0);
 		}
-		for (const auto slot : listedSlots) {
-			if (slot >= a_out.size())
-				continue;
-			const auto& bound = a_out[slot].bound;
-			auto& last = lastSphere[slot];
-			if (std::memcmp(last.data(), bound, sizeof(bound)) != 0) {
-				std::memcpy(last.data(), bound, sizeof(bound));
-				sphereSeq[slot] = a_seq;
-			}
+		auto& last = lastSphere[a_slot];
+		if (std::memcmp(last.data(), a_row.bound, sizeof(a_row.bound)) != 0) {
+			std::memcpy(last.data(), a_row.bound, sizeof(a_row.bound));
+			sphereSeq[a_slot] = a_seq;
 		}
 	}
 
@@ -1626,8 +1661,8 @@ namespace DCLF
 		if (palette) {
 			blockListed[a_item.boneOffset] = 1;
 			listedBlocks.push_back(a_item.boneOffset);
-			paletteContinued = drawn.blockOwner[a_item.boneOffset] == a_item.geometry.get();
-			drawn.blockOwner[a_item.boneOffset] = a_item.geometry.get();
+			paletteContinued = blockOwner[a_item.boneOffset] == a_item.geometry.get();
+			blockOwner[a_item.boneOffset] = a_item.geometry.get();
 		}
 		a_items.push_back({ &a_item, palette, a_settles, a_mover, continued, paletteContinued });
 	}
@@ -1653,23 +1688,18 @@ namespace DCLF
 			if (rowOwner.size() <= sample.slot)
 				rowOwner.resize(std::size_t(sample.slot) + 1, nullptr);
 			const bool continued = std::exchange(rowOwner[sample.slot], sample.geometry) == sample.geometry;
-			// As SampleListed: natively the previous transform is what the last render drew.
-			if (a_out.native && continued && sample.previousTransform && !(GeometryPort::kMainPassRenderFlags & 0x10)) {
-				const float* previous = DrawnWorld(a_out, sample.slot);
-				std::memcpy(row.previousWorld, previous, sizeof(row.previousWorld));
-				std::memcpy(layer.previousWorld, previous, sizeof(layer.previousWorld));
-				if (std::memcmp(row.world, row.previousWorld, sizeof(row.world)) != 0)
-					drawn.rows.emplace_back(sample.slot, sample.layerSlot);
-			}
+			// As SampleListed: natively the drawn rows take the previous transform from what the last render drew.
+			const bool drawnPrevious = a_out.native && continued && sample.previousTransform && !(GeometryPort::kMainPassRenderFlags & 0x10);
+			const auto mode = drawnPrevious ? kDrawnPrevious : kSampledPrevious;
 			if (std::memcmp(&out[sample.slot], &row, sizeof(row)) != 0) {
 				out[sample.slot] = row;
-				drawn.rowSerial[sample.slot] = drawn.serial;
+				a_out.rowPrevious[sample.slot] = mode;
 				rows.Mark(sample.slot);
 				++a_marked;
 			}
 			if (sample.layerSlot != kNoObjectSlot && sample.layerSlot < out.size() && std::memcmp(&out[sample.layerSlot], &layer, sizeof(layer)) != 0) {
 				out[sample.layerSlot] = layer;
-				drawn.rowSerial[sample.layerSlot] = drawn.serial;
+				a_out.rowPrevious[sample.layerSlot] = mode;
 				rows.Mark(sample.layerSlot);
 				++a_marked;
 			}
@@ -1678,9 +1708,9 @@ namespace DCLF
 			const auto at = PaletteRowsOf(sample.boneOffset, sample.boneRows);
 			if (std::size_t(at.previous) + sample.boneRows > paletteOut.size() || std::size_t(at.current) + sample.boneRows > paletteOut.size())
 				continue;
-			const bool paletteContinued = std::exchange(drawn.blockOwner[sample.boneOffset], sample.geometry) == sample.geometry;
+			const bool paletteContinued = std::exchange(blockOwner[sample.boneOffset], sample.geometry) == sample.geometry;
 			paletteRuns.clear();
-			if (WritePalette(a_out, sample.boneOffset, sample.boneRows, paletteContinued, sample.current.data(), sample.previous.data(), drawn.blocks, paletteRuns)) {
+			if (WritePalette(a_out, sample.boneOffset, sample.boneRows, paletteContinued, sample.current.data(), sample.previous.data(), sampledBlocks, paletteRuns)) {
 				palettes.MarkRange(at.current, 2 * sample.boneRows);
 				a_paletteMarked += 2 * sample.boneRows;
 			}
@@ -1688,15 +1718,11 @@ namespace DCLF
 	}
 
 	bool FrameValues::Impl::WritePalette(const SampleOut& a_out, std::uint32_t a_offset, std::uint32_t a_rows, bool a_continued, const void* a_current,
-		const void* a_previous, std::vector<std::pair<std::uint32_t, std::uint32_t>>& a_moved, std::vector<std::pair<std::uint32_t, std::uint32_t>>& a_runs)
+		const void* a_previous, std::vector<StagedBlock>& a_blocks, std::vector<std::pair<std::uint32_t, std::uint32_t>>& a_runs)
 	{
 		auto& paletteOut = a_out.paletteOut;
 		const auto at = PaletteRowsOf(a_offset, a_rows);
 		const std::size_t bytes = std::size_t(a_rows) * sizeof(PaletteRow);
-		const bool drawnPrevious = a_out.native && a_continued;
-		// Natively the previous rows are what the last render drew: the block's previous rows while no upload sent it yet, else its current.
-		if (drawnPrevious)
-			a_previous = a_out.drawn.blockSerial[a_offset] > a_out.drawn.uploaded ? &paletteOut[at.previous] : &paletteOut[at.current];
 		const bool previousChanges = std::memcmp(&paletteOut[at.previous], a_previous, bytes) != 0;
 		const bool currentChanges = std::memcmp(&paletteOut[at.current], a_current, bytes) != 0;
 		if (!previousChanges && !currentChanges)
@@ -1706,9 +1732,8 @@ namespace DCLF
 			std::memcpy(&paletteOut[at.previous], a_previous, bytes);
 		if (currentChanges)
 			std::memcpy(&paletteOut[at.current], a_current, bytes);
-		a_out.drawn.blockSerial[a_offset] = a_out.drawn.serial;
-		if (drawnPrevious && std::memcmp(&paletteOut[at.current], &paletteOut[at.previous], bytes) != 0)
-			a_moved.emplace_back(a_offset, a_rows);
+		// Natively the drawn rows take a continued block's previous half from what the last render drew.
+		a_blocks.push_back({ a_offset, a_rows, a_out.native && a_continued });
 		a_runs.emplace_back(at.current, 2 * a_rows);
 		return true;
 	}
@@ -1826,20 +1851,13 @@ namespace DCLF
 			row = out[item.slot];
 		else
 			previousTransform = SampleItem(item, row, layer);
-		// Native: the previous transform is the one the last render drew for the object, not the engine's previous update, so a repeated
-		// snapshot draws without motion and a render after skipped updates moves from what was really drawn. LOD keeps its current transform.
+		// Native: the drawn rows take the previous transform the last render drew for the object, not the engine's previous update, so a
+		// repeated snapshot draws without motion and a render after skipped updates moves from what was really drawn. LOD keeps its current
+		// transform. The sampled row keeps the engine's, so settling works as in guest.
 		const bool drawnPrevious = previousTransform && continued && a_out.native &&
 		                           &DrawnPreviousWorld(*item.geometry) != &item.geometry->world && !(GeometryPort::kMainPassRenderFlags & 0x10);
-		if (drawnPrevious) {
-			const float* previous = DrawnWorld(a_out, item.slot);
-			std::memcpy(row.previousWorld, previous, sizeof(row.previousWorld));
-			if (item.layerSlot != kNoObjectSlot)
-				std::memcpy(layer.previousWorld, previous, sizeof(layer.previousWorld));
-		}
-		const bool moving = drawnPrevious ? std::memcmp(row.world, row.previousWorld, sizeof(row.world)) != 0 :
-		                                    std::memcmp(&item.geometry->world, &DrawnPreviousWorld(*item.geometry), sizeof(RE::NiTransform)) != 0;
-		if (drawnPrevious && moving)
-			a_mine.movedRows.emplace_back(item.slot, item.layerSlot);
+		const auto mode = drawnPrevious ? kDrawnPrevious : kSampledPrevious;
+		const bool moving = std::memcmp(&item.geometry->world, &DrawnPreviousWorld(*item.geometry), sizeof(RE::NiTransform)) != 0;
 		if (settles && !firstPerson && moving)
 			a_mine.settling.push_back(&item);
 		// A particle snapshot's data is never read here. Its row waits for its class's write.
@@ -1849,13 +1867,13 @@ namespace DCLF
 			waiting->slotsAt = a_mine.slots.size();
 		} else if (std::memcmp(&out[item.slot], &row, sizeof(row)) != 0) {
 			out[item.slot] = row;
-			a_out.drawn.rowSerial[item.slot] = a_out.drawn.serial;
+			a_out.rowPrevious[item.slot] = mode;
 			a_mine.slots.push_back(item.slot);
 			changes = true;
 		}
 		if (!firstPerson && item.layerSlot != kNoObjectSlot && item.layerSlot < out.size() && std::memcmp(&out[item.layerSlot], &layer, sizeof(layer)) != 0) {
 			out[item.layerSlot] = layer;
-			a_out.drawn.rowSerial[item.layerSlot] = a_out.drawn.serial;
+			a_out.rowPrevious[item.layerSlot] = mode;
 			a_mine.slots.push_back(item.layerSlot);
 			changes = true;
 		}
@@ -1930,7 +1948,7 @@ namespace DCLF
 			bool changes = deferred.layerChanged;
 			if (std::memcmp(&out[item.slot], &row, sizeof(row)) != 0) {
 				out[item.slot] = row;
-				a_out.drawn.rowSerial[item.slot] = a_out.drawn.serial;
+				a_out.rowPrevious[item.slot] = kSampledPrevious;
 				a_mine.slots.insert(a_mine.slots.begin() + static_cast<std::ptrdiff_t>(deferred.slotsAt), item.slot);
 				changes = true;
 			}
@@ -2006,7 +2024,7 @@ namespace DCLF
 			return false;
 		}
 		++a_mine.skins;
-		return WritePalette(a_out, item.boneOffset, item.boneRows, a_continued, current, previous, a_mine.movedBlocks, a_mine.paletteRuns);
+		return WritePalette(a_out, item.boneOffset, item.boneRows, a_continued, current, previous, a_mine.blocks, a_mine.paletteRuns);
 	}
 	void FrameValues::Impl::SampleRoots(const SampleOut& a_out, std::vector<std::vector<std::uint32_t>>& a_rootChanged, std::vector<std::uint8_t>& a_rootRefused,
 		std::atomic<std::uint64_t>& a_refused)
@@ -2065,8 +2083,7 @@ namespace DCLF
 			}
 			skins += chunk.skins;
 			defects += chunk.defects;
-			drawn.rows.insert(drawn.rows.end(), chunk.movedRows.begin(), chunk.movedRows.end());
-			drawn.blocks.insert(drawn.blocks.end(), chunk.movedBlocks.begin(), chunk.movedBlocks.end());
+			sampledBlocks.insert(sampledBlocks.end(), chunk.blocks.begin(), chunk.blocks.end());
 		}
 		for (std::size_t r = 0; r < dueRoots.size(); ++r) {
 			for (const auto slot : a_rootChanged[r])
@@ -2095,7 +2112,7 @@ namespace DCLF
 	void FrameValues::Impl::SampleShadingRows(const Job& a_job, std::size_t a_slots)
 	{
 		DCLF_ZONE("CS.DCLF.FrameValues.Shading");
-		BeginBuild(a_job, kShading, shading);
+		BeginSampledBuild(shading);
 		auto& out = shading.Mutable();
 		if (out.size() < a_slots) {
 			const std::size_t first = out.size();
@@ -2148,11 +2165,8 @@ namespace DCLF
 		for (const auto& [slot, field, value, resources] : pendingFieldValues) {
 			if (slot >= out.size())
 				continue;
-			const auto ownerKey = std::uint64_t(slot) * Extensions::kShadingRowFields + static_cast<std::size_t>(field);
-			if (resources)
-				fieldOwners[ownerKey] = resources;
-			else
-				fieldOwners.erase(ownerKey);
+			// The owners follow the drawn rows: they apply with the ticket's staged rows.
+			sampledFieldOwners.emplace_back(std::uint64_t(slot) * Extensions::kShadingRowFields + static_cast<std::size_t>(field), resources);
 			const auto& range = kShadingFieldRanges[static_cast<std::size_t>(field)];
 			auto* fieldBytes = reinterpret_cast<std::byte*>(&out[slot]) + range.offset;
 			if (std::memcmp(fieldBytes, value.data(), range.bytes) == 0)
@@ -2256,49 +2270,205 @@ namespace DCLF
 			a_overrides);
 	}
 
-	// Native, once per render: what the last render drew moving and no sample wrote since is drawn still now, so a repeated snapshot draws
-	// without motion. What the samples since wrote moving is what this render draws.
+	namespace
+	{
+		/** @brief The runs a sampled array's running build changed, and their elements. */
+		template <class T>
+		void StageRuns(const KeptWholeArray<T>& a_rows, std::vector<std::pair<std::uint32_t, std::uint32_t>>& a_runs, std::vector<T>& a_data)
+		{
+			// The build opened at its own content epoch (BeginSampledBuild), so the journal holds only this build's entries.
+			const auto changes = a_rows.View().changes;
+			const auto& elements = a_rows.Get();
+			changes.ForEachRun(changes.floor, elements.size(), [&](std::uint64_t a_first, std::uint64_t a_count) {
+				a_runs.emplace_back(static_cast<std::uint32_t>(a_first), static_cast<std::uint32_t>(a_count));
+				a_data.insert(a_data.end(), elements.begin() + static_cast<std::ptrdiff_t>(a_first), elements.begin() + static_cast<std::ptrdiff_t>(a_first + a_count));
+			});
+		}
+
+		/** @brief Grows a drawn array to a_count rows, zeroed and marked. */
+		template <class T>
+		void GrowTo(KeptWholeArray<T>& a_rows, std::size_t a_count)
+		{
+			if (a_rows.Size() >= a_count)
+				return;
+			const std::size_t first = a_rows.Size();
+			a_rows.Mutable().resize(a_count, T{});
+			a_rows.MarkRange(first, a_count - first);
+		}
+
+		/** @brief Copies a staged array's runs into a drawn one and marks them. */
+		template <class T>
+		void CopyRuns(KeptWholeArray<T>& a_rows, const std::vector<std::pair<std::uint32_t, std::uint32_t>>& a_runs, const std::vector<T>& a_data)
+		{
+			if (a_runs.empty())
+				return;
+			auto& out = a_rows.Mutable();
+			std::size_t at = 0;
+			for (const auto& [first, count] : a_runs) {
+				std::copy_n(a_data.begin() + static_cast<std::ptrdiff_t>(at), count, out.begin() + first);
+				a_rows.MarkRange(first, count);
+				at += count;
+			}
+		}
+	}
+
+	// At the end of each sampling job: what it changed in the sampled rows, for the uploads of its ticket and later ones.
+	void FrameValues::Impl::StageSampled(std::uint64_t a_seq)
+	{
+		DCLF_ZONE("CS.DCLF.FrameValues.Stage");
+		auto& next = staged.emplace_back();
+		next.seq = a_seq;
+		next.rowCount = rows.Size();
+		next.paletteCount = palettes.Size();
+		next.shadingCount = shading.Size();
+		StageRuns(rows, next.rowRuns, next.rowData);
+		StageRuns(palettes, next.paletteRuns, next.paletteData);
+		StageRuns(shading, next.shadingRuns, next.shadingData);
+		next.rowModes.reserve(next.rowData.size());
+		for (const auto& [first, count] : next.rowRuns)
+			for (std::uint32_t slot = first; slot < first + count; ++slot) {
+				next.rowModes.push_back(slot < rowPrevious.size() ? static_cast<RowPrevious>(rowPrevious[slot]) : kSampledPrevious);
+				if (slot < rowPrevious.size())
+					rowPrevious[slot] = kKeepPrevious;
+			}
+		next.blocks = std::exchange(sampledBlocks, {});
+		next.fieldOwners = std::exchange(sampledFieldOwners, {});
+	}
+
+	void FrameValues::Impl::OpenDrawnBuilds(const std::array<std::optional<std::uint64_t>, kBuiltInPools>& a_floors)
+	{
+		const auto open = [&](auto& a_rows, Part a_part) { a_rows.BeginBuild(a_floors[a_part] ? *a_floors[a_part] : a_rows.ContentEpoch()); };
+		open(drawn.rows, kPlacements);
+		open(drawn.palettes, kPalettes);
+		open(drawn.shading, kShading);
+	}
+
+	void FrameValues::Impl::ApplyStaged(std::uint64_t a_through)
+	{
+		const bool native = Snapshot::FrameCamera::Owned();
+		while (!staged.empty() && staged.front().seq <= a_through) {
+			ApplyOne(staged.front(), native);
+			staged.pop_front();
+		}
+	}
+
+	// A ticket's staged rows onto the drawn rows. Natively, a continued object's previous transform and palette are what the last upload
+	// drew: the drawn row's previous while no upload sent it since, else its current.
+	void FrameValues::Impl::ApplyOne(const Staged& a_staged, bool a_native)
+	{
+		DCLF_ZONE("CS.DCLF.FrameValues.Apply");
+		const std::size_t heldRows = drawn.rows.Size(), heldPalettes = drawn.palettes.Size();
+		GrowTo(drawn.rows, a_staged.rowCount);
+		GrowTo(drawn.palettes, a_staged.paletteCount);
+		GrowTo(drawn.shading, a_staged.shadingCount);
+		if (drawn.rowSerial.size() < drawn.rows.Size())
+			drawn.rowSerial.resize(drawn.rows.Size(), 0);
+		if (drawn.blockSerial.size() < drawn.palettes.Size() / 2)
+			drawn.blockSerial.resize(drawn.palettes.Size() / 2, 0);
+		const auto notDrawnSince = [&](std::uint64_t a_serial) { return a_serial > drawn.uploaded; };
+		// The upload after this one sends these rows' spheres.
+		const std::uint64_t sphereUpload = done.load(std::memory_order_acquire) + 1;
+
+		if (!a_staged.rowRuns.empty()) {
+			auto& out = drawn.rows.Mutable();
+			std::size_t at = 0;
+			for (const auto& [first, count] : a_staged.rowRuns) {
+				for (std::uint32_t slot = first; slot < first + count; ++slot, ++at) {
+					auto& held = out[slot];
+					const auto mode = a_native && slot < heldRows ? a_staged.rowModes[at] : kSampledPrevious;
+					float previous[sizeof(BindlessPlacement::previousWorld) / sizeof(float)];
+					if (mode == kDrawnPrevious)
+						std::memcpy(previous, notDrawnSince(drawn.rowSerial[slot]) ? held.previousWorld : held.world, sizeof(previous));
+					else if (mode == kKeepPrevious)
+						std::memcpy(previous, held.previousWorld, sizeof(previous));
+					held = a_staged.rowData[at];
+					if (mode != kSampledPrevious)
+						std::memcpy(held.previousWorld, previous, sizeof(previous));
+					if (mode == kDrawnPrevious && std::memcmp(held.world, held.previousWorld, sizeof(held.world)) != 0)
+						drawn.moving.push_back(slot);
+					drawn.rowSerial[slot] = a_staged.seq;
+					TrackSphere(sphereUpload, slot, held);
+				}
+				drawn.rows.MarkRange(first, count);
+			}
+		}
+
+		// The drawn previous halves are read before the copy overwrites them.
+		std::vector<PaletteRow> previousRows;
+		if (a_native)
+			for (const auto& block : a_staged.blocks) {
+				const auto at = PaletteRowsOf(block.offset, block.rows);
+				if (!block.drawnPrevious || std::size_t(at.previous) + block.rows > heldPalettes)
+					continue;
+				const auto& held = drawn.palettes.Get();
+				const auto from = held.begin() + (notDrawnSince(drawn.blockSerial[block.offset]) ? at.previous : at.current);
+				previousRows.insert(previousRows.end(), from, from + block.rows);
+			}
+		CopyRuns(drawn.palettes, a_staged.paletteRuns, a_staged.paletteData);
+		std::size_t read = 0;
+		for (const auto& block : a_staged.blocks) {
+			const auto at = PaletteRowsOf(block.offset, block.rows);
+			if (block.offset < drawn.blockSerial.size())
+				drawn.blockSerial[block.offset] = a_staged.seq;
+			if (!a_native || !block.drawnPrevious || std::size_t(at.previous) + block.rows > heldPalettes)
+				continue;
+			auto& out = drawn.palettes.Mutable();
+			std::copy_n(previousRows.begin() + static_cast<std::ptrdiff_t>(read), block.rows, out.begin() + at.previous);
+			read += block.rows;
+			drawn.palettes.MarkRange(at.previous, block.rows);
+			if (std::memcmp(&out[at.current], &out[at.previous], std::size_t(block.rows) * sizeof(PaletteRow)) != 0)
+				drawn.movingBlocks.emplace_back(block.offset, block.rows);
+		}
+
+		CopyRuns(drawn.shading, a_staged.shadingRuns, a_staged.shadingData);
+		for (const auto& [key, resources] : a_staged.fieldOwners) {
+			if (resources)
+				fieldOwners[key] = resources;
+			else
+				fieldOwners.erase(key);
+		}
+		drawn.applied = a_staged.seq;
+	}
+
+	// Native, once per render: what the last render drew moving and no ticket applied since is drawn still now, so a repeated snapshot
+	// draws without motion. What the tickets applied since wrote moving is what this render draws.
 	void FrameValues::Impl::DrawStill()
 	{
 		if (!Snapshot::FrameCamera::Owned())
 			return;
 		std::vector<BindlessPlacement>* out = nullptr;
-		for (const auto& [slot, layerSlot] : drawn.drawnRows) {
-			if (slot >= drawn.rowSerial.size() || drawn.rowSerial[slot] > drawn.uploaded)
+		for (const auto slot : drawn.drawnMoving) {
+			if (slot >= drawn.rowSerial.size() || drawn.rowSerial[slot] > drawn.uploaded || slot >= drawn.rows.Size())
 				continue;
-			for (const auto at : { slot, layerSlot }) {
-				if (at == kNoObjectSlot || at >= rows.Size())
-					continue;
-				const auto& held = rows.Get()[at];
-				if (std::memcmp(held.world, held.previousWorld, sizeof(held.world)) == 0)
-					continue;
-				if (!out)
-					out = &rows.Mutable();
-				std::memcpy((*out)[at].previousWorld, (*out)[at].world, sizeof(BindlessPlacement::world));
-				rows.Mark(at);
-				++stillRows;
-			}
+			const auto& held = drawn.rows.Get()[slot];
+			if (std::memcmp(held.world, held.previousWorld, sizeof(held.world)) == 0)
+				continue;
+			if (!out)
+				out = &drawn.rows.Mutable();
+			std::memcpy((*out)[slot].previousWorld, (*out)[slot].world, sizeof(BindlessPlacement::world));
+			drawn.rows.Mark(slot);
+			++stillRows;
 		}
 		std::vector<PaletteRow>* paletteOut = nullptr;
-		for (const auto& [offset, count] : drawn.drawnBlocks) {
+		for (const auto& [offset, count] : drawn.drawnMovingBlocks) {
 			const auto at = PaletteRowsOf(offset, count);
-			if (offset >= drawn.blockSerial.size() || drawn.blockSerial[offset] > drawn.uploaded || std::size_t(at.previous) + count > palettes.Size())
+			if (offset >= drawn.blockSerial.size() || drawn.blockSerial[offset] > drawn.uploaded || std::size_t(at.previous) + count > drawn.palettes.Size())
 				continue;
 			const std::size_t blockBytes = std::size_t(count) * sizeof(PaletteRow);
-			const auto& held = palettes.Get();
+			const auto& held = drawn.palettes.Get();
 			if (std::memcmp(&held[at.current], &held[at.previous], blockBytes) == 0)
 				continue;
 			if (!paletteOut)
-				paletteOut = &palettes.Mutable();
+				paletteOut = &drawn.palettes.Mutable();
 			std::memcpy(&(*paletteOut)[at.previous], &(*paletteOut)[at.current], blockBytes);
-			palettes.MarkRange(at.previous, count);
+			drawn.palettes.MarkRange(at.previous, count);
 			++stillBlocks;
 		}
-		drawn.drawnRows.swap(drawn.rows);
-		drawn.rows.clear();
-		drawn.drawnBlocks.swap(drawn.blocks);
-		drawn.blocks.clear();
-		drawn.uploaded = drawn.serial;
+		drawn.drawnMoving.swap(drawn.moving);
+		drawn.moving.clear();
+		drawn.drawnMovingBlocks.swap(drawn.movingBlocks);
+		drawn.movingBlocks.clear();
+		drawn.uploaded = drawn.applied;
 	}
 
 	void FrameValues::Impl::BuildLateRows(const Job& a_job)
@@ -2315,15 +2485,15 @@ namespace DCLF
 			a_at = { mover.item.slot, mover.item.layerSlot, mover.item.boneOffset, mover.item.boneRows };
 			return true;
 		};
-		LatePoses::BuildRows(*a_job.latePlan, find, rows.Get(), palettes.Get(), lateRows);
+		LatePoses::BuildRows(*a_job.latePlan, find, drawn.rows.Get(), drawn.palettes.Get(), lateRows);
 	}
 
 	void FrameValues::Impl::MarkLateDirty()
 	{
 		for (const auto& [first, count] : lateDirtyPlacements)
-			rows.MarkRange(first, count);
+			drawn.rows.MarkRange(first, count);
 		for (const auto& [first, count] : lateDirtyPalettes)
-			palettes.MarkRange(first, count);
+			drawn.palettes.MarkRange(first, count);
 		lateDirtyPlacements.clear();
 		lateDirtyPalettes.clear();
 	}
@@ -2365,11 +2535,11 @@ namespace DCLF
 		DCLF_ZONE("CS.DCLF.FrameValues.Upload");
 		{
 			DCLF_ZONE("CS.DCLF.FrameValues.Send.placements");
-			Send(a_job, kPlacements, rows);
+			Send(a_job, kPlacements, drawn.rows);
 		}
 		{
 			DCLF_ZONE("CS.DCLF.FrameValues.Send.palettes");
-			Send(a_job, kPalettes, palettes);
+			Send(a_job, kPalettes, drawn.palettes);
 		}
 		// The next build marks the late rows changed, so every backing holding them is sent the frame's rows again.
 		if (a_job.lateLeases[kPlacements]) {
@@ -2382,7 +2552,7 @@ namespace DCLF
 				lateDirtyPlacements.emplace_back(slot, 1u);
 			}
 			std::ranges::sort(overrides, {}, &org::StreamingUploadRange::dstOffset);
-			SendLate(a_job, kPlacements, rows, overrides);
+			SendLate(a_job, kPlacements, drawn.rows, overrides);
 		}
 		if (a_job.lateLeases[kPalettes]) {
 			DCLF_ZONE("CS.DCLF.FrameValues.Send.latePalettes");
@@ -2395,7 +2565,7 @@ namespace DCLF
 				at += count;
 			}
 			std::ranges::sort(overrides, {}, &org::StreamingUploadRange::dstOffset);
-			SendLate(a_job, kPalettes, palettes, overrides);
+			SendLate(a_job, kPalettes, drawn.palettes, overrides);
 		}
 		{
 			DCLF_ZONE("CS.DCLF.FrameValues.Send.shading");
@@ -2404,7 +2574,7 @@ namespace DCLF
 			for (const auto& [key, owner] : fieldOwners)
 				owners->push_back(owner);
 			a_job.fieldResources->push_back(owners);
-			Send(a_job, kShading, shading);
+			Send(a_job, kShading, drawn.shading);
 			backingFieldOwners[a_job.leases[kShading]->generation] = { a_job.leases[kShading].Get(), std::move(owners), a_job.seq };
 		}
 		// Tracy zone names are static, so the pool's name goes in the zone text.
@@ -2680,7 +2850,7 @@ namespace DCLF
 		return views;
 	}
 
-	void FrameValues::KickSample(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
+	std::uint64_t FrameValues::KickSample(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
 		std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals, std::shared_ptr<RootViews> a_rootViews)
 	{
 		auto& s = *impl;
@@ -2698,7 +2868,7 @@ namespace DCLF
 		TracyCZoneEnd(kPlans);
 		// Startup tickets come before the upload queue exists, so their inputs wait for the first sampling job.
 		if (!Available())
-			return;
+			return s.sampleSeq;
 		TracyCZoneN(kJob, "CS.DCLF.FV.K.SampleJob", true);
 		// Plans hold engine references, so they are released here, in the game half, once their job is done.
 		const auto sampled = s.sampledSeq.load(std::memory_order_acquire);
@@ -2763,9 +2933,11 @@ namespace DCLF
 						EngineReleases::Push(RE::NiPointer<RE::NiRefObject>(std::move(item.property)));
 			}))
 			::RenderGraph::Fatal("Drawcall Limit Fix", "the frame values' sampling was refused by DCLF's executor");
+
+		return seq;
 	}
 
-	bool FrameValues::Kick(std::shared_ptr<const FrameGlobals> a_globals)
+	bool FrameValues::Kick(std::shared_ptr<const FrameGlobals> a_globals, std::uint64_t a_ticketSample)
 	{
 		auto& s = *impl;
 		s.kicked = false;
@@ -2802,6 +2974,7 @@ namespace DCLF
 		job.fieldResources = s.frameFieldOwners = std::make_shared<Impl::ResourceOwners>();
 		job.shadingSlots = s.neededRows[Impl::kShading].load(std::memory_order_acquire);
 		job.globals = a_globals;
+		job.ticketSample = a_ticketSample;
 		job.viewBatches = viewBatches;
 		job.forwardRows = std::exchange(forwardRows, nullptr);
 		TracyCZoneEnd(kJob);
@@ -3085,6 +3258,7 @@ namespace DCLF
 		c.stillRows = s.stillRows.exchange(0);
 		c.stillBlocks = s.stillBlocks.exchange(0);
 		c.aheadUploads = s.aheadUploads.exchange(0);
+		c.heldBack = s.heldBack.exchange(0);
 		return c;
 	}
 

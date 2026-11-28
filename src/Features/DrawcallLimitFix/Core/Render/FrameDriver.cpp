@@ -487,7 +487,7 @@ namespace DCLF
 			const auto claims = rootViews ? view.FrameClaims() : nullptr;
 			auto samples = FrameValues::Get().TakeRootViews(plans, claims.get());
 			// The ticket's sampling job, rendered or not. Every render's upload job comes after it on the frame values' chain.
-			FrameValues::Get().KickSample(std::move(plans), std::move(shading), std::move(fields), t->globals, std::move(samples));
+			t->valuesSample = FrameValues::Get().KickSample(std::move(plans), std::move(shading), std::move(fields), t->globals, std::move(samples));
 		}
 		// Native's game half: what it installed, for its renders.
 		if (Scene::FrameView::InGameHalf())
@@ -591,8 +591,8 @@ namespace DCLF
 			// Producers' uploads may only wait for CPU frames signalled before the last present.
 			::RenderGraph::Frame::Retirement::SealCpuFrames();
 			FrameValues::Get().SetLatePoses(t.latePlan);
-			// The render's upload of what the ticket's sampling job (and any before it) left. A repeated render uploads again.
-			(void)FrameValues::Get().Kick(t.globals);
+			// The render's upload of what the ticket's sampling job (and any before it) staged. A repeated render uploads again.
+			(void)FrameValues::Get().Kick(t.globals, t.valuesSample);
 		}
 		{
 			DCLF_ZONE("CS.DCLF.BF.MakeFramePayload");
