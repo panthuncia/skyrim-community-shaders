@@ -38,9 +38,11 @@ frames = 1
 do = "console"
 arg = "tcai"
 
+# AI off does not stop an animation already playing: a swing started before it runs on, so the guard gets three seconds to
+# finish it before the menu.
 [[steps]]
 at = "previous"
-frames = 1
+frames = 180
 do = "menu"
 arg = "InventoryMenu=show"
 
