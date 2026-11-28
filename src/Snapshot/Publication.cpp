@@ -636,7 +636,8 @@ namespace Snapshot
 
 	void Adopt()
 	{
-		// Begin runs inside Renderer::Lock on every thread, so adoptions never overlap. The render owner reads what this sets.
+		// Begin runs inside Renderer::Lock, or on native's render thread, which the other producers park before they begin. So adoptions
+		// never overlap. The render owner reads what this sets.
 		auto& side = RenderSide();
 		auto& stats = Counters();
 		// The cadence test mode's repeat on the render thread: a routed snapshot renders N times before a newer one is taken.

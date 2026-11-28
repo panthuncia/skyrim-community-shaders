@@ -12,10 +12,12 @@
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Fatal.h"
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "Snapshot/FaceTint.h"
 #include "Snapshot/FrameSnapshot.h"
 #include "Snapshot/Publication.h"
 
 #include "Globals.h"
+#include "Utils/VersionedRelocation.h"
 
 #include <array>
 #include <atomic>
@@ -145,6 +147,15 @@ namespace RenderGraph::Engine::Native::RenderThread
 			}
 		}
 
+		/** @brief Why a render runs engine code and takes Renderer::Lock. */
+		enum class EngineReason : std::uint8_t
+		{
+			Window,              // Begin's body changes the window: a resize, full screen, the screen size
+			VolumetricLighting,  // the console's TVL flags
+			Interface,           // the interface drawn inline, on the producer
+			Count
+		};
+
 		struct Stats
 		{
 			std::atomic<std::uint64_t> routed{ 0 }, unrouted{ 0 }, interfaceInline{ 0 }, renders{ 0 };
@@ -154,6 +165,7 @@ namespace RenderGraph::Engine::Native::RenderThread
 			std::atomic<std::uint64_t> renderUs{ 0 };
 			// How long a render half holds Renderer::Lock at a time: game-thread engine code that takes it waits up to that.
 			std::atomic<std::uint64_t> heldUs{ 0 }, heldMaxUs{ 0 };
+			std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(EngineReason::Count)> engineRenders{};
 			std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(Wait::Count)> waitUs{}, waitMaxUs{};
 		} g_stats;
 
@@ -197,6 +209,88 @@ namespace RenderGraph::Engine::Native::RenderThread
 			ScrapHeapScope& operator=(const ScrapHeapScope&) = delete;
 			RE::ScrapHeap* heap = nullptr;
 		};
+	}
+
+	namespace
+	{
+		using Access::Field;
+
+		/**
+		* @brief Renderer::Begin's body (SE 75460, AE 77245) as a routed render needs it, without Renderer::Lock. The engine code that
+		* takes the lock on other threads (BGSDecalManager's update, the task pool's texture purge, the save screenshot, cell purges)
+		* touches the engine's context, its targets and its device. A routed render touches none of them, so it needs no lock. A render
+		* that runs engine code (a resize, volumetric lighting, the interface drawn inline) takes the lock and the engine's own bodies.
+		* Begin's fields, the same on SE and AE: +0x30 full screen, +0x34 a resize asked, +0x58 the first window's handle, +0x70 its swap
+		* chain, +0xA68 and +0xA70 copies of the current window's +0x30 and +0x38.
+		*/
+		namespace Bodies
+		{
+			std::byte*& CurrentWindow() { return Global<std::byte*>(524730, 411349); }
+			bool& InFrame() { return Global<bool>(525009, 411490); }
+
+			/** @brief The render target manager's screen size, which Begin sets from the window's client area. */
+			struct ScreenSize
+			{
+				std::uint32_t width, height, format;
+				bool flag;
+			};
+
+			/** @brief The size Begin would set: the window's client area, or the default size for an empty one (minimized). */
+			ScreenSize ClientSize(HWND a_window)
+			{
+				RECT rect{};
+				::GetClientRect(a_window, &rect);
+				return { rect.right ? static_cast<std::uint32_t>(rect.right) : Global<const std::uint32_t>(525002, 411483),
+					rect.bottom ? static_cast<std::uint32_t>(rect.bottom) : Global<const std::uint32_t>(525003, 411484), 0x1C, false };
+			}
+
+			/**
+			* @brief Whether Begin's body would change engine render state beyond what Begin() below writes: a resize, a return to full
+			* screen, a window other than the first, or a screen size that differs from the window's. Then the engine's body runs under
+			* the lock.
+			*/
+			bool BeginChanges(RE::BSGraphics::Renderer* a_renderer)
+			{
+				auto* base = reinterpret_cast<std::byte*>(a_renderer);
+				auto* window = CurrentWindow();
+				auto* swapChain = Field<IDXGISwapChain*>(a_renderer, 0x70);
+				if (Field<bool>(a_renderer, 0x34) || window != base + 0x58 || !swapChain)
+					return true;
+				const auto handle = Field<HWND>(a_renderer, 0x58);
+				if (Field<bool>(a_renderer, 0x30)) {
+					BOOL fullScreen = FALSE;
+					swapChain->GetFullscreenState(&fullScreen, nullptr);
+					if (!fullScreen && ::GetForegroundWindow() == handle)
+						return true;
+				}
+				if (Field<std::uint64_t>(a_renderer, 0xA68) != Field<std::uint64_t>(window, 0x30) || Field<std::uint64_t>(a_renderer, 0xA70) != Field<std::uint64_t>(window, 0x38))
+					return true;
+				const auto& size = Global<const ScreenSize>(524970, 411451);
+				const auto client = ClientSize(handle);
+				return size.width != client.width || size.height != client.height || size.format != client.format || size.flag != client.flag;
+			}
+
+			/**
+			* @brief Begin's body without the lock: the frame flag, the jitter call (CS's Main_UpdateJitter hooks sit on it: Upscaling's or
+			* HDR's frame start, CS's jitter and the frame camera) and the shadow state's reset. Left out: the context's ClearState and its
+			* constant buffer 12, since a routed render draws nothing through the engine's context (a render that does runs the engine's
+			* body), and the window and screen size, which BeginChanges found unchanged.
+			*/
+			void Begin()
+			{
+				InFrame() = true;
+				// The call Upscaling.cpp and HDRDisplay.cpp hook: SE +0xE5, AE +0xE2 (GOG and 1.7.99 +0x133).
+				static const auto jitterSite = REL::RelocationID(75460, 77245).address() +
+				                               Util::VersionedRelocation::Select<std::uintptr_t>(0xE5, ::GetModuleHandleW(L"steam_api64.dll") ? 0xE2 : 0x133, 0x133);
+				static const auto jitter = reinterpret_cast<void (*)(RE::BSGraphics::State*)>(Util::VersionedRelocation::GetCallTarget(jitterSite));
+				if (!jitter)
+					RenderGraph::Fatal("native render thread", "Renderer::Begin's jitter call is not a call; another plugin may have patched it");
+				jitter(RE::BSGraphics::State::GetSingleton());
+				using ResetShadowState = void (*)(RE::BSGraphics::RendererShadowState*);
+				static REL::Relocation<ResetShadowState> resetShadowState{ REL::RelocationID(75622, 77437) };
+				resetShadowState(RE::BSGraphics::RendererShadowState::GetSingleton());
+			}
+		}
 	}
 
 	bool Routes(const Snapshot::FrameSnapshot& a_snapshot)
@@ -293,22 +387,33 @@ namespace RenderGraph::Engine::Native::RenderThread
 		if (t_renderThread)
 			Streamline::GetSingleton()->ReflexSleepRender();
 		const auto start = std::chrono::steady_clock::now();
-		using Begin = void (*)(RE::BSGraphics::Renderer*, std::uint32_t);
-		static REL::Relocation<Begin> begin{ REL::RelocationID(75460, 77245) };
 		using End = void (*)(RE::BSGraphics::Renderer*);
 		static REL::Relocation<End> end{ REL::RelocationID(75461, 77246) };
-		// Renderer::Lock covers only the engine's code: Begin, then volumetric lighting, the interface and End. The record between reads
-		// only the payload, CS's frame and the snapshot, so game-thread engine code that takes the lock (BGSDecalManager's update, AE
-		// 15220, and the task pool) runs meanwhile instead of waiting for a whole render.
-		lock(renderer);
-		// CS's frame start (claim, adoption, OnAdopted, OnBegin) and the engine's Begin body; FaceTint's render frame after it.
-		begin(renderer, 0);
-		release(renderer);
+		// CS's frame start: claim, adoption, OnAdopted, OnBegin. Without Renderer::Lock: the other producers park the render thread
+		// before they begin a frame, so Begins never overlap.
+		Frame::Driver::StartRendererFrame(renderer);
 		const auto adopted = std::chrono::steady_clock::now();
 		const auto& snapshot = Snapshot::Current();
 		const auto* payload = snapshot ? PayloadOf(*snapshot) : nullptr;
 		if (!payload)
 			RenderGraph::Fatal("native render half", fmt::format("the adopted snapshot {} has no routed frame payload", snapshot ? snapshot->id : 0));
+		// Renderer::Lock covers only renders that run engine code: a resize or another window change in Begin's body, volumetric
+		// lighting and the interface drawn inline. The engine code that takes the lock on other threads (BGSDecalManager's update, AE
+		// 15220, the task pool) then waits for at most Begin's body and the frame's end. Every other render takes no lock.
+		const auto engineReason = Bodies::BeginChanges(renderer) ? EngineReason::Window :
+		                          payload->volumetricLighting     ? EngineReason::VolumetricLighting :
+		                          payload->interfaceInline        ? EngineReason::Interface :
+		                                                            EngineReason::Count;
+		const bool engineCode = engineReason != EngineReason::Count;
+		if (engineCode) {
+			g_stats.engineRenders[static_cast<std::size_t>(engineReason)].fetch_add(1, std::memory_order_relaxed);
+			lock(renderer);
+			Frame::Driver::EngineBegin(renderer, 0);
+			release(renderer);
+		} else
+			Bodies::Begin();
+		// Native: the face tint bakes' render half, where Main::DrawFrame called FaceGen::UpdatePending.
+		Snapshot::FaceTint::RenderFrame();
 		g_stats.renders.fetch_add(1, std::memory_order_relaxed);
 		const bool fresh = !Snapshot::Render().repeat;
 		if (fresh) {
@@ -318,20 +423,28 @@ namespace RenderGraph::Engine::Native::RenderThread
 		Scene::RecordRouted(payload->prepared);
 		// The present's pacing waits for the GPU. Wait before the lock, so game-thread engine code that takes it does not wait too.
 		Native::PacePresent();
-		lock(renderer);
-		if (payload->volumetricLighting) {
-			using RenderEffect = void (*)(void*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
-			static REL::Relocation<RenderEffect> renderEffect{ REL::RelocationID(99025, 105676) };
-			renderEffect(RE::ImageSpaceManager::GetSingleton(), 0x22, payload->volumetricTarget, 0, 0);
-		}
-		if (payload->interfaceInline) {
-			using DrawInterface = void (*)(RE::UI*);
-			static REL::Relocation<DrawInterface> drawInterface{ REL::RelocationID(79947, 82084) };
-			drawInterface(RE::UI::GetSingleton());
-		} else
+		if (engineCode) {
+			lock(renderer);
+			if (payload->volumetricLighting) {
+				using RenderEffect = void (*)(void*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
+				static REL::Relocation<RenderEffect> renderEffect{ REL::RelocationID(99025, 105676) };
+				renderEffect(RE::ImageSpaceManager::GetSingleton(), 0x22, payload->volumetricTarget, 0, 0);
+			}
+			if (payload->interfaceInline) {
+				using DrawInterface = void (*)(RE::UI*);
+				static REL::Relocation<DrawInterface> drawInterface{ REL::RelocationID(79947, 82084) };
+				drawInterface(RE::UI::GetSingleton());
+			} else
+				Scaleform::ReplaySnapshotUi(*snapshot);
+			end(renderer);
+			release(renderer);
+		} else {
 			Scaleform::ReplaySnapshotUi(*snapshot);
-		end(renderer);
-		release(renderer);
+			// Renderer::End without the lock. Its body touches only render-owned memory: its frame timer, bLockFramerate's sleep (which
+			// plugins such as SSE Display Tweaks patch, so it stays the engine's), the present through CS's Present hook and the frame
+			// flag Begin set. The frame counter's increment is removed (SideEffects).
+			end(renderer);
+		}
 		const auto ended = std::chrono::steady_clock::now();
 		g_stats.renderUs.fetch_add(Micros(ended - start), std::memory_order_relaxed);
 		if (fresh)
@@ -475,14 +588,18 @@ namespace RenderGraph::Engine::Native::RenderThread
 			waits += fmt::format("{}{} {:.1f} ms (at most {:.2f})", i ? ", " : "", kWaitNames[i], static_cast<double>(g_stats.waitUs[i].exchange(0)) / 1000.0,
 				static_cast<double>(g_stats.waitMaxUs[i].exchange(0)) / 1000.0);
 		const auto renders = g_stats.renders.exchange(0);
+		std::uint64_t locked = 0;
+		std::array<std::uint64_t, static_cast<std::size_t>(EngineReason::Count)> lockedBy{};
+		for (std::size_t i = 0; i < lockedBy.size(); ++i)
+			locked += (lockedBy[i] = g_stats.engineRenders[i].exchange(0));
 		return fmt::format(
 			"[ORG native] routed updates: {} routed (CS's game frame, render half from the payload), {} on Main::DrawFrame, {} with the "
-			"interface drawn by the producer; {} routed renders ({} of fresh snapshots, {} repeats; render halves {:.1f} ms in all, Renderer::Lock "
-			"held {:.1f} ms, at most {:.2f} at once); publish to "
+			"interface drawn by the producer; {} routed renders ({} of fresh snapshots, {} repeats; render halves {:.1f} ms in all; {} took "
+			"Renderer::Lock for engine code (window {}, volumetric lighting {}, interface {}), held {:.1f} ms, at most {:.2f} at once); publish to "
 			"adoption {:.2f} ms average (at most {:.2f}), to the render's end {:.2f} ms (at most {:.2f}); waits: {}; render thread parked {} "
 			"times ({}), the producers waited {:.2f} ms in all, at most {:.2f} ms",
 			g_stats.routed.exchange(0), g_stats.unrouted.exchange(0), g_stats.interfaceInline.exchange(0), renders, fresh, renders > fresh ? renders - fresh : 0,
-			static_cast<double>(g_stats.renderUs.exchange(0)) / 1000.0, static_cast<double>(g_stats.heldUs.exchange(0)) / 1000.0,
+			static_cast<double>(g_stats.renderUs.exchange(0)) / 1000.0, locked, lockedBy[0], lockedBy[1], lockedBy[2], static_cast<double>(g_stats.heldUs.exchange(0)) / 1000.0,
 			static_cast<double>(g_stats.heldMaxUs.exchange(0)) / 1000.0, adoptMs, static_cast<double>(g_stats.adoptMaxUs.exchange(0)) / 1000.0, endMs,
 			static_cast<double>(g_stats.endMaxUs.exchange(0)) / 1000.0, waits, parks, byReason, waitMs, maxMs);
 	}

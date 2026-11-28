@@ -19,7 +19,8 @@
 * census flags, which are a frame stale.
 * FrameAnchors fills each segment's fields and asks for missing recordings, made while the engine draws the shadow maps.
 * A tap the description does not cover, or a segment whose tap never fired, is a tap error, counted and logged.
-* OnBegin runs on the beginning thread inside Renderer::Lock. The rest is render owner, except the counters.
+* OnBegin runs on the beginning thread, inside Renderer::Lock except on native's render thread. The rest is render owner, except the
+* counters.
 */
 namespace FrameAnchors
 {
@@ -36,6 +37,16 @@ namespace RenderGraph::Frame::Driver
 
 	/** @brief Renderer::Begin's detour, before the engine's Begin, after the render owner was claimed and the frame clock moved. */
 	void OnBegin();
+
+	/**
+	* @brief Renderer::Begin's CS part: the render owner's claim, the snapshot's adoption, its resize event, menus and window state, then
+	* OnBegin. The detour runs it before the engine's body. Native's render thread runs it alone, without Renderer::Lock, and the
+	* engine's body only when it needs it (RenderThread). The other producers park the render thread first, so Begins never overlap.
+	*/
+	void StartRendererFrame(RE::BSGraphics::Renderer* a_renderer);
+
+	/** @brief The engine's own Renderer::Begin body, without the detour's CS part. Under Renderer::Lock. */
+	void EngineBegin(RE::BSGraphics::Renderer* a_renderer, std::uint32_t a_flags);
 
 	/** @brief ServingThread::SetLoadingScreenActive's detour: a_active before the loop starts, false once it ended. */
 	void OnLoadingScreen(bool a_active);
