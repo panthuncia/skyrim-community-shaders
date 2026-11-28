@@ -48,6 +48,13 @@ frames = 1
 do = "menu"
 arg = "InventoryMenu=hide"
 
+# Flicker back in the world after the menu (post-corrupt.md).
+[[steps]]
+at = "previous"
+frames = 0
+do = "burst"
+arg = "exit-inventory:60"
+
 [[steps]]
 at = "previous"
 frames = 60
@@ -65,6 +72,12 @@ at = "previous"
 frames = 1
 do = "menu"
 arg = "Journal Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 0
+do = "burst"
+arg = "exit-journal:60"
 
 [[steps]]
 at = "previous"
@@ -86,6 +99,12 @@ arg = "StatsMenu=hide"
 
 [[steps]]
 at = "previous"
+frames = 0
+do = "burst"
+arg = "exit-stats:60"
+
+[[steps]]
+at = "previous"
 frames = 60
 do = "exit"
 
@@ -93,3 +112,7 @@ do = "exit"
 reach = "world-ready"
 shots = ["loading-model", "world", "inventory-item", "journal", "stats"]
 shot_refs = ["world", "inventory-item", "journal", "stats"]   # not loading-model: the loading screen's model is random
+
+[expect.flicker]
+max_spike = 20
+max_tiles = 8

@@ -102,6 +102,13 @@ frames = 30
 do = "pov"
 arg = "first"
 
+# Flicker through a pov switch (post-corrupt.md).
+[[steps]]
+at = "previous"
+frames = 0
+do = "burst"
+arg = "pov-first:60"
+
 [[steps]]
 at = "previous"
 frames = 240
@@ -113,6 +120,12 @@ at = "previous"
 frames = 1
 do = "pov"
 arg = "third"
+
+[[steps]]
+at = "previous"
+frames = 0
+do = "burst"
+arg = "pov-third:60"
 
 [[steps]]
 at = "previous"
@@ -168,6 +181,12 @@ frames = 10
 do = "console"
 arg = "coc WhiterunDragonsreach"
 
+[[steps]]
+at = "held-frame"
+frames = 0
+do = "burst"
+arg = "load-in:180"
+
 # Facing the east aisle: straight ahead native draws the hearth fire as a ceiling-high orange column (post-refs.md, B1).
 [[steps]]
 at = "world-ready"
@@ -203,3 +222,7 @@ reach = "world-ready"
 shots = ["first-1", "third-1", "first-2", "first-3", "first-shadow", "interior-first", "interior-shadow"]
 
 shot_refs = ["first-1", "third-1", "first-2", "first-3", "first-shadow", "interior-first", "interior-shadow"]
+
+[expect.flicker]
+max_spike = 20
+max_tiles = 8

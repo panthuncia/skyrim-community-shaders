@@ -108,6 +108,13 @@ frames = 200
 do = "console"
 arg = "coc Whiterun"
 
+# Flicker after each load (post-corrupt.md). The nearby coc holds the presents: the burst starts at the release.
+[[steps]]
+at = "load-start"
+frames = 0
+do = "burst"
+arg = "load-whiterun:180"
+
 [[steps]]
 at = "world-ready"
 frames = 300
@@ -119,6 +126,12 @@ at = "previous"
 frames = 400
 do = "console"
 arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "held-frame"
+frames = 0
+do = "burst"
+arg = "load-dragonsreach:180"
 
 [[steps]]
 at = "world-ready"
@@ -136,3 +149,7 @@ reach = "world-ready"
 shots = ["start", "whiterun", "dragonsreach"]
 
 shot_refs = ["start", "whiterun", "dragonsreach"]
+
+[expect.flicker]
+max_spike = 20
+max_tiles = 8
