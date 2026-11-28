@@ -1328,3 +1328,17 @@ pushes until the user is back.
      earlier dump was an ordinary acquisition caught asleep. cs-test runs the game above normal priority and reports CPU
      saturation by others (`cpu_load`, a summary clause at 5 s or more); the director's build scripts run cmake below normal.
      Repeats (D-2) cost the game about a fifth of its CPU when the machine is saturated (open). Merge check 6/6.
+
+## 2026-11-28: menu draws wait for their shaders; water holes and B3 narrowed (post-bugs2, snap7-water; director accepted)
+
+242. **A native menu-scene or local map draw whose shader is not compiled yet is left out of that render, for every
+     shader type** (`post-bugs2.md`). Turning a feature off at boot changes the shader defines, so CS compiles on demand; the
+     first menu-shadow renders asked for an uncompiled Utility vertex shader and `AddUtility` treated it as a refusal
+     (fatal). It now leaves the draw out like Lighting and Effect draws; a missing BSUtilityShader object stays fatal. The
+     local map's water had the same gap. Covers Terrain Blending, Dynamic Cubemaps and any other feature off at boot; new
+     config `menu-scenes-features-off`. Merge check 7/7.
+243. **Open, narrowed:** B3 is not a fade-amount bug: after a teleport the GPU sometimes judges the player's fade root out
+     of view for seconds (kAccumulated cleared, never stepping), so the helmet stays solid; it stopped reproducing during
+     the session (14/14 good after 22:40). The water after a resize is holes, not stencil: about one pixel in ten of the
+     river surface is never written after a resize, in native and guest (`snap7-water.md`); culling is the lead
+     (snap7-water2).
