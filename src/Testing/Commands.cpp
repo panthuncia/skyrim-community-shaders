@@ -142,7 +142,9 @@ namespace Testing
 			std::string cameraText;
 			if (auto* camera = CS_ENGINE_READ(Camera, Other, RE::PlayerCamera::GetSingleton()); camera && camera->cameraRoot) {
 				const auto& at = camera->cameraRoot->world.translate;
-				cameraText = fmt::format(", camera {:.0f} {:.0f} {:.0f}", at.x, at.y, at.z);
+				const auto& r = camera->cameraRoot->world.rotate.entry;
+				cameraText = fmt::format(", camera {:.0f} {:.0f} {:.0f} rotation ({:.2f} {:.2f} {:.2f}) ({:.2f} {:.2f} {:.2f}) ({:.2f} {:.2f} {:.2f})", at.x, at.y, at.z,
+					r[0][0], r[0][1], r[0][2], r[1][0], r[1][1], r[1][2], r[2][0], r[2][1], r[2][2]);
 			}
 			logger::info("[TEST] place at {}: player {:.0f} {:.0f} {:.0f}{}, {}; {}", a_why, position.x, position.y, position.z, cameraText, cellText, landText);
 		}
