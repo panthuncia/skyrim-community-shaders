@@ -1,0 +1,11 @@
+# menu-scenes with features off at boot (Terrain Blending, Dynamic Cubemaps). A feature off at boot changes the shader
+# defines, so CS's shader cache compiles on demand: the menu scenes' draws must wait for their shaders (left out of a
+# render), not fail. Compose it: native-vulkan+menu-scenes-features-off, guest+menu-scenes-features-off.
+extends = ["menu-scenes"]
+
+[features]
+TerrainBlending = false
+DynamicCubemaps = false
+
+[expect]
+shot_refs = []   # the shots are menu-scenes'; this config checks that the scenes draw without a fatal
