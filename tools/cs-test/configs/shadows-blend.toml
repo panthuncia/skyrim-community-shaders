@@ -12,9 +12,94 @@ timeout_s = 300
 TerrainBlending = true
 ScreenSpaceShadows = true
 
+# A pinned scene, so the shots compare with references: god mode, AI off (the save is a guard fight), time
+# stopped at 13:00, the weather locked (SkyrimClear).
 [[steps]]
 at = "world-ready"
-frames = 60
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+# tai alone leaves combat running: the save's guard keeps fighting. tcai stops it.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+# The save's guard may have opened the Health Low tutorial before god mode, which pauses the game and keeps the steps below
+# from moving the player: health back up, the tutorial closed.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.restoreav health 1000"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "menu"
+arg = "Tutorial Menu=hide"
+
+# The player put back where the save has it (Save95's player location), facing one way: the fight moves and turns the
+# player before AI goes off.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos x 32216"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos y -16692"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos z -4446"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle x 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 200"
+
+[[steps]]
+at = "previous"
+frames = 300
 do = "shot"
 arg = "start"
 
@@ -116,6 +201,7 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["start", "blend-off", "blend-on", "samples-4", "shadows-off", "shadows-on-blend-off", "end"]
+shot_refs = ["start", "blend-off", "blend-on", "samples-4", "shadows-off", "shadows-on-blend-off", "end"]
 no_log = ["frame tap error", "could not be built"]
 
 # The client ran on the render graph (the game's graph frame counts at exit; skipped in plain D3D11 mode).

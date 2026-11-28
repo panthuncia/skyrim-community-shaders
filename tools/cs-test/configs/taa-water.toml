@@ -4,9 +4,29 @@
 # native-vulkan+taa-water, d3d11+taa-water (the D3D11 reference).
 extends = ["base", "river"]
 
+# God mode and AI off (the save is a guard fight; NPCs wander), so the shots compare with references.
 [[steps]]
 at = "world-ready"
-frames = 200
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+# tai alone leaves combat running: the save's guard keeps fighting. tcai stops it.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 199
 do = "console"
 arg = "set timescale to 0"
 
@@ -98,3 +118,5 @@ reach = "world-ready"
 shots = ["river", "river-east"]
 # A step whose planned state differs from the engine's (CheckStepState) logs this once per effect.
 no_log = ["frame tap error", "differs from the engine's state at its first draw"]
+
+shot_refs = ["river"]   # not river-east: native's orange haze over Riverwood's smelter (post-refs.md, B1)

@@ -197,11 +197,143 @@
     "run": "1126-185705-dir-native-d3d12-quick-dir-s7dk-native-d3d12-quick",
     "accepted": "2026-11-26"
   },
+  "native-vulkan+cadence-drop-cells/riverwood": {
+    "sha256": "bc55c7781febf20e33c0008860ad6749eb6491c4aa8a2c6d7e18adba9e03b54a",
+    "size": "1920x1080",
+    "run": "1127-174517-post-refs-native-vulkan-cadence-drop-cells-post-refs-n1-cdc",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+cadence-drop-cells/whiterun": {
+    "sha256": "809542571bddc86bfb2c3133242b8990858312815bbce179de6d0dddf33ee627",
+    "size": "1920x1080",
+    "run": "1127-174517-post-refs-native-vulkan-cadence-drop-cells-post-refs-n1-cdc",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+cloud-shadows/clouds": {
+    "sha256": "c011793ce534ac6efa3b9e1f51a5ebb0b4d81a342214be8ec1f9bb7ec6b1a33b",
+    "size": "1920x1080",
+    "run": "1127-184827-post-refs-native-vulkan-cloud-shadows-post-refs-n2-cs",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+cloud-shadows/clouds-opaque": {
+    "sha256": "0e583a8ee3065cc2cd5d53466feeb280f487621e33c3db2cf7c2e9748b359da2",
+    "size": "1920x1080",
+    "run": "1127-184827-post-refs-native-vulkan-cloud-shadows-post-refs-n2-cs",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+cloud-shadows/exterior": {
+    "sha256": "e868457375d75e8c81de3d4835c72200a60af6b10184db080b8258773a841050",
+    "size": "1920x1080",
+    "run": "1127-184827-post-refs-native-vulkan-cloud-shadows-post-refs-n2-cs",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+facegen/racemenu": {
     "sha256": "03f3a6882f74601096fb5616094330e1f8c9c4422f97e4524d79eeba058fbd3c",
     "size": "1920x1080",
     "run": "1126-185749-dir-native-vulkan-facegen-dir-s7dk-native-vulkan+facegen",
     "accepted": "2026-11-26"
+  },
+  "native-vulkan+first-person-switch/first-1": {
+    "sha256": "7ff6a6b80d673a361809cde772efc2ebd3f888a861c928d0f3c96d8283106f20",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/first-2": {
+    "sha256": "b00e568eda9e5d72aeacdc6e8b5fba9c267a10e1bb6b37c6b739ee96cf634e94",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/first-3": {
+    "sha256": "bab76579fb73be2e179d311bc0eb7d8e481aa63c56bfae31046e79e5e1da035d",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/first-shadow": {
+    "sha256": "04c79719cb117bb5d6f20b21ff1cdf82f3a156515cd3d1406bcf4985f03d1b74",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/interior-first": {
+    "sha256": "e8a27e55bce70ac71b43c01b0b072bd2d15fb0c3c247c5564588e49ff742e8ad",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/interior-shadow": {
+    "sha256": "3d52184df6f6558c00cfe6da079e812b67227285586f712c1a8f0801e2991349",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/third-1": {
+    "sha256": "fa8265a6bcac69ac5313f206ec384658f3a2f30c4f922deba07097f366365ed1",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person/first": {
+    "sha256": "ca882ee30bd05bf28807492cb05b7242b6c19caf90e743bb9ed5e772f1b715c0",
+    "size": "1920x1080",
+    "run": "1127-171835-post-refs-native-vulkan-first-person-post-refs-n1-fp",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person/third": {
+    "sha256": "708d1fa85105e74244f9fed5843e5dbc5dbc37e0fbe50f25699b411011f0f31c",
+    "size": "1920x1080",
+    "run": "1127-171835-post-refs-native-vulkan-first-person-post-refs-n1-fp",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+lens/flat": {
+    "sha256": "e9ea6a9c82a7a9e6e58c095c03d90a851d080331446216f0ba9260754a805fbd",
+    "size": "1920x1080",
+    "run": "1127-172158-post-refs-native-vulkan-lens-post-refs-n1-lens",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+lens/lens": {
+    "sha256": "5d9f4466bf2b0587fc2a6b28088c714de0e9d4c0290f1645d2058136f932dbc5",
+    "size": "1920x1080",
+    "run": "1127-172158-post-refs-native-vulkan-lens-post-refs-n1-lens",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/off": {
+    "sha256": "5f36c10ebcac306bf98c0c854033b02519f7197aaa0ef15ecd5ecf4e8fa6ee68",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/on": {
+    "sha256": "77306b3a9e21ecfd370e006b1fa6a468e5ea500e4ec8f0d2516b30a3ae8ea5c3",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/res512": {
+    "sha256": "0b364437739d10a1ff6bc08e6cd7f8487c33935cd0c57acb3ae3713f03d5f797",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/restored": {
+    "sha256": "6e28e0b7f435f8beec9bf7a0bd7e7f0fc20cdc343f1008600e6570ff8e4a3bcc",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/slots32": {
+    "sha256": "f9536460f9d3d778efc6d7fb779d1ba52d6d10ede9cd90e9c961accf2441a92d",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+llf-local-shadows/start": {
+    "sha256": "62531cd35675527c65d60990477ca0dbd1af00ae10b62ccf6581b86660becc89",
+    "size": "1920x1080",
+    "run": "1127-185502-post-refs-native-vulkan-llf-local-shadows-post-refs-n1-llf",
+    "accepted": "2026-11-27"
   },
   "native-vulkan+map-local/localmap": {
     "sha256": "6234b7e578d4e82b56a0c11bbb38590969c66db6bc8799be8c174974498fe620",
@@ -234,9 +366,9 @@
     "accepted": "2026-11-27"
   },
   "native-vulkan+map/whiterun": {
-    "sha256": "e23332e24306afb9ad9588fbbfe1f8b27c2667a3fc6ca9d3b6a2b111215256b8",
+    "sha256": "ef7e53e248c5951292767e734abaaaefcd493ca5637fd9390ec04dbf14ee7d94",
     "size": "1920x1080",
-    "run": "1127-011151-s7-map-native-vulkan-map-s7-map-fin-nvk-map2",
+    "run": "1127-180707-post-refs-native-vulkan-map-post-refs-n1-map",
     "accepted": "2026-11-27"
   },
   "native-vulkan+menu-book/book-open": {
@@ -329,11 +461,287 @@
     "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+native-river/river": {
+    "sha256": "dc407aeb1bb2ff52be8c1d0931a2dbf510e4a928de44f11e1162d0ec5d894086",
+    "size": "1920x1080",
+    "run": "1127-175223-post-refs-native-vulkan-native-river-post-refs-n1-river",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+native-tour/start": {
+    "sha256": "c6849db483f02913b84e3b7f54e342272408b0d57af93fdc1a77a0ee3236747f",
+    "size": "1920x1080",
+    "run": "1127-173705-post-refs-native-vulkan-native-tour-post-refs-n1-tour",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+native-tour/whiterun": {
+    "sha256": "2f47bfb1a1ae8c3c66deffb6c15b3f0cfdaf98c3338451781db2d5b9c75276cf",
+    "size": "1920x1080",
+    "run": "1127-173705-post-refs-native-vulkan-native-tour-post-refs-n1-tour",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/bloom-blend": {
+    "sha256": "d141367a942471c0c23119fb16bf3075b26a8774ae9a673fad1df192e049e268",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/bloom-mips": {
+    "sha256": "7fa63986aa15463f6a279f3851793ab63187eb83ce9de4cf5d08d26e653d90ca",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/dof-legacy": {
+    "sha256": "a1e6af9e9d1a357d2f474f7e1913c601186390c03a8b9b0a7717a05c4173d341",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/dof-on": {
+    "sha256": "d693145b0c4a897bd84024984f195919361181d5c9b05d6bc98f816281ab491c",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/dof-rings": {
+    "sha256": "f1e0a91c8f368b5551228007948a3719326dfb765c05d93085387300663435b7",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/flare-fft": {
+    "sha256": "9653510b82e9ed86eb559e3061e45d68290c6086edb375264155c9323bf4775e",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/flare-mode": {
+    "sha256": "55b61ba4f8f319946c8ae268a3887607b0fc4382b712adf49699fa0903f7b117",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/glare-fft": {
+    "sha256": "f86ca2be71b8d1350d88f98c1e5c976ea0421e1dc2aa1623da93bb9dd658799d",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/glare-on": {
+    "sha256": "5491de31ce857c0894cc953ae9a12a09158358e41be0e683ac9fa9aa54eee747",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/glare-pupil": {
+    "sha256": "1849ce91b34196e02b45e22e82990ee470f7b0a314df7a36db85b0d330c905de",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/list-off": {
+    "sha256": "c86f08bf98e5d0d32c3dcd70a21d870e5ac848a38a310795a70be1b1456077d3",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/list-on": {
+    "sha256": "f3150a6dc66f96a5d3032563f1bacde1c47f77c1082f47b682afbef3ef03b67b",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+post-effects/pp-base": {
+    "sha256": "3655ba0d616c03f1eda7eae6136afc0f904c3af147513f548f0f0be9ca2b591f",
+    "size": "1920x1080",
+    "run": "1127-172044-post-refs-native-vulkan-post-effects-post-refs-n1-pe",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+quick/start": {
     "sha256": "ecbc5bd088d286f9f8b7ceeea9f15f28ecdb2038a4c3b6ac2d3b9a2b718141ce",
     "size": "1920x1080",
     "run": "1126-185658-dir-native-vulkan-quick-dir-s7dk-native-vulkan+quick",
     "accepted": "2026-11-26"
+  },
+  "native-vulkan+rain/rain": {
+    "sha256": "cc7067d150fecd8028026352b6af7970b66c2f0866bab426a3c4b234f724b73b",
+    "size": "1920x1080",
+    "run": "1127-175639-post-refs-native-vulkan-rain-post-refs-n1-rain",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+rain/rain-later": {
+    "sha256": "1998befdf928b2048f4ef2ac741341b3bc1e910e49f8f4b14b285e23a66ae714",
+    "size": "1920x1080",
+    "run": "1127-175639-post-refs-native-vulkan-rain-post-refs-n1-rain",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+save-screenshot/loaded": {
+    "sha256": "46f97c6370fc0accbc40bc1d306b5e69f3e65f10260a885978fc3eb05624d841",
+    "size": "1920x1080",
+    "run": "1127-185146-post-refs-native-vulkan-save-screenshot-post-refs-n1-ss",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+save-screenshot/saved": {
+    "sha256": "6e24406b51951f3eea1c4ba5777200998e87fa6a527ada739017a55d221fd6d4",
+    "size": "1920x1080",
+    "run": "1127-185146-post-refs-native-vulkan-save-screenshot-post-refs-n1-ss",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+screen-blood/blood": {
+    "sha256": "52d7c904bb7a870759b0cf76cafe837d046b6780a24a4c2e948551d09d517f78",
+    "size": "1920x1080",
+    "run": "1127-180512-post-refs-native-vulkan-screen-blood-post-refs-n1-blood",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+screen-blood/blood2": {
+    "sha256": "d821cf0acb23f960c7fe97a0c7e7be83832d88eac3c1a9a4cd05bba03697d523",
+    "size": "1920x1080",
+    "run": "1127-180512-post-refs-native-vulkan-screen-blood-post-refs-n1-blood",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/blend-off": {
+    "sha256": "61d7c2617b8e161ba9343710445408c02f4042017d845bff7e50ccc97e0a2a89",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/blend-on": {
+    "sha256": "f7c85fe742fd571f7002b3d5531957ecb771b241bd9f6b198acbfb9f6e20ed20",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/end": {
+    "sha256": "eb91b20a5388ebe1338c380d3c67fab62f4da2a9bf306bd4b38d90711b728650",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/samples-4": {
+    "sha256": "d54ae2dccb1aa0fd251bbaf0264dcefac45b12e4f706fa8ae8396a147d3fcf55",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/shadows-off": {
+    "sha256": "d91f4cbc37d1a6f726cf496d16eb0f1b695629663a7322a86e04b62e91a3ac66",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/shadows-on-blend-off": {
+    "sha256": "29790ec2b4aba2df50bb5a98f1d9d84f923bef85ff81cc1e851a0465d87c23f5",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+shadows-blend/start": {
+    "sha256": "204f804ebf3f305f3de6ca0f43cc17716e49d86f69ce753f49ffdbe2d1e91dbd",
+    "size": "1920x1080",
+    "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+sky-native/river-noon": {
+    "sha256": "a566499f74b02f53620127b1977ae94b5791fe7b63dd317b55c571b3877734d9",
+    "size": "1920x1080",
+    "run": "1127-180234-post-refs-native-vulkan-sky-native-post-refs-n1-sky",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+sky-native/sky-night": {
+    "sha256": "1540a2f92b876ada169f02ffc00869b1e105971dcd4450540e2b600c3780d2ba",
+    "size": "1920x1080",
+    "run": "1127-180234-post-refs-native-vulkan-sky-native-post-refs-n1-sky",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+taa-water/river": {
+    "sha256": "4137d79530782e8ca748745e8a5f4d53729ffb5835a7cfe5c23fa4725250868f",
+    "size": "1920x1080",
+    "run": "1127-175430-post-refs-native-vulkan-taa-water-post-refs-n1-taaw",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+ui-menus/console": {
+    "sha256": "acdbb7b7aa0b0e2502baf115d833a21712c6ac1ea3874a20b8d1a63869c49117",
+    "size": "1920x1080",
+    "run": "1127-185352-post-refs-native-vulkan-ui-menus-post-refs-n1-ui",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+ui-menus/hud": {
+    "sha256": "4a2459457565960efff9d84be22f256e32f5cbc7031393772de1ba52b0d1b32c",
+    "size": "1920x1080",
+    "run": "1127-185352-post-refs-native-vulkan-ui-menus-post-refs-n1-ui",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+ui-menus/inventory": {
+    "sha256": "1144514cb09e334ff4205042f2de6c90580f206e1d55e92d6f04e2056dedf622",
+    "size": "1920x1080",
+    "run": "1127-185352-post-refs-native-vulkan-ui-menus-post-refs-n1-ui",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+ui-menus/map": {
+    "sha256": "bb454728ef43dbe16c1baaa6c252f91509216d3cc35bf80a8c8a7c6ce2798fb5",
+    "size": "1920x1080",
+    "run": "1127-185352-post-refs-native-vulkan-ui-menus-post-refs-n1-ui",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap240/settled": {
+    "sha256": "c364efa82f7bfeca95a0907f3524d5c3cc0cc403d3ed3343d9ac671d01d254bf",
+    "size": "1920x1080",
+    "run": "1127-172744-post-refs-native-vulkan-update-cap240-post-refs-n1-uc240",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap240/start": {
+    "sha256": "4bffb52734abcc70d71068364fdaa1aa9dec377df376188b60b5ebb0ac0621a5",
+    "size": "1920x1080",
+    "run": "1127-172744-post-refs-native-vulkan-update-cap240-post-refs-n1-uc240",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap240/turn": {
+    "sha256": "981e4fb9407cde1512b1dd7858baaff9a19e03d38b36e40d94243087884235a8",
+    "size": "1920x1080",
+    "run": "1127-172744-post-refs-native-vulkan-update-cap240-post-refs-n1-uc240",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap30/settled": {
+    "sha256": "97411bd87850e1c352a1c24ffe6dc28cee5ec7b8c96958cc823a3e923281b018",
+    "size": "1920x1080",
+    "run": "1127-172648-post-refs-native-vulkan-update-cap30-post-refs-n1-uc30",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap30/start": {
+    "sha256": "9378d631b1162ed191ef882edebf1d4cb77b85e0f4c7fd7a6104283a91d3af66",
+    "size": "1920x1080",
+    "run": "1127-172648-post-refs-native-vulkan-update-cap30-post-refs-n1-uc30",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+update-cap30/turn": {
+    "sha256": "717a87000fd3e43c3073e8b77520924455a620dbda1d9a54aa7e76eee8d7c01c",
+    "size": "1920x1080",
+    "run": "1127-172648-post-refs-native-vulkan-update-cap30-post-refs-n1-uc30",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+upscalers/dlss": {
+    "sha256": "47e1418e1fba2f3eb5f81e9faaa8a19f618664337262371cd1f7221a612d4085",
+    "size": "1920x1080",
+    "run": "1127-172356-post-refs-native-vulkan-upscalers-post-refs-n1-up",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+upscalers/fsr": {
+    "sha256": "c83d29e82e7828a5a2fa2cf0b87cb0f2443a87d1f7e73ea9139d266cad3942ed",
+    "size": "1920x1080",
+    "run": "1127-172356-post-refs-native-vulkan-upscalers-post-refs-n1-up",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+upscalers/taa": {
+    "sha256": "1fe105b5f5f4d95894c0fc10de60ad0646db8b7a18d56e7ce1a21caddbb3fd29",
+    "size": "1920x1080",
+    "run": "1127-172356-post-refs-native-vulkan-upscalers-post-refs-n1-up",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+upscalers/xess": {
+    "sha256": "e6d2d0c3e9d41c688c387191a4b6ae7db7611baf7bfca92270f6a8d74c0aa1af",
+    "size": "1920x1080",
+    "run": "1127-172356-post-refs-native-vulkan-upscalers-post-refs-n1-up",
+    "accepted": "2026-11-27"
   },
   "native-vulkan+window-resize-stress-taa/large0": {
     "sha256": "3e2d3d582280429f0e8ce21c07aca627a5177f346d7e599c4da9f7b22321d525",

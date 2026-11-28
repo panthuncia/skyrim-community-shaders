@@ -5,11 +5,38 @@ extends = ["base"]
 [run]
 timeout_s = 420
 
+# God mode and AI off (the save is a guard fight), so the shots compare with references. The storm is locked before the coc
+# (the CS weather lock, which holds it against the climate); game time runs from 13:00, since precipitation needs it.
 [[steps]]
 at = "world-ready"
-frames = 200
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+# tai alone leaves combat running: the save's guard keeps fighting. tcai stops it.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 199
 do = "console"
 arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "000C8220"
 
 [[steps]]
 at = "previous"
@@ -47,16 +74,10 @@ frames = 1
 do = "console"
 arg = "player.setangle z 90"
 
-# The rain storm forced in the cell (fw, no transition), then left to fall a while. Game time runs: precipitation needs it.
+# The rain left to fall a while.
 [[steps]]
 at = "previous"
-frames = 10
-do = "console"
-arg = "fw 000C8220"
-
-[[steps]]
-at = "previous"
-frames = 600
+frames = 610
 do = "shot"
 arg = "rain"
 
@@ -74,3 +95,5 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["rain", "rain-later"]
+
+shot_refs = ["rain", "rain-later"]

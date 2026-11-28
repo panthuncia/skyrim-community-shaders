@@ -2,9 +2,29 @@
 # the sky), the sky on a clear night in Whiterun, away from water (night reflection faces hit a known fatal: their cloud group reaches D3D11), then Dragonsreach.
 extends = ["native-vulkan"]
 
+# God mode and AI off (the save is a guard fight; NPCs wander), so the shots compare with references.
 [[steps]]
 at = "world-ready"
-frames = 500
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+# tai alone leaves combat running: the save's guard keeps fighting. tcai stops it.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 499
 do = "console"
 arg = "set timescale to 0"
 
@@ -142,3 +162,5 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["river-noon", "river-sky-noon", "sky-night", "dragonsreach"]
+
+shot_refs = ["river-noon", "sky-night"]   # not dragonsreach (B1, the hearth fire) or river-sky-noon (B3, the player not faded at the camera); post-refs.md

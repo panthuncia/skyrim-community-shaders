@@ -11,11 +11,90 @@ mods_off = ["Skyrim Engine Telemetry", "ImprovedCameraSE"]
 [run]
 timeout_s = 420
 
+# A pinned scene, so the shots compare with references: god mode, AI off (the save is a guard fight), time
+# stopped at 13:00, the weather locked (SkyrimClear).
 [[steps]]
 at = "world-ready"
 frames = 0
 do = "console"
 arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+# tai alone leaves combat running: the save's guard keeps fighting. tcai stops it.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+# The save's guard may have opened the Health Low tutorial before god mode, which pauses the game and keeps the steps below
+# from moving the player: health back up, the tutorial closed.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.restoreav health 1000"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "menu"
+arg = "Tutorial Menu=hide"
+
+# The player put back where the save has it (Save95's player location), facing one way: the fight moves and turns the
+# player before AI goes off.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos x 32216"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos y -16692"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos z -4446"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle x 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 200"
 
 [[steps]]
 at = "previous"
@@ -73,19 +152,13 @@ arg = "first-3"
 
 [[steps]]
 at = "previous"
-frames = 1
-do = "console"
-arg = "tai"
-
-[[steps]]
-at = "previous"
-frames = 10
+frames = 11
 do = "console"
 arg = "player.setangle x 70"
 
 [[steps]]
 at = "previous"
-frames = 60
+frames = 300
 do = "shot"
 arg = "first-shadow"
 
@@ -95,11 +168,12 @@ frames = 10
 do = "console"
 arg = "coc WhiterunDragonsreach"
 
+# Facing the east aisle: straight ahead native draws the hearth fire as a ceiling-high orange column (post-refs.md, B1).
 [[steps]]
 at = "world-ready"
 frames = 0
 do = "console"
-arg = "tgm"
+arg = "player.setangle z 90"
 
 [[steps]]
 at = "previous"
@@ -115,7 +189,7 @@ arg = "player.setangle x 70"
 
 [[steps]]
 at = "previous"
-frames = 60
+frames = 300
 do = "shot"
 arg = "interior-shadow"
 
@@ -127,3 +201,5 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["first-1", "third-1", "first-2", "first-3", "first-shadow", "interior-first", "interior-shadow"]
+
+shot_refs = ["first-1", "third-1", "first-2", "first-3", "first-shadow", "interior-first", "interior-shadow"]
