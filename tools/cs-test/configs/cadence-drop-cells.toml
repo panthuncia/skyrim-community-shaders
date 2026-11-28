@@ -140,3 +140,8 @@ shot_refs = ["whiterun", "dragonsreach", "riverwood"]
 [expect.flicker]
 max_spike = 20
 max_tiles = 8
+# Riverwood after its coc: the camera settles behind the player in drop:3's steps of three updates, and the player's dark back
+# and bright arms pass through tiles in a step that comes back (scored 20.6 once, post-sun.md). Real motion, not flicker. The
+# missing mist this burst caught (post-corrupt F2) scored 57-79.
+[expect.flicker.bursts.load-riverwood]
+max_spike = 35

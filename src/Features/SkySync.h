@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <mutex>
 #include <optional>
 
 #include "RE/M/Moon.h"
@@ -17,6 +18,11 @@ private:
 	static constexpr std::string_view MOD_ID = "153543";
 
 public:
+	/** @brief Physical Sky's light colours for the sun, Masser and Secunda; none leaves the weather's sunlight. Any thread. */
+	void PublishWorkingLightColors(const std::optional<std::array<RE::NiColor, 3>>& a_colors);
+	/** @brief The last published light colours. Any thread. */
+	std::optional<std::array<RE::NiColor, 3>> WorkingLightColors() const;
+
 	friend struct PhysicalSky;
 
 	virtual inline std::string GetName() override { return "Sky Sync"; }
@@ -254,7 +260,10 @@ private:
 	float4 colors[BodyCount] = {};
 	RE::NiPoint3 rawDirections[BodyCount] = {};  // sky-local, before shadow elevation locking; zero when not computed this frame
 	float currentDim = 1.0f;
+	// Physical Sky's light colours for the sun and the moons: its per-frame Reset (the render side) publishes them and the game side's
+	// Sky::Update reads them. Native runs the two on different threads, so the value is swapped whole under the lock.
 	std::optional<std::array<RE::NiColor, 3>> workingLightColors = {};
+	mutable std::mutex workingLightColorsLock;
 	float moonlightFade = 0.0f;
 	float twilightCap = 0.0f;
 	float moonNightWeight = 0.0f;

@@ -212,15 +212,39 @@ def prune_pngs(burst_dir, found, keep_worst=3):
     return sorted(i for i in keep if (burst_dir / f"f{i:03}.png").exists())
 
 
-def check_expect(expect):
-    """expect.flicker's fields and types; returns the error text, or ''."""
-    for key, value in expect.items():
+def _check_limits(limits, where):
+    for key, value in limits.items():
         if key not in EXPECT_FIELDS:
-            return f"unknown key 'expect.flicker.{key}' (known: {', '.join(EXPECT_FIELDS)})"
+            return f"unknown key '{where}.{key}' (known: {', '.join(EXPECT_FIELDS)})"
         want = EXPECT_FIELDS[key]
         if isinstance(value, bool) or not isinstance(value, want) or value < 0:
-            return f"expect.flicker.{key} takes a number of at least 0, not {value!r}"
+            return f"{where}.{key} takes a number of at least 0, not {value!r}"
     return ""
+
+
+def check_expect(expect):
+    """expect.flicker's fields and types; returns the error text, or ''. expect.flicker.bursts.<name> holds one burst's own limits,
+    which replace the shared ones for that burst (a burst whose scene has real motion the shared limit would call flicker)."""
+    shared = {k: v for k, v in expect.items() if k != "bursts"}
+    error = _check_limits(shared, "expect.flicker")
+    if error or "bursts" not in expect:
+        return error
+    if not isinstance(expect["bursts"], dict):
+        return f"expect.flicker.bursts takes a table of bursts, not {expect['bursts']!r}"
+    for name, limits in expect["bursts"].items():
+        if not isinstance(limits, dict):
+            return f"expect.flicker.bursts.{name} takes a table of limits, not {limits!r}"
+        error = _check_limits(limits, f"expect.flicker.bursts.{name}")
+        if error:
+            return error
+    return ""
+
+
+def limits_for(expect, name):
+    """The limits burst a_name is checked against: the shared ones with its own over them."""
+    limits = {k: v for k, v in expect.items() if k != "bursts"}
+    limits.update((expect.get("bursts") or {}).get(name, {}))
+    return limits
 
 
 def check_run(contract, harness, run_dir):
@@ -233,8 +257,8 @@ def check_run(contract, harness, run_dir):
     for name in expected:
         if name not in written:
             result["failures"].append(f"burst {name} was not written")
-    limits = result["expect"]
     for name in written:
+        limits = limits_for(result["expect"], name)
         try:
             found = analyse(Path(run_dir) / "bursts" / name)
         except (OSError, ValueError, KeyError) as error:

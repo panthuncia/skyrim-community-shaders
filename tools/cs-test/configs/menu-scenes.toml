@@ -24,9 +24,25 @@ frames = 60
 do = "shot"
 arg = "world"
 
+# AI and combat off after the world shot: the save's guard fight swings a sword through the exit-inventory burst (spike 15.9,
+# post-sun.md), and a fight flickers in every mode (post-corrupt.md). The menus pause the game, so their shots do not change.
 [[steps]]
 at = "previous"
 frames = 1
+do = "console"
+arg = "tai"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+# AI off does not stop an animation already playing: a swing started before it runs on, so the guard gets three seconds to
+# finish it before the menu.
+[[steps]]
+at = "previous"
+frames = 180
 do = "menu"
 arg = "InventoryMenu=show"
 
