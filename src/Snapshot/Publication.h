@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <source_location>
 
 /**
 * @brief Publication and adoption of frame snapshots (contract: Snapshot/FrameSnapshot.h).
@@ -63,14 +64,17 @@ namespace Snapshot
 	/** @brief Takes the newest published snapshot, if one is new, as the render frame's. Renderer::Begin, on the thread that renders. */
 	void Adopt();
 
-	/** @brief The adopted snapshot. Null before the first adoption. Render owner (the thread whose Begin adopted it). */
-	const std::shared_ptr<const FrameSnapshot>& Current();
+	/**
+	 * @brief The adopted snapshot. Null before the first adoption. Render owner (the thread whose Begin adopted it).
+	 * A read from another thread while the native render thread runs races its adoption: each such call site is logged once.
+	 */
+	const std::shared_ptr<const FrameSnapshot>& Current(std::source_location a_where = std::source_location::current());
 
 	/** @brief a_T's block in the adopted snapshot, or null before the first adoption or when its feature captured none. Render owner. */
 	template <FeatureBlock T>
-	const T* CurrentBlock()
+	const T* CurrentBlock(std::source_location a_where = std::source_location::current())
 	{
-		const auto& snapshot = Current();
+		const auto& snapshot = Current(a_where);
 		return snapshot ? snapshot->Block<T>() : nullptr;
 	}
 
