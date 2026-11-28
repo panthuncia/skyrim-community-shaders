@@ -75,8 +75,11 @@ namespace DCLF
 		/** @brief The first-person members' rows and palettes, sampled by the game half. KickSample hands them to its job. */
 		struct RootViews;
 
-		/** @brief An object's placement row read from the engine now. Without a listed root the bound is unbounded. */
-		static void SampleRow(const RE::BSGeometry& a_geometry, const RE::NiAVObject* a_listedRoot, const RE::BSShaderProperty* a_fadeProperty,
+		/**
+		* @brief An object's placement row read from the engine now. Without a listed root the bound is unbounded. False for a billboard
+		* leaf, whose PreviousWorld holds its base and face mode instead of a previous transform.
+		*/
+		static bool SampleRow(const RE::BSGeometry& a_geometry, const RE::NiAVObject* a_listedRoot, const RE::BSShaderProperty* a_fadeProperty,
 			BindlessPlacement& a_out);
 		/** @brief Diagnostics, render thread. A slot's row read from the engine now. False for a free slot. */
 		static bool SampleSlot(const SceneTables& a_tables, std::uint32_t a_slot, BindlessPlacement& a_out);

@@ -187,7 +187,7 @@ namespace DCLF
 		return out;
 	}
 
-	void FrameValues::SampleRow(const RE::BSGeometry& a_geometry, const RE::NiAVObject* a_listedRoot, const RE::BSShaderProperty* a_fadeProperty,
+	bool FrameValues::SampleRow(const RE::BSGeometry& a_geometry, const RE::NiAVObject* a_listedRoot, const RE::BSShaderProperty* a_fadeProperty,
 		BindlessPlacement& a_out)
 	{
 		StoreTransform(a_geometry.world, a_out.world);
@@ -204,7 +204,7 @@ namespace DCLF
 		StoreFadeNode(a_fadeProperty, a_out.lodFadeNode);
 		StoreForwardSort(a_geometry, a_out.forwardSort);
 		// Sampled regardless of the toggle so rows never depend on it.
-		PlacementRows::SampleBillboardRow(a_geometry, a_out);
+		return !PlacementRows::SampleBillboardRow(a_geometry, a_out);
 	}
 
 	bool FrameValues::SampleSlot(const SceneTables& a_tables, std::uint32_t a_slot, BindlessPlacement& a_out)
@@ -272,14 +272,16 @@ namespace DCLF
 				a_points.pop_front();
 		}
 
-		void SampleItem(const Plan::Item& a_item, BindlessPlacement& a_row, BindlessPlacement& a_layer)
+		/** @brief SampleRow for a_item, and its layer's row. False when the row's PreviousWorld is a billboard's base, not a transform. */
+		bool SampleItem(const Plan::Item& a_item, BindlessPlacement& a_row, BindlessPlacement& a_layer)
 		{
 			const auto& geometry = *a_item.geometry;
-			FrameValues::SampleRow(geometry, a_item.listedRoot.get(), geometry.GetGeometryRuntimeData().shaderProperty.get(), a_row);
+			const bool transform = FrameValues::SampleRow(geometry, a_item.listedRoot.get(), geometry.GetGeometryRuntimeData().shaderProperty.get(), a_row);
 			if (a_item.layerSlot != kNoObjectSlot) {
 				a_layer = a_row;
 				StoreFadeNode(LayerPropertyOf(geometry), a_layer.lodFadeNode);
 			}
+			return transform;
 		}
 
 		/**
@@ -1722,13 +1724,15 @@ namespace DCLF
 			return;
 		}
 		bool changes = false;
+		// A billboard row's PreviousWorld holds its base rotation, bound radius and face mode (BillboardRow.h), never a previous transform.
+		bool previousTransform = false;
 		if (firstPerson)
 			row = out[item.slot];
 		else
-			SampleItem(item, row, layer);
+			previousTransform = SampleItem(item, row, layer);
 		// Native: the previous transform is the one this render side last drew for the object, not the engine's previous update, so a
 		// repeated snapshot draws without motion and a dropped one moves from what was really drawn. LOD keeps its current transform.
-		const bool drawnPrevious = !firstPerson && continued && Snapshot::FrameCamera::Owned() &&
+		const bool drawnPrevious = previousTransform && continued && Snapshot::FrameCamera::Owned() &&
 		                           &DrawnPreviousWorld(*item.geometry) != &item.geometry->world && !(GeometryPort::kMainPassRenderFlags & 0x10);
 		if (drawnPrevious) {
 			std::memcpy(row.previousWorld, out[item.slot].world, sizeof(row.previousWorld));

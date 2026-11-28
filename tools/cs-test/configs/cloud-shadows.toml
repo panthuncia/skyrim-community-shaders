@@ -153,7 +153,7 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["clouds", "clouds-opaque", "interior", "exterior"]
-shot_refs = ["clouds", "clouds-opaque", "exterior"]   # not interior: Dragonsreach's hearth fire is a ceiling-high orange column in native (post-refs.md, B1)
+shot_refs = ["clouds", "clouds-opaque", "interior", "exterior"]
 no_log = ["frame tap error"]
 
 # The client ran on the render graph (the game's graph frame counts at exit; skipped in plain D3D11 mode).
