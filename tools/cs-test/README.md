@@ -211,6 +211,9 @@ arg = "river:60"        # <name>:<count>[:grid], a count of 3-600; grid: no PNGs
 max_spike = 20          # the worst tile spike, 8-bit luma
 max_tiles = 8           # tiles with two or more flicker events
 min_frames = 50         # optional: frames with a grid
+
+[expect.flicker.bursts.river]
+max_spike = 35          # optional: one burst's own limits, over the shared ones (real motion, documented in the config)
 ```
 
 - The game (`src/Features/Screenshot/Burst.*`, `ScreenshotFeature::StepBurst`) takes the next Presents from the first that renders the

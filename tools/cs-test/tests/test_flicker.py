@@ -97,3 +97,17 @@ def test_config_checks_burst_steps_and_limits():
         resolve("base", ["expect.flicker={spike=3}"])
     contract, harness = resolve("base", ['steps=[{at="world-ready", do="burst", arg="water:60:grid"}]', "expect.flicker={max_spike=8, max_tiles=0}"])
     assert contract["steps"][0]["arg"] == "water:60:grid" and harness["flicker"] == {"max_spike": 8, "max_tiles": 0}
+
+
+def test_a_burst_has_its_own_limits(tmp_path):
+    def flick(i, x, y):
+        return 40.0 if i % 2 and x < 30 and y < 30 else 0.0
+    write_burst(tmp_path / "bursts" / "water", frames(8, flick=flick))
+    write_burst(tmp_path / "bursts" / "sky", frames(8, flick=flick))
+    contract = {"steps": [{"do": "burst", "arg": "water:8"}, {"do": "burst", "arg": "sky:8"}]}
+    expect = {"max_spike": 10, "max_tiles": 1000, "bursts": {"water": {"max_spike": 100}}}
+    found = flicker.check_run(contract, {"flicker": expect}, tmp_path)
+    assert [f for f in found["failures"] if "flicker spike" in f] == [f for f in found["failures"] if f.startswith("burst sky")]
+    assert found["failures"]
+    with pytest.raises(ConfigError, match="expect.flicker.bursts.water"):
+        resolve("base", ["expect.flicker={max_spike=8, bursts={water={spike=3}}}"])
