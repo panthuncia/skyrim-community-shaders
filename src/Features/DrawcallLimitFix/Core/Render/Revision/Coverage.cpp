@@ -223,21 +223,41 @@ namespace DCLF
 		const auto& adopted = s.adoptedSnapshot;
 		const auto* payload = s.InstalledScenePayload();
 		auto* host = RenderGraphRuntime::Get().Host();
+		using R = Impl::SceneRevisions;
+		const auto& active = s.revisions.active;
+		const auto& versionsFragment = active ? active->Fragment(R::kVersionsSlot) : nullptr;
+		const auto versions = versionsFragment ? versionsFragment->Value<NamedVersions>() : nullptr;
 		std::string epochs;
-		for (std::uint32_t e = 0, count = EpochCount(); e < count; ++e)
-			epochs += fmt::format("{}{} {}{}", e ? ", " : "", EpochTraitsOf(e).name,
+		for (std::uint32_t e = 0, count = EpochCount(); e < count; ++e) {
+			// An uncovered epoch names what DecideEpochCoverage read for it: its shape and its owner's recording.
+			std::string inputs;
+			if (!s.revisions.covered[e] && active) {
+				const auto owner = EpochTraitsOf(e).hostedBy != kNoEpoch ? EpochTraitsOf(e).hostedBy : e;
+				const auto recordings = active->Get<RevisionRecordings>(R::kRecordingSlot + owner);
+				const bool recorded = recordings && !recordings->recordings.empty() && recordings->recordings.front();
+				const char* recording = !recorded ? "none" : host && host->EpochRecordingCurrent(*recordings->recordings.front()) ? "current" :
+				                                                                                                                    "stale";
+				inputs = fmt::format(" [shape {}, recording {}]", active->Fragment(R::kShapeSlot + e) != nullptr, recording);
+			}
+			epochs += fmt::format("{}{} {}{}{}", e ? ", " : "", EpochTraitsOf(e).name,
 				s.revisions.covered[e]                     ? std::string("covered") :
 				s.revisions.engine[e] != EngineState::None ? fmt::format("the engine's ({})", EngineStateName(s.revisions.engine[e])) :
 				                                             std::string("UNCOVERED"),
-				EpochTraitsOf(e).claims ? " (claims)" : "");
-		return fmt::format("adopted snapshot serial {} (revision {}, draws complete {}, current {}, versions stale {}, addresses current {}, frame versions {}, build "
-						   "generation {} against {} attached, main generation {} against {}), newest taken dropped {}, payload {}, adopted set {}; epochs: {}",
+				EpochTraitsOf(e).claims ? " (claims)" : "", inputs);
+		}
+		const char* revisionSet = !versions ? "none" : versions.get() == s.adoptedSet ? "the same" :
+		                                                                                "ANOTHER";
+		return fmt::format(
+			"adopted snapshot serial {} (revision {}, draws complete {}, current {}, versions stale {}, addresses current {}, frame versions {}, build "
+			"generation {} against {} attached, main generation {} against {}), newest taken dropped {}, payload {}, adopted set {}, revision's set {}, "
+			"pools {}, CPU pipeline {} (view batches {}, forward batches {}); epochs: {}",
 			adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete, s.AdoptedCurrent(), s.sceneVersionsStale,
 			!s.adoptedSet || SceneBufferSet::Get().AddressesCurrent(*s.adoptedSet),
 			adopted ? adopted->frameVersions : 0,
 			adopted ? adopted->buildGeneration : 0, host ? Impl::GraphBuildGeneration(*host) : 0,
 			adopted ? adopted->mainGeneration : 0, s.postedInputs.mainGeneration, s.snapshotStale, !payload ? "none" : FrameValues::Get().Available() ? "installed" : "installed, NO FRAME VALUES",
-			s.adoptedSet ? "named" : "none", epochs);
+			s.adoptedSet ? "named" : "none", revisionSet, PayloadPools::Available(),
+			Draws::AttachedGraphConditions().cpuPipeline, Direct::FrameBatches() != nullptr, Direct::ForwardBatches() != nullptr, epochs);
 	}
 
 	void IndirectDraws::Impl::DecideEpochCoverage(org::GraphHost* a_host)
