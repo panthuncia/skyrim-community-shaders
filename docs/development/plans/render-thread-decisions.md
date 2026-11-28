@@ -1285,3 +1285,29 @@ pushes until the user is back.
      snap7-devloss4); B3 native draws the player solid up close where d3d11 fades it; B4 a crash while loading in
      `FrameCamera::WriteMain` from DCLF's water capture (1 in 3). B1/B3 go to post-bugs, B4 to snap7-resizeui. Merge check:
      22 referenced configs passed (cloud-shadows on a rerun after a loading-screen stall).
+
+## 2026-11-27: fades in the ticket, HUD masks, water capture, render-area clip (post-fades, snap7-resizeui, snap7-devloss4; director accepted)
+
+237. **The animated fade batch is the game half's ticket copy** (D-3 done, `post-fades.md`). The game half drains the
+     animation jobs' fade queue into `TicketPart::AnimatedFades`; the render side's first reader takes it once per ticket,
+     and a skipped update's batch folds into the next ticket (`RegisterTicketPart` takes an optional fold, applied in
+     `TicketSuperseded`). `WaitAnimatedDrain`, the hand-off flag and the producer-side drain are gone. cs-test reports
+     `no-progress` for a native run with a `mark` step whose render thread never ran between world-ready and exit. The
+     update collapse is not the fade hand-off: during one, an engine actor-movement job waits on the Havok world's read lock
+     (post-collapse).
+238. **The replayed UI masks with kMAIN's depth and maps its layout onto the target** (`snap7-resizeui.md`, RU-a/b). On
+     the render thread the replay read the depth-stencil from the shadow state, so every native frame since the render
+     thread dropped the HUD's masks (compass letters outside the compass, full-width health fill). After a resize the
+     display maps the movie's load-time layout onto the target's real size (the d3d11 look: the old HUD stretched). Mouse
+     mapping in menus after a resize is unchecked. DCLF's water capture in the game half reads `Snapshot::Building()` through
+     `Port::CaptureGameFrame`; native makes the water frame row per render on the render thread (RU-c). This fixes the
+     `WorldPass::CameraPlanes` crash and post-refs' B4. Open: the river is missing at the small size after a resize and dark
+     after resizing back, native and guest, pre-existing (stencil bit 0 set over it; snap7-water).
+239. **BasicRHI clips a Vulkan pass's render area and scissor to its attachments** (DV4-a, `snap7-devloss4.md`), as D3D12
+     does, and logs each clip. Right after a resize some passes still drew at the old full size into smaller targets (DCLF
+     depth, sky, shadow mask, forward, copy-to-main, pp.output); guest's GPU wrote past the image and lost the device at the
+     second resize. Guest resize now passes. The passes should still draw at their target's size (open). Native without
+     the interim wait still loses the device in a third to half of resize runs, after DCLF adopts new main resources and
+     tears down replaced graphs; the wait stays (DV4-b) and is not airtight (one loss after a TAA switch, one after a coc).
+     snap7-devloss5 tests the released-view-ref hypothesis with a poison buffer. Merge checks: 18 configs (15 passed; guest
+     resize before this fix, two startup stalls), then 8/8 with guest resize, native-river and native-tour.
