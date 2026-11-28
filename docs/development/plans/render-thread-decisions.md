@@ -1434,3 +1434,18 @@ pushes until the user is back.
      F2 is real on Vulkan and D3D12: on repeat renders the depth prepass culling drops most of the near scene (sky shows);
      not occlusion, portals, async compute or skipped epochs; the cull's camera/inputs from the latch are the suspect
      (post-f2). New config `dragonsreach-bursts` reproduces it. Merge check 7/7.
+
+## 2026-11-28: the interim wait covers renders made while parked (snap7-devloss7b; director accepted)
+
+254. **The render thread's first depth commit after a park waits for what the game thread rendered meanwhile** (DV7-a,
+     `snap7-devloss7.md`). The interim wait was per thread (`t_lastRender`), so the render thread's first render after a
+     load hold waited for nothing; most recent losses were at that handover. `OnPublished` releases the park and stores the
+     game thread's submitted GPU point, which the render thread takes as its last render. Deleting the wait brought the
+     resize loss back, so it stays. Without it, losses are now 2 in 30 world runs. Caught: a CPU-pipeline Z-prepass texture
+     index read from a material row holding a negative float (the row ref named a buffer not holding a material row there);
+     a GPU-path z.depth index 33249.0 (a world coordinate); a steady-play GPU-path loss after a teleport. Ruled out:
+     frame-arena regions read after retirement, the retirement clock running ahead, mismatched animated-row copies, row
+     offsets past the installed rows. New stress config `graph-switches` (trips a Cloud Shadows ">32 faces" fatal at a
+     handover: post-fatals). F2's cause is a different race (post-f2: the CPU fade stage's kick copies
+     `PortalViews::Encoded()` on the render thread while the game thread rewrites it). Merge check 6/8: native-interior and
+     cloud-shadows lost the device with the wait in place (snap7-devloss8).
