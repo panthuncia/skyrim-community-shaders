@@ -1311,3 +1311,20 @@ pushes until the user is back.
      tears down replaced graphs; the wait stays (DV4-b) and is not airtight (one loss after a TAA switch, one after a coc).
      snap7-devloss5 tests the released-view-ref hypothesis with a poison buffer. Merge checks: 18 configs (15 passed; guest
      resize before this fix, two startup stalls), then 8/8 with guest resize, native-river and native-tour.
+
+## 2026-11-27: billboards keep their base rows; update collapses are CPU starvation (post-bugs, post-collapse; director accepted)
+
+240. **Native's "previous = last drawn world" rule applies only to rows whose PreviousWorld is a transform**
+     (`post-bugs.md`). Billboard rows hold the node's base rotation, bound radius and face mode there (Effect.hlsl turns the
+     card with them); overwriting them stretched fire-glow cards to the ceiling (B1: Dragonsreach's hearth column, brazier
+     blocks, Riverwood's smelter haze). `SampleRow` reports whether the row's PreviousWorld is a transform. native-interior's
+     references were retaken (the old ones contained B1), and B1 shots are back in shot_refs. native-interior now pins the
+     suite scene (its sun shafts moved with the hour). Open: B3 (player drawn solid up close; guest too, so a DCLF fade bug in
+     both modes: post-bugs2); Terrain Blending off hits a fatal in native menu scenes (post-bugs2); B5, land missing after a
+     coc back outside with the camera below the ground (native-interior vl-exterior, 1127-225423; like the D3D12 grey-land
+     shot 1127-114515).
+241. **The game-update collapses are CPU starvation by other processes, not a CS bug** (`post-collapse.md`). A 16-CPU load
+     drops native, guest and d3d11 alike to 2-4 updates/s; native only keeps rendering repeats. The Havok-lock reader in the
+     earlier dump was an ordinary acquisition caught asleep. cs-test runs the game above normal priority and reports CPU
+     saturation by others (`cpu_load`, a summary clause at 5 s or more); the director's build scripts run cmake below normal.
+     Repeats (D-2) cost the game about a fifth of its CPU when the machine is saturated (open). Merge check 6/6.
