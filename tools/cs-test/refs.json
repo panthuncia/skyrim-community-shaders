@@ -173,6 +173,84 @@
     "run": "1126-174928-dir-guest-quick-dir-s7sp-guest+quick",
     "accepted": "2026-11-26"
   },
+  "guest+window-resize-stress-taa/large0": {
+    "sha256": "44b622d2045e756477b86fbdf015dae7844ce368ddbfa42084c2baabc152b6ce",
+    "size": "1920x1080",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/large1": {
+    "sha256": "793d5d94d97a5cea8b89a3077309985564ae3e3cc4a6d51a368dfd112d353a54",
+    "size": "1920x1080",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/large2": {
+    "sha256": "606c015a2315f2cf227b99f7177304751e6d8dccb62d09e968efce30f8407b61",
+    "size": "1920x1080",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/large3": {
+    "sha256": "2d357afcc83cdeaf111721e7f76fdd7ac3f32b944a11558601db620b34f13dec",
+    "size": "1920x1080",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/large4": {
+    "sha256": "7593986a1f9f9ca2a33a1553f5bbeb084eba3c13b928cc2c17d05ed305c0ea8f",
+    "size": "1920x1080",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/large5": {
+    "sha256": "32ddd5d50cbb187e4b28e713eb9d490e4a67326de888685b73f08bb3ed379603",
+    "size": "1920x1080",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/small0": {
+    "sha256": "86b5303832f5470e78eeabca4d750965d9384182040b89976c6d4fcd026c92a3",
+    "size": "1280x720",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/small1": {
+    "sha256": "227f8437a006a608212fee8c5a6084de524b950ae5483d438dc20a9d2a562ad5",
+    "size": "1280x720",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/small2": {
+    "sha256": "b56b0629555deb76781d952d40ee6a26899ff9eb0f09e9b2331e716535daaeb9",
+    "size": "1280x720",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/small3": {
+    "sha256": "0eae892213fdd964ed029686c6d81a3f264856a7d1feee3629d1bd8bf7b875d7",
+    "size": "1280x720",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/small4": {
+    "sha256": "3aeefc835271b484a5a478bcc0f5952a1863a93b7bff1b77d960eafbc79e3c20",
+    "size": "1280x720",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/small5": {
+    "sha256": "915e1acee036f8b1188ae5dc59dd21deedc1155398eb7ed688d3baf85690fba7",
+    "size": "1280x720",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
+  "guest+window-resize-stress-taa/start": {
+    "sha256": "17dfec38b61d875507f2f9da455a143f01bb1a238534c60abf1a148aaf268f43",
+    "size": "1920x1080",
+    "run": "1128-021838-s7-water2-guest-window-resize-stress-taa-s7-water2-rs-guest",
+    "accepted": "2026-11-28"
+  },
   "native-d3d12+map/map": {
     "sha256": "78a827575e1ce1d180b851ddb98a89c5d31f8c2a14510a77002deb5c10029016",
     "size": "1920x1080",
@@ -780,81 +858,81 @@
     "accepted": "2026-11-27"
   },
   "native-vulkan+window-resize-stress-taa/large0": {
-    "sha256": "ac0b7197726673f1d617f3dd0df77ebb9a569a8b41d058ff6b747a87b045d40f",
+    "sha256": "7764905cebd6a9af5696f2c17ad652a2977468497864e1fe7db98a5eb72a91c5",
     "size": "1920x1080",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/large1": {
-    "sha256": "def1ae3f1d8edf7e37131d7286167a28c3e17198e335dc2a22a9978f3501b586",
+    "sha256": "95bc54f7e662d211eb69fdbb9fab8776512544547c7bda84ebdaf6acbe04c0e3",
     "size": "1920x1080",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/large2": {
-    "sha256": "000795d490f7b2acef92b58dca17fcdd01667b18a717847333e2895e5ad7c3f6",
+    "sha256": "890d0b66cf3811e58753928aa28508372ae3583b4d788f417a6db65395b669d6",
     "size": "1920x1080",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/large3": {
-    "sha256": "f8634855d2452ba4f9a7c8199dc0d975860cab54de3f537095877cc3ac4099e4",
+    "sha256": "6d12983cd7717a89eb277087f765a0969653c7134de12ad84e963dff56ea847c",
     "size": "1920x1080",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/large4": {
-    "sha256": "1ff6c4bafa9f8c343c586215f15a066dd1dff9da91b658522ac9d6ec641951d7",
+    "sha256": "1c0c643cc2310683264d5f84f607939d0e6e20b6dd3b27cb25cc1cf6cc0701e9",
     "size": "1920x1080",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/large5": {
-    "sha256": "83d4d6c4cda772747a57b2813ce040f12973f2558ea3981911355b07c168809e",
+    "sha256": "8ef2a316518736c0d70fe21ee8ce8bb34cc8aebac24e6e99b8e768369b4bdc1e",
     "size": "1920x1080",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/small0": {
-    "sha256": "41e07e8822becbbfcfc30f4298b12a4cdb8b9784d846dd8fbe3b3259962be6b3",
+    "sha256": "a6bf1e354545cdeaff7c4049d196c5750e862c9c077a7d9a78139b16a431c6ac",
     "size": "1280x720",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/small1": {
-    "sha256": "6ffa158113ce60eaa5e85089848b8b91e80c5440b004b5cc4884a81c56967d10",
+    "sha256": "a6fae20c7ad9999cc0c87fdb863a0cca868451d92b22ee23a37382a17af1b890",
     "size": "1280x720",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/small2": {
-    "sha256": "47a20304bd687a226fe37e52639a44f9af9f9a4a1c4abf5d0a0d681e092e73cc",
+    "sha256": "d63ea5373b7177830e0645a4f13379487fd45ff261d18cb31b6601dbc45195fc",
     "size": "1280x720",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/small3": {
-    "sha256": "cd32f103975cfc7baeb0744a095b6692cf170181e224737656ec3e7f407bf7db",
+    "sha256": "3d8344665089accc36d37d205a3f782b1a9a2a73b76c4d2121d5fc2e66d7cd95",
     "size": "1280x720",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/small4": {
-    "sha256": "83012cf9a32c4a216c0e4500a3a811315d66311b205aed1da5a1f3311c871eaa",
+    "sha256": "ad449c9355ee4018399a68fd3176dc444bd5c278d4a6710e3455f5b591257217",
     "size": "1280x720",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/small5": {
-    "sha256": "10b307226b34dc67b9c916f65ab517917175adb48752d8624c05a8a20515ef1a",
+    "sha256": "1cbd1763d6fd2f27c39a8daf470747c81752d76b6691c17ace4e15310fd68ea3",
     "size": "1280x720",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   },
   "native-vulkan+window-resize-stress-taa/start": {
-    "sha256": "e2f6432140004fdac238fca35fa5d4d7bb3503f1a263f982ad235d0d3b6df1b4",
+    "sha256": "9f6e4ca31df1ec93ded05c50c9da3304a9d9d6c98982050f935535d6e2efb3bc",
     "size": "1920x1080",
-    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
-    "accepted": "2026-11-27"
+    "run": "1128-021541-s7-water2-native-vulkan-window-resize-stress-taa-s7-water2-rs-native-vulkan",
+    "accepted": "2026-11-28"
   }
 }
