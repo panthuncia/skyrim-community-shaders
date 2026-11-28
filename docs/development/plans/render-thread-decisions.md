@@ -1270,3 +1270,18 @@ pushes until the user is back.
      snap7-devloss4: the remaining losses (z.depth, cull counters, reflection faces; one after a TAA switch without a
      resize), other bindings caching engine views by pointer, guest's loss at the second resize. With snap7-resizeui: the
      HUD keeps the old layout after a resize, a `WorldPass::CameraPlanes` null-camera crash, water flicker. Merge check 8/8.
+
+## 2026-11-27: suite shot references (post-refs; director accepted)
+
+236. **Suite configs start from a pinned scene and check their shots** (`post-refs.md`). The autoload save is a guard
+     fight, so shots depended on timing: configs now run god mode, `tai` and `tcai`, put the player at the save's position
+     and heading, restore health and close the Health Low tutorial, set 13:00 with timescale 0 and lock the weather (rain,
+     cloud-shadows, sky-native and screen-blood keep their own weather, hours or fight). Two native runs then agree at cell
+     correlation 0.95-1.00, native against d3d11 at 0.87-0.99. 21 suite configs have native references (map and map-local
+     had references nobody checked: `shot_refs` was missing). Shots showing a known native bug stay out of `shot_refs`
+     until it is fixed. Native's brighter river water is accepted in the references for now (an open defect). menu-main has
+     none (random mist). Bugs found: B1 native draws fire glow as large orange see-through shapes (native Vulkan and D3D12,
+     since at least 11-26; native-interior's references contain it); B2 a device loss on a coc into Dragonsreach (1 in 3,
+     snap7-devloss4); B3 native draws the player solid up close where d3d11 fades it; B4 a crash while loading in
+     `FrameCamera::WriteMain` from DCLF's water capture (1 in 3). B1/B3 go to post-bugs, B4 to snap7-resizeui. Merge check:
+     22 referenced configs passed (cloud-shadows on a rerun after a loading-screen stall).
