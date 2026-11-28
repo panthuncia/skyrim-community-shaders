@@ -1617,10 +1617,13 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		if (!ComputeUtility(a_view, a_geometry, r, a_detail))
 			return a_detail.empty() ? nullptr : "its Utility constants could not be computed";
 		auto* shader = RE::BSUtilityShader::GetSingleton();
-		auto* vs = shader ? globals::shaderCache->GetVertexShader(*shader, r.vertex) : nullptr;
+		if (!shader)
+			return "no Utility shader";
+		auto* vs = globals::shaderCache->GetVertexShader(*shader, r.vertex);
+		// A vertex shader CS's cache has not compiled yet (a cold cache compiles on demand) leaves the draw out like a building program.
 		if (!vs) {
-			a_detail = std::format("vs {:#x}", r.vertex);
-			return "no Utility vertex shader for its technique";
+			a_detail = std::format("no shader for vs {:#x}", r.vertex);
+			return kBuilding;
 		}
 		Draw draw{};
 		draw.shader = Shader::Utility;
