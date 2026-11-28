@@ -11,14 +11,6 @@ frames = 0
 do = "console"
 arg = "tgm"
 
-# Flicker after the load (post-corrupt.md): consecutive frames from world-ready. It runs after god mode: a step after a
-# burst waits for its files, and the save's guard would bring up the Health Low tutorial meanwhile.
-[[steps]]
-at = "previous"
-frames = 0
-do = "burst"
-arg = "load:120"
-
 [[steps]]
 at = "previous"
 frames = 60
@@ -34,7 +26,3 @@ do = "exit"
 reach = "world-ready"
 shots = ["start"]
 shot_refs = ["start"]       # compared with refs.json's reference for the run name (README, Reference shots)
-
-[expect.flicker]
-max_spike = 20
-max_tiles = 8

@@ -54,6 +54,14 @@ frames = 30
 do = "menu"
 arg = "Tutorial Menu=hide"
 
+# Flicker after the save's load, once the pinned scene's steps stopped the fight (a fight's swings and hits flicker in every
+# mode, d3d11 too).
+[[steps]]
+at = "previous"
+frames = 0
+do = "burst"
+arg = "load-save:120"
+
 [[steps]]
 at = "previous"
 frames = 30

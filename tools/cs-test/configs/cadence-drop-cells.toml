@@ -50,6 +50,13 @@ frames = 1
 do = "weather"
 arg = "SkyrimClear"
 
+# Flicker after the save's load, once the steps above stopped the fight.
+[[steps]]
+at = "previous"
+frames = 0
+do = "burst"
+arg = "load-save:120"
+
 [[steps]]
 at = "previous"
 frames = 60
