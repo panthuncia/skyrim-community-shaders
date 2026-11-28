@@ -16,6 +16,44 @@ frames = 1
 do = "console"
 arg = "tai"
 
+# The rest of the suite's pinned scene (see first-person-switch): combat off, time stopped at 13:00 (the sun shafts through
+# Dragonsreach's windows move with the hour), the weather locked, the Health Low tutorial closed.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.restoreav health 1000"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "menu"
+arg = "Tutorial Menu=hide"
+
 [[steps]]
 at = "previous"
 frames = 30
