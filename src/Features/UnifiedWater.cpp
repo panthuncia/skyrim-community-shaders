@@ -1,6 +1,7 @@
 #include "UnifiedWater.h"
 #include "Features/DrawcallLimitFix.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderThread.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
 #include "Utils/Hash.h"
@@ -558,6 +559,9 @@ bool UnifiedWater::IsExteriorWorldspaceActive() const
 
 bool UnifiedWater::FrameExteriorActive()
 {
+	namespace RenderThread = RenderGraph::Engine::Native::RenderThread;
+	if (RenderThread::Running() && !RenderThread::OnRenderThread())
+		return globals::features::unifiedWater.IsExteriorWorldspaceActive();
 	const Block* block = Snapshot::CurrentBlock<Block>();
 	return block && block->exteriorActive;
 }

@@ -166,7 +166,10 @@ private:
 	/** @brief Returns whether the water mesh and cache built in DataLoaded are available; hooks installed in PostPostLoad run before it and survive its failure paths. */
 	bool IsWaterDataReady() const;
 	bool IsExteriorWorldspaceActive() const;
-	/** @brief The adopted snapshot's IsExteriorWorldspaceActive, for the render half's water hooks. */
+	/**
+	 * @brief The adopted snapshot's IsExteriorWorldspaceActive, for the render half's water hooks. The game thread, while the native
+	 * render thread runs, reads the game's own state instead: the adopted snapshot is the render thread's.
+	 */
 	static bool FrameExteriorActive();
 	void UpdateWaterLODCull() const;
 	static bool LoadOrderChanged();

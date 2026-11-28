@@ -104,6 +104,28 @@ namespace RenderGraph::Engine::Native::RenderThread
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/**
+		 * @brief The window calls of the engine's window apply (SE 75454 / AE 77239), which Renderer::Begin makes after a resize. On the
+		 * render thread they would send to the game thread's window and wait for it, while the game thread may wait for Renderer::Lock,
+		 * which the render thread holds: a deadlock (snap7-devloss5). There they are posted to the window's thread instead.
+		 */
+		struct WindowShow
+		{
+			static BOOL thunk(HWND a_window, int a_command)
+			{
+				return t_renderThread ? ::ShowWindowAsync(a_window, a_command) : func(a_window, a_command);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+		struct WindowPosition
+		{
+			static BOOL thunk(HWND a_window, HWND a_after, int a_x, int a_y, int a_width, int a_height, UINT a_flags)
+			{
+				return func(a_window, a_after, a_x, a_y, a_width, a_height, t_renderThread ? (a_flags | SWP_ASYNCWINDOWPOS) : a_flags);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/** @brief a_reason's name in the stats line. */
 		const char* ParkReasonName(ParkReason a_reason)
 		{
@@ -362,6 +384,9 @@ namespace RenderGraph::Engine::Native::RenderThread
 		if (REL::Module::IsVR() || !Native::Requested())
 			return;
 		stl::detour_thunk<DrawFrame>(REL::RelocationID(35556, 36555));
+		const auto windowApply = REL::RelocationID(75454, 77239).address();
+		stl::write_thunk_call<WindowShow, 6>(windowApply + REL::Relocate(0x132, 0x121));
+		stl::write_thunk_call<WindowPosition, 6>(windowApply + REL::Relocate(0x164, 0x14B));
 		if (!DrawFrame::func.address())
 			RenderGraph::Fatal("native render thread", "Main::DrawFrame could not be hooked, so its frames could not park the render thread");
 	}

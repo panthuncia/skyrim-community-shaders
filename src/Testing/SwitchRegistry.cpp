@@ -48,6 +48,7 @@ namespace Testing::SwitchRegistry
 			{ .name = "BASICRHI_VK_PIPELINE_BINARY", .description = "0: no pipeline binary store; the lowered binding models lower and compile every pipeline each run, through the pipeline cache. 1: the store on NVIDIA, where it is off by default (2 MiB of process memory per pipeline)" },
 			{ .name = "BASICRHI_VK_PIPELINE_ROBUSTNESS", .description = "core (default): the render graph's pipelines get core robustBufferAccess for buffers and none for images, as native Vulkan; off: none; device: the device's robustness (DXVK's robustness2 in guest)" },
 			{ .name = "BASICRHI_VK_VALIDATE_LOWERING" },
+			{ .name = "BASICRHI_VK_VIEW_REF_POISON", .description = "1: a released buffer view ref pair covers an unbound address range that names it, so a stale ref faults there and the fault report names the pair (snap7-devloss5)" },
 			{ .name = "CS_AB_PROBE" },
 			{ .name = "CS_D3D12_SOURCE_DUMP" },
 			{ .name = "CS_DCLF", .key = "dclf.enabled", .type = Bool, .defaultValue = "1", .kind = Feature, .description = "0: DCLF does not install" },

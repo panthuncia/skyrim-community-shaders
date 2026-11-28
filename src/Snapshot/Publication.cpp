@@ -23,10 +23,12 @@
 #include "RenderGraph/FrameClock.h"
 #include "RenderGraph/Switches.h"
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -663,8 +665,29 @@ namespace Snapshot
 			stats.repeats.fetch_add(1, std::memory_order_relaxed);
 	}
 
-	const std::shared_ptr<const FrameSnapshot>& Current()
+	namespace
 	{
+		/** @brief Logs a call site that read Current() off the running render thread, once a site. */
+		void NoteOffThreadCurrent(const std::source_location& a_where)
+		{
+			static std::mutex lock;
+			static std::vector<std::pair<const char*, std::uint32_t>> seen;
+			{
+				std::scoped_lock guard(lock);
+				const std::pair<const char*, std::uint32_t> site{ a_where.file_name(), a_where.line() };
+				if (std::find(seen.begin(), seen.end(), site) != seen.end())
+					return;
+				seen.push_back(site);
+			}
+			logger::error("[Snapshot] Current() read off the render thread while it renders, a race with its adoption: {}:{} ({})", a_where.file_name(),
+				a_where.line(), a_where.function_name());
+		}
+	}
+
+	const std::shared_ptr<const FrameSnapshot>& Current(std::source_location a_where)
+	{
+		if (RenderGraph::Engine::Native::RenderThread::Running() && !RenderGraph::Engine::Native::RenderThread::OnRenderThread()) [[unlikely]]
+			NoteOffThreadCurrent(a_where);
 		return RenderSide().current;
 	}
 
