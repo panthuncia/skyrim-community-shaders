@@ -8,6 +8,8 @@
 
 #include <PCH.h>
 
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Scene/FrameAudit.h"
 #include "Features/HDRDisplay.h"
 #include "Features/PhysicalSky.h"
 #include "Features/Screenshot/Avif.h"
@@ -17,6 +19,7 @@
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "RenderGraph/Switches.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 #include "State.h"
 #include "Utils/Clipboard.h"
@@ -381,6 +384,15 @@ namespace
 		src.engineTarget = static_cast<std::int32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER);
 		src.importName = "screenshot.framebuffer";
 		return src;
+	}
+
+	ORGScreenshot::Source OrgSource(const CaptureSource& a_source)
+	{
+		return { .texture = a_source.texture,
+			.srv = a_source.srv,
+			.engineTarget = a_source.engineTarget,
+			.importName = a_source.importName,
+			.cleanScene = a_source.graphCleanScene };
 	}
 
 	// True when our hotkey is the single PrintScreen key vanilla binds. Anything
@@ -919,17 +931,29 @@ bool ScreenshotFeature::HasFreshCleanScene() const
 void ScreenshotFeature::ProcessCaptureRequest()
 {
 	ProcessPendingReadbacks();
+	// The Present's time, once a Present (a frame may pass here twice).
+	if (const auto present = globals::state->frameCount; present != lastTimedPresent) {
+		lastTimedPresent = present;
+		presentMs[presentsTimed++ % presentMs.size()] = ScreenshotBurst::NowMs();
+	}
 	// A deferred capture keeps the path it was requested with.
 	if (!captureDeferred) {
 		captureOutputPath.clear();
 		std::lock_guard lock(requestedPathsMutex);
+		// A burst takes the Presents from here until it has its frames. Later requests wait behind it.
+		if (!activeBurst && !requestedPaths.empty() && requestedPaths.front().burst) {
+			activeBurst = std::move(requestedPaths.front().burst);
+			requestedPaths.pop();
+		}
 		// A request waits for a frame that renders the snapshot it names.
-		if (!requestedPaths.empty() && Snapshot::CurrentId() >= requestedPaths.front().minSnapshot) {
+		if (!activeBurst && !requestedPaths.empty() && Snapshot::CurrentId() >= requestedPaths.front().minSnapshot) {
 			captureOutputPath = std::move(requestedPaths.front().path);
 			requestedPaths.pop();
 			captureRequested = true;
 		}
 	}
+	if (activeBurst)
+		StepBurst();
 	if (captureRequested.exchange(false)) {
 		// Hotkeys and the button are handled after the UI draws, so the pre-UI snapshot needs a one-frame wait.
 		// Scripted captures (RequestCapture) keep the frame they were asked for.
@@ -939,8 +963,16 @@ void ScreenshotFeature::ProcessCaptureRequest()
 		} else {
 			captureDeferred = false;
 			// A scripted shot names the snapshot its frame rendered (cs-test's cadence comparison reads it).
-			if (!captureOutputPath.empty())
-				logger::info("[TEST] shot {} rendered snapshot {} (render frame {})", captureOutputPath.stem().string(), Snapshot::CurrentId(), Snapshot::Render().frame);
+			if (!captureOutputPath.empty()) {
+				// The eye the frame drew with, to compare with the player's place the shot step logged, and in native what DCLF still withholds.
+				const auto& camera = Snapshot::FrameCamera::Main();
+				const auto& eye = camera.GetCameraPosAdjust();
+				const auto& view = camera.GetCameraView();
+				logger::info("[TEST] shot {} rendered snapshot {} (render frame {}), eye {:.0f} {:.0f} {:.0f}, view rows ({:.2f} {:.2f} {:.2f}) ({:.2f} {:.2f} {:.2f}) ({:.2f} {:.2f} {:.2f}){}",
+					captureOutputPath.stem().string(), Snapshot::CurrentId(), Snapshot::Render().frame, eye.x, eye.y, eye.z, view._11, view._12, view._13, view._21,
+					view._22, view._23, view._31, view._32, view._33,
+					Snapshot::FrameCamera::Owned() ? "; " + DCLF::LoadHold::DescribeWaiting() + "; " + DCLF::Diagnostics::AuditFrameRows() : std::string());
+			}
 			try {
 				Capture();
 			} catch (const std::exception& e) {
@@ -971,6 +1003,8 @@ void ScreenshotFeature::ProcessPendingReadbacks()
 		if (FAILED(hr)) {
 			logger::error("Failed to map screenshot staging texture.");
 		} else {
+			if (screenshot.burst)
+				++screenshot.burst->handed;
 			// Throwing out of the predicate would leave moved-from entries in pendingReadbacks.
 			try {
 				EnsureWorkerThread();
@@ -1032,6 +1066,11 @@ void ScreenshotFeature::ScreenshotWorkerLoop()
 
 			screenshot = std::move(screenshotQueue.front());
 			screenshotQueue.pop();
+		}
+
+		if (screenshot.burst) {
+			ProcessBurstEntry(screenshot);
+			continue;
 		}
 
 		// A render-graph readback (ORGScreenshot): its crop into the image here, off the render thread.
@@ -1099,11 +1138,21 @@ void ScreenshotFeature::ShowInGameNotification(std::string message)
 
 void ScreenshotFeature::Capture()
 {
+	(void)CaptureInto(nullptr, nullptr);
+}
+
+bool ScreenshotFeature::CaptureInto(const std::shared_ptr<ScreenshotBurst::Burst>& a_burst, std::string* a_why)
+{
 	auto device = globals::d3d::device;
 	auto context = globals::d3d::context;
+	const auto fail = [&](std::string a_reason) {
+		if (a_why)
+			*a_why = std::move(a_reason);
+		return false;
+	};
 
 	if (!device || !context)
-		return;
+		return fail("no device");
 
 	CaptureStateGuard guard(context);
 	winrt::com_ptr<ID3D11Texture2D> sourceTextureKeepAlive;
@@ -1113,8 +1162,11 @@ void ScreenshotFeature::Capture()
 	const auto* cleanDesc = src.graphCleanScene ? ORGScreenshot::Get().CleanSceneDesc() : nullptr;
 	if (!src.texture && !cleanDesc) {
 		logger::error("Failed to acquire screenshot source texture ({}).", src.description);
-		return;
+		return fail("no source");
 	}
+	// A burst keeps the source of its first frame: a frame from another (with or without the HUD) is skipped.
+	if (a_burst && a_burst->source != src.description)
+		return fail(fmt::format("source {}", src.description));
 	ID3D11Texture2D* sourceTexture = src.texture;
 
 	D3D11_TEXTURE2D_DESC srcDesc{};
@@ -1141,14 +1193,16 @@ void ScreenshotFeature::Capture()
 	const bool flatHdrCapture = IsFlatHdrScreenshotCapture();
 	if (flatHdrCapture && !IsHdrCaptureFormat(srcDesc.Format)) {
 		logger::error("Unsupported HDR screenshot format: {}", static_cast<uint32_t>(srcDesc.Format));
-		return;
+		return fail("unsupported HDR format");
 	}
 	const bool saveAsHdrPng = flatHdrCapture && !hdrUseAvif;
 	const bool saveAsHdrAvif = flatHdrCapture && hdrUseAvif;
 	const bool saveAsSdrPng = !flatHdrCapture && sdrUsePng;
 
 	const char* extension = saveAsHdrAvif ? ".avif" : (saveAsHdrPng || saveAsSdrPng ? ".png" : ".bmp");
-	const auto outputPath = captureOutputPath.empty() ? BuildScreenshotPath(screenshotPath, extension) : std::filesystem::path(captureOutputPath).replace_extension(extension);
+	const auto outputPath = a_burst                   ? a_burst->directory / fmt::format("f{:03}{}", a_burst->asked, extension) :
+	                        captureOutputPath.empty() ? BuildScreenshotPath(screenshotPath, extension) :
+	                                                    std::filesystem::path(captureOutputPath).replace_extension(extension);
 	PendingScreenshot screenshot;
 	screenshot.format = srcDesc.Format;
 	screenshot.width = copyW;
@@ -1159,20 +1213,31 @@ void ScreenshotFeature::Capture()
 	screenshot.hdrPngBitDepth = static_cast<int>(hdrPngBitDepth);
 	screenshot.fixDiscordHdr = fixDiscordHdr;
 	screenshot.outputPath = outputPath;
-	screenshot.copyToClipboard = copyToClipboard && captureOutputPath.empty();
-	screenshot.notify = captureOutputPath.empty();
+	screenshot.copyToClipboard = copyToClipboard && captureOutputPath.empty() && !a_burst;
+	screenshot.notify = captureOutputPath.empty() && !a_burst;
+	if (a_burst) {
+		const auto& render = Snapshot::Render();
+		screenshot.burst = a_burst;
+		screenshot.burstFrame.index = a_burst->asked;
+		screenshot.burstFrame.timeMs = ScreenshotBurst::NowMs() - a_burst->startMs;
+		// The render graph's commit sets the frame it copied; D3D11 copies this one.
+		screenshot.burstFrame.frame = { .present = globals::state->frameCount,
+			.renderFrame = render.frame,
+			.snapshot = Snapshot::CurrentId(),
+			.rendersOfSnapshot = render.rendersOfSnapshot,
+			.repeat = render.repeat };
+	}
 
 	// The render graph's readback, in graph mode: the whole source is copied, and the worker crops it.
 	if (ORGScreenshot::Get().IsActive()) {
 		screenshot.cropX = copyX;
 		screenshot.cropY = copyY;
 		auto shared = std::make_shared<PendingScreenshot>(std::move(screenshot));
-		const ORGScreenshot::Source source{ .texture = sourceTexture,
-			.srv = src.srv,
-			.engineTarget = src.engineTarget,
-			.importName = src.importName,
-			.cleanScene = src.graphCleanScene };
-		const bool onGraph = ORGScreenshot::Get().Capture(source, [this, shared](ORGScreenshot::Pixels&& a_pixels) {
+		auto onPixels = [this, shared](ORGScreenshot::Pixels&& a_pixels) {
+			if (shared->burst) {
+				shared->burstFrame.frame = a_pixels.frame;
+				++shared->burst->handed;
+			}
 			shared->readback = std::move(a_pixels);
 			try {
 				EnsureWorkerThread();
@@ -1180,17 +1245,21 @@ void ScreenshotFeature::Capture()
 			} catch (const std::exception& e) {
 				logger::error("Screenshot failed: could not hand off to worker thread: {}", e.what());
 			}
-		});
+		};
+		const bool onGraph = ORGScreenshot::Get().Capture(OrgSource(src), std::move(onPixels), a_burst != nullptr);
 		if (onGraph) {
 			logger::debug("Screenshot copied on the render graph from {}", src.description);
-			return;
+			return true;
 		}
+		// A burst's frame is never copied with D3D11 in a graph mode: native has no D3D11 content.
+		if (a_burst)
+			return fail("render graph busy");
 		screenshot = std::move(*shared);
 	}
 	// The graph's clean scene has no D3D11 texture to copy instead.
 	if (!sourceTexture) {
 		logger::error("Screenshot failed: the render graph could not take the capture of {}.", src.description);
-		return;
+		return fail("no D3D11 source");
 	}
 
 	D3D11_TEXTURE2D_DESC stagingDesc = srcDesc;
@@ -1208,7 +1277,7 @@ void ScreenshotFeature::Capture()
 	winrt::com_ptr<ID3D11Texture2D> stagingTexture;
 	if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, stagingTexture.put()))) {
 		logger::error("Failed to create screenshot staging texture.");
-		return;
+		return fail("no staging texture");
 	}
 	Util::SetResourceName(stagingTexture.get(), "Screenshot::Staging");
 
@@ -1224,6 +1293,7 @@ void ScreenshotFeature::Capture()
 
 	screenshot.stagingTexture = std::move(stagingTexture);
 	pendingReadbacks.push_back(std::move(screenshot));
+	return true;
 }
 
 void ScreenshotFeature::RequestCapture(std::filesystem::path a_outputPath, std::uint64_t a_minSnapshot)
@@ -1231,5 +1301,117 @@ void ScreenshotFeature::RequestCapture(std::filesystem::path a_outputPath, std::
 	std::lock_guard lock(requestedPathsMutex);
 	requestedPaths.push({ std::move(a_outputPath), a_minSnapshot });
 	scriptedInFlight.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void ScreenshotFeature::RequestBurst(std::filesystem::path a_directory, std::uint32_t a_count, bool a_png, std::uint64_t a_minSnapshot)
+{
+	auto burst = std::make_shared<ScreenshotBurst::Burst>();
+	burst->directory = std::move(a_directory);
+	burst->count = a_count;
+	burst->png = a_png;
+	burst->minSnapshot = a_minSnapshot;
+	std::lock_guard lock(requestedPathsMutex);
+	requestedPaths.push({ .path = burst->directory, .minSnapshot = a_minSnapshot, .burst = std::move(burst) });
+	scriptedInFlight.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void ScreenshotFeature::StepBurst()
+{
+	auto& burst = *activeBurst;
+	const std::uint32_t present = globals::state->frameCount;
+	if (burst.lastPresent == present)
+		return;
+	burst.lastPresent = present;
+	// Every capture asked (a frame skipped for each that could not be taken, at most as many as the count): once each is handed to
+	// the worker, the worker writes the files after them. A capture the render graph lost is given up after 600 frames.
+	if (burst.asked == burst.count || burst.attempts >= 2 * burst.count) {
+		if (burst.handed < burst.asked && ++burst.idle < 600)
+			return;
+		if (burst.handed < burst.asked)
+			logger::warn("[TEST] burst {}: {} of {} captures were never read back", burst.directory.filename().string(), burst.asked - burst.handed, burst.asked);
+		PendingScreenshot end;
+		end.burst = std::exchange(activeBurst, nullptr);
+		end.burstEnd = true;
+		try {
+			EnsureWorkerThread();
+			EnqueueScreenshot(std::move(end));
+		} catch (const std::exception& e) {
+			logger::error("[TEST] burst: could not hand off to the worker thread: {}", e.what());
+			scriptedInFlight.fetch_sub(1, std::memory_order_acq_rel);
+		}
+		return;
+	}
+	if (!burst.started) {
+		if (Snapshot::CurrentId() < burst.minSnapshot)
+			return;
+		winrt::com_ptr<ID3D11Texture2D> holder;
+		const auto src = SelectCaptureSource(holder, /*forCapture=*/true);
+		// The render graph's ring must be built before the first capture, or the first frames would be skipped.
+		if (ORGScreenshot::Get().IsActive()) {
+			ORGScreenshot::Get().SetRing(ScreenshotBurst::kRing);
+			if (!ORGScreenshot::Get().Ready(OrgSource(src))) {
+				++burst.waited;
+				return;
+			}
+		}
+		burst.started = true;
+		burst.source = src.description;
+		burst.startMs = ScreenshotBurst::NowMs();
+		// The median frame time of the Presents before this one.
+		std::vector<double> intervals;
+		const auto timed = std::min<std::uint32_t>(presentsTimed, static_cast<std::uint32_t>(presentMs.size()));
+		for (std::uint32_t i = 1; i < timed; ++i)
+			intervals.push_back(presentMs[(presentsTimed - i) % presentMs.size()] - presentMs[(presentsTimed - i - 1) % presentMs.size()]);
+		if (!intervals.empty()) {
+			std::ranges::nth_element(intervals, intervals.begin() + intervals.size() / 2);
+			burst.preFrameMs = intervals[intervals.size() / 2];
+		}
+		logger::info("[TEST] burst {}: {} frames from Present {} (snapshot {}, render frame {}), source {}, {:.2f} ms a frame before, {} frames waited for the readback ring",
+			burst.directory.filename().string(), burst.count, present, Snapshot::CurrentId(), Snapshot::Render().frame, burst.source, burst.preFrameMs, burst.waited);
+	}
+	++burst.attempts;
+	std::string why;
+	if (CaptureInto(activeBurst, &why))
+		++burst.asked;
+	else
+		burst.skipped.push_back({ present, std::move(why) });
+}
+
+void ScreenshotFeature::ProcessBurstEntry(PendingScreenshot& a_screenshot)
+{
+	auto& burst = *a_screenshot.burst;
+	if (a_screenshot.burstEnd) {
+		try {
+			ScreenshotBurst::Write(burst);
+		} catch (const std::exception& e) {
+			logger::error("[TEST] burst {}: its files could not be written: {}", burst.directory.filename().string(), e.what());
+		}
+		scriptedInFlight.fetch_sub(1, std::memory_order_acq_rel);
+		return;
+	}
+	auto frame = std::move(a_screenshot.burstFrame);
+	bool ok = true;
+	if (!a_screenshot.readback.data.empty()) {
+		ok = ORGScreenshot::Crop(a_screenshot.readback, a_screenshot.cropX, a_screenshot.cropY, a_screenshot.width, a_screenshot.height, a_screenshot.format,
+			a_screenshot.image);
+		a_screenshot.readback = {};
+	}
+	if (ok) {
+		DirectX::ScratchImage converted;
+		if (const auto* image = PrepareSdrImage(a_screenshot.image, converted))
+			frame.grid = ScreenshotBurst::Grid(*image);
+		if (burst.png) {
+			Util::FileHelpers::EnsureDirectoryExists(a_screenshot.outputPath.parent_path());
+			if (!SaveScreenshotToDisk(a_screenshot.image, a_screenshot.outputPath, a_screenshot.format, a_screenshot.hdrPngBitDepth, a_screenshot.saveAsHdrPng,
+					a_screenshot.saveAsHdrAvif, a_screenshot.saveAsSdrPng))
+				logger::error("[TEST] burst {}: frame {} could not be saved", burst.directory.filename().string(), frame.index);
+		}
+	}
+	if (frame.grid.empty())
+		logger::error("[TEST] burst {}: frame {} has no grid (format {})", burst.directory.filename().string(), frame.index, static_cast<int>(a_screenshot.format));
+	std::scoped_lock lock(burst.mutex);
+	burst.width = a_screenshot.width;
+	burst.height = a_screenshot.height;
+	burst.frames.push_back(std::move(frame));
 }
 #undef I18N_KEY_PREFIX

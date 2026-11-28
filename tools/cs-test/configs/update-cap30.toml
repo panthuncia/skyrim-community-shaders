@@ -102,6 +102,13 @@ frames = 300
 do = "shot"
 arg = "start"
 
+# Flicker: consecutive rendered frames of the same view (cstest/flicker.py).
+[[steps]]
+at = "previous"
+frames = 1
+do = "burst"
+arg = "start:60"
+
 [[steps]]
 at = "previous"
 frames = 10
@@ -130,3 +137,9 @@ reach = "world-ready"
 shots = ["start", "turn", "settled"]
 
 shot_refs = ["start", "turn", "settled"]
+
+# Calibrated on d3d11 and guest at these scenes (post-flicker.md): their worst spike was 14.8 (Riverwood's turning water
+# wheel at 25 frames a second), with at most 3 tiles flickering twice; native's flickering river reached 54 and 68-138 tiles.
+[expect.flicker]
+max_spike = 20
+max_tiles = 8

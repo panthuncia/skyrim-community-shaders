@@ -115,6 +115,40 @@ namespace Testing
 			return a_index < actors.size() ? std::pair{ actors[a_index].second, actors[a_index].first } : std::pair<RE::Actor*, float>{};
 		}
 
+		/**
+		 * @brief Logs where the player and the camera are, the player's cell and the land under the player. Main thread.
+		 * A shot that shows the wrong place tells from this whether the player moved (fell through the land) or the frame is wrong.
+		 */
+		void LogPlace(std::string_view a_why)
+		{
+			auto* player = CS_ENGINE_READ(Player, Other, RE::PlayerCharacter::GetSingleton());
+			if (!player)
+				return;
+			const auto position = player->GetPosition();
+			auto* cell = player->GetParentCell();
+			std::string cellText = "no cell";
+			if (cell) {
+				const auto* land = cell->GetRuntimeData().cellLand;
+				const bool landLoaded = land && land->loadedData;
+				cellText = fmt::format("cell {:08X} {} attached {}, land {}", cell->GetFormID(), cell->IsExteriorCell() ? "exterior" : "interior",
+					cell->IsAttached(), !land ? "none" : landLoaded ? "loaded" : "not loaded");
+				if (const auto* exterior = cell->IsExteriorCell() ? cell->GetCoordinates() : nullptr)
+					cellText += fmt::format(", grid {},{}", exterior->cellX, exterior->cellY);
+			}
+			std::string landText = "no land height";
+			float landHeight = 0.0f;
+			if (auto* tes = CS_ENGINE_READ(Data, Other, RE::TES::GetSingleton()); tes && tes->GetLandHeight(position, landHeight))
+				landText = fmt::format("land height {:.0f} ({:+.0f} to the player)", landHeight, position.z - landHeight);
+			std::string cameraText;
+			if (auto* camera = CS_ENGINE_READ(Camera, Other, RE::PlayerCamera::GetSingleton()); camera && camera->cameraRoot) {
+				const auto& at = camera->cameraRoot->world.translate;
+				const auto& r = camera->cameraRoot->world.rotate.entry;
+				cameraText = fmt::format(", camera {:.0f} {:.0f} {:.0f} rotation ({:.2f} {:.2f} {:.2f}) ({:.2f} {:.2f} {:.2f}) ({:.2f} {:.2f} {:.2f})", at.x, at.y, at.z,
+					r[0][0], r[0][1], r[0][2], r[1][0], r[1][1], r[1][2], r[2][0], r[2][1], r[2][2]);
+			}
+			logger::info("[TEST] place at {}: player {:.0f} {:.0f} {:.0f}{}, {}; {}", a_why, position.x, position.y, position.z, cameraText, cellText, landText);
+		}
+
 		bool IsFemale(RE::Actor& a_actor)
 		{
 			auto* base = a_actor.GetActorBase();
@@ -449,9 +483,46 @@ namespace Testing
 			const std::uint64_t minSnapshot = Snapshot::InGameUpdate() ? Snapshot::LastGameId() + 1 : 0;
 			globals::features::screenshotFeature.RequestCapture(directory / (a_arg + ".png"), minSnapshot);
 			logger::info("[TEST] shot {} asked at game snapshot {}: renders snapshot {} or newer", a_arg, Snapshot::LastGameId(), minSnapshot);
+			LogPlace(fmt::format("shot {}", a_arg));
 			auto& run = Run();
 			std::scoped_lock lock(run.mutex);
 			run.shots.push_back(a_arg);
+			return true;
+		}
+
+		/**
+		* @brief "burst": `<name>:<count>[:grid]`, captures of count consecutive rendered frames into <run>/bursts/<name> (ScreenshotBurst):
+		* burst.json, grid.bin and a PNG of each frame (not with `grid`). The harness scores their frame-to-frame changes.
+		*/
+		bool Burst(const std::string& a_arg, std::string& a_error)
+		{
+			const auto first = a_arg.find(':');
+			const auto name = a_arg.substr(0, first);
+			std::string count = first == std::string::npos ? std::string{} : a_arg.substr(first + 1);
+			bool png = true;
+			if (const auto second = count.find(':'); second != std::string::npos) {
+				if (count.substr(second + 1) != "grid") {
+					a_error = fmt::format("burst '{}': the third part may only be 'grid'", a_arg);
+					return false;
+				}
+				png = false;
+				count.resize(second);
+			}
+			std::uint32_t frames = 0;
+			const auto [end, parsed] = std::from_chars(count.data(), count.data() + count.size(), frames);
+			const bool nameOk = !name.empty() && std::ranges::all_of(name, [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_'; });
+			if (!nameOk || parsed != std::errc{} || end != count.data() + count.size() || frames < 3 || frames > 600) {
+				a_error = fmt::format("burst '{}': expected <name>:<count>[:grid], a name of letters, digits, '-' and '_' and a count of 3-600", a_arg);
+				return false;
+			}
+			auto directory = RunDirectory();
+			directory = (directory.empty() ? logger::log_directory().value_or(std::filesystem::path{}) / "dclf-shots" : directory) / "bursts" / name;
+			std::error_code error;
+			std::filesystem::create_directories(directory, error);
+			// As a shot: inside a game update, from the next update's snapshot.
+			const std::uint64_t minSnapshot = Snapshot::InGameUpdate() ? Snapshot::LastGameId() + 1 : 0;
+			globals::features::screenshotFeature.RequestBurst(directory, frames, png, minSnapshot);
+			logger::info("[TEST] burst {} of {} frames asked at game snapshot {}: from snapshot {} on", name, frames, Snapshot::LastGameId(), minSnapshot);
 			return true;
 		}
 
@@ -764,6 +835,11 @@ namespace Testing
 				return true;
 			});
 			RegisterCommand("shot", Shot);
+			RegisterCommand("place", [](const std::string& a_arg, std::string&) {
+				LogPlace(a_arg.empty() ? std::string_view("place step") : std::string_view(a_arg));
+				return true;
+			});
+			RegisterCommand("burst", Burst);
 			RegisterCommand("loadscreen", ForceLoadScreen);
 			RegisterCommand("loadscreens", LoadScreenCycle::Start);
 			RegisterCommand("window", Window);

@@ -10,6 +10,7 @@
 // Install and the hooks run on the main thread. Active and MenuHeld on any thread. The rest on the render thread.
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 namespace Snapshot
@@ -55,4 +56,9 @@ namespace DCLF::LoadHold
 	void OnFrameStart();
 	/** @brief Render thread, frame end. Judges the hold and ends it once settled. */
 	void OnFrameEnd();
+	/**
+	 * @brief Render thread. The installed publication's sequence and commit frame and its objects still waiting, by reason, as the
+	 * hold's release line names them. cs-test's shots log it.
+	 */
+	std::string DescribeWaiting();
 }

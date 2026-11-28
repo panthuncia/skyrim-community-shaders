@@ -19,6 +19,7 @@
 * (at Begin, inside Renderer::Lock) never overlap: the serving thread renders only while the main thread is inside the load
 * coordinator, between its SetLoadingScreenActive(true) and (false), and the startup logo plays before Main::Update first runs.
 * A publish that finds another one under way is fatal. Adoption is at Begin, inside Renderer::Lock, so one thread adopts at a time.
+* Native's render thread adopts without the lock; every other producer parks it before its own Begin.
 */
 namespace Snapshot
 {

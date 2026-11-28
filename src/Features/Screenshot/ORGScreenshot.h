@@ -43,6 +43,16 @@ public:
 		bool cleanScene = false;           // this frame's SnapshotCleanScene copy; texture and srv are not used
 	};
 
+	/** @brief The frame a capture copied: its Present (State::frameCount), render frame and snapshot. */
+	struct Frame
+	{
+		std::uint32_t present = 0;
+		std::uint64_t renderFrame = 0;
+		std::uint64_t snapshot = 0;
+		std::uint32_t rendersOfSnapshot = 0;
+		bool repeat = false;
+	};
+
 	/** @brief The first subresource at offset in data, rows rowPitch bytes apart. */
 	struct Pixels
 	{
@@ -51,6 +61,7 @@ public:
 		std::uint32_t rowPitch = 0;
 		std::uint32_t width = 0;
 		std::uint32_t height = 0;
+		Frame frame;
 	};
 
 	/** @brief Called on the render thread from Poll. */
@@ -61,9 +72,19 @@ public:
 
 	/**
 	* @brief At the capture point. a_onPixels runs from a later Poll once the GPU copy is done.
-	* @return False when the graph cannot take it. The caller then copies with D3D11.
+	* @return False when the graph cannot take it. The caller then copies with D3D11, except a burst (a_burst), which skips the
+	* frame and logs nothing.
 	*/
-	bool Capture(const Source& a_source, OnPixels a_onPixels);
+	bool Capture(const Source& a_source, OnPixels a_onPixels, bool a_burst = false);
+
+	/** @brief The readback buffers to keep from the next source change on (never fewer than before). A burst asks for one per frame in flight. */
+	void SetRing(std::size_t a_buffers);
+
+	/**
+	* @brief Whether a capture of a_source would copy at once into a free buffer, with the ring SetRing asked for. It sets the source,
+	* so the registration for it is made at the next revision. A burst starts only when it is.
+	*/
+	bool Ready(const Source& a_source);
 
 	/** @brief Every capture point. Takes a waiting capture and hands finished readbacks to their callbacks. */
 	void Poll();

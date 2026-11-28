@@ -1342,3 +1342,27 @@ pushes until the user is back.
      the session (14/14 good after 22:40). The water after a resize is holes, not stencil: about one pixel in ten of the
      river surface is never written after a resize, in native and guest (`snap7-water.md`); culling is the lead
      (snap7-water2).
+
+## 2026-11-28: window calls posted, poison diagnostic; previous inputs from the last render (snap7-devloss5, snap7-mvec; director accepted)
+
+244. **The render thread posts its window calls** (DV5-b, `snap7-devloss5.md`). After a resize, `Renderer::Begin`'s window
+     apply called `SetWindowPos` on the render thread, which waited for the game thread while the game thread waited for
+     `Renderer::Lock` (hung 2 of 13 no-wait runs, older than this round); on the render thread those calls are now
+     `ShowWindowAsync` / `SWP_ASYNCWINDOWPOS`. The water's last game-thread read of the render side's snapshot is gone
+     (`UnifiedWater::FrameExteriorActive`), and an always-on check logs any other thread reading `Snapshot::Current()` while
+     the render thread runs (DV5-c). `BASICRHI_VK_VIEW_REF_POISON=1` (BasicRHI snap7/devloss5) points released view-ref pairs
+     at an unbound address that names them in the fault report (DV5-d). The interim wait stays (DV5-a): without it 3 of 9
+     world runs lost the device 50 ms-2 s after a revision tore down 5-9 replaced DCLF graphs, in both pipelines
+     (snap7-devloss6). Seen once: the game thread starved 70 s on `Renderer::Lock` while the render thread rendered repeats
+     (snap7-lock ports Begin/End off the lock).
+245. **Every previous-frame input comes from the last render** (`snap7-mvec.md`; the user's report of blurred moving
+     characters). Native drew skin palettes with the engine's `prevBoneMatrices` (the last game update) and placement rows'
+     PreviousWorld from the last sample, so each repeat drew moving skins with the last update's motion and TAA smeared them,
+     and a render after skipped updates moved from a world never drawn. The frame values producer now records what each
+     upload drew: the sampler takes previous transforms and palettes from it, and an upload sets previous = current for
+     anything the last upload drew moving unless a sample wrote it again, so a repeat draws it still. Billboard and LOD rows
+     are skipped; guest is unchanged. The camera's previous matrices, jitter, history resets and Streamline inputs were per
+     render already. New config `mvec-turn` (player turning at cap 30, TAA and DLSS): smeared before, as sharp as guest
+     after. Open (snap7-mvec2): renders whose upload runs between the next update's start and its publish draw objects one
+     update ahead of the camera (5-10% of renders at cap 30, 21% at cap 240); a fragile `FrameGlobals` release timing.
+     Merge checks 9/9 and 10/10.

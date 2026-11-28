@@ -81,7 +81,7 @@ namespace RenderGraph::Frame::Driver
 		struct State
 		{
 			bool installed = false;
-			// OnBegin writes these inside Renderer::Lock, the render owner reads them.
+			// OnBegin writes these at Begin, the render owner reads them.
 			Description current{};
 			Description previous{};
 			bool began = false;
@@ -242,7 +242,8 @@ namespace RenderGraph::Frame::Driver
 	namespace
 	{
 		/**
-		* @brief Renderer::Begin (SE 75460, AE 77245), on whichever thread renders the frame, inside Renderer::Lock. In the graph modes
+		* @brief Renderer::Begin (SE 75460, AE 77245), on whichever thread renders the frame, inside Renderer::Lock. Native's render
+		* thread runs StartRendererFrame without it and the engine's body only when it needs it (RenderThread). In the graph modes
 		* that thread owns rendering until another one begins a frame (Engine::LoadingScreen). Then the frame clock moves, so OnBegin
 		* reads the frame it starts. Revisions adopt only on the main thread (D-4): another thread's frames keep the revision adopted last.
 		* Every frame adopts a snapshot: its game update's, or a frame-only one published here (Snapshot::CaptureFrame).
@@ -251,33 +252,41 @@ namespace RenderGraph::Frame::Driver
 		{
 			static void thunk(RE::BSGraphics::Renderer* a_renderer, std::uint32_t a_flags)
 			{
-				{
-					ZoneScopedN("CS.Frame.RendererBegin");
-					if (Engine::GraphMode())
-						FrameAnchors::ClaimRenderOwnership();
-					RenderGraphRuntime::OnRendererBegin();
-					// The render frame's snapshot, adopted once the frame clock moved, on every thread. A frame no game update stands for
-					// publishes its own first. Both modes; guest adopts the one just published, on the same thread.
-					if (const auto source = FrameOnlySource())
-						Snapshot::CaptureFrame(*source);
-					Snapshot::Adopt();
-					Engine::Native::RenderThread::OnAdopted();
-					// Native: a window resize reaches the renderer as the adopted snapshot's event, at the frame's start. The engine's
-					// Begin below resizes as it did when its window proc set the request directly.
-					if (std::uint32_t width = 0, height = 0; Snapshot::WindowResizeToApply(width, height))
-						a_renderer->RequestWindowResize(width, height);
-					// The menu states the frame reads are the snapshot's.
-					globals::state->AdoptMenus(Snapshot::Current()->menus);
-					// The description (PostChain) and the upscaler read the window state the frame starts with.
-					Upscaling::LatchWindowState();
-					OnBegin();
-				}
+				StartRendererFrame(a_renderer);
 				func(a_renderer, a_flags);
 				// Native: the face tint bakes' render half, where Main::DrawFrame called FaceGen::UpdatePending.
 				Snapshot::FaceTint::RenderFrame();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+	}
+
+	void StartRendererFrame(RE::BSGraphics::Renderer* a_renderer)
+	{
+		ZoneScopedN("CS.Frame.RendererBegin");
+		if (Engine::GraphMode())
+			FrameAnchors::ClaimRenderOwnership();
+		RenderGraphRuntime::OnRendererBegin();
+		// The render frame's snapshot, adopted once the frame clock moved, on every thread. A frame no game update stands for
+		// publishes its own first. Both modes; guest adopts the one just published, on the same thread.
+		if (const auto source = FrameOnlySource())
+			Snapshot::CaptureFrame(*source);
+		Snapshot::Adopt();
+		Engine::Native::RenderThread::OnAdopted();
+		// Native: a window resize reaches the renderer as the adopted snapshot's event, at the frame's start. The engine's
+		// Begin resizes as it did when its window proc set the request directly.
+		if (std::uint32_t width = 0, height = 0; Snapshot::WindowResizeToApply(width, height))
+			a_renderer->RequestWindowResize(width, height);
+		// The menu states the frame reads are the snapshot's.
+		globals::state->AdoptMenus(Snapshot::Current()->menus);
+		// The description (PostChain) and the upscaler read the window state the frame starts with.
+		Upscaling::LatchWindowState();
+		OnBegin();
+	}
+
+	void EngineBegin(RE::BSGraphics::Renderer* a_renderer, std::uint32_t a_flags)
+	{
+		RendererBegin::func(a_renderer, a_flags);
 	}
 
 	void Install()
