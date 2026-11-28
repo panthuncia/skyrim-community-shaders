@@ -803,10 +803,29 @@ namespace DCLF
 		chainDone.notify_all();
 	}
 
+	namespace
+	{
+		/** @brief Logs a wait of 100 ms or more, at most once a second. The game's animation jobs wait for every sampling job. */
+		void NoteLongWait(std::chrono::steady_clock::time_point a_start, const char* a_what, std::uint64_t a_seq)
+		{
+			const auto now = std::chrono::steady_clock::now();
+			const auto ms = std::chrono::duration<double, std::milli>(now - a_start).count();
+			if (ms < 100.0)
+				return;
+			static std::atomic<std::int64_t> last{ 0 };
+			const auto tick = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+			if (auto seen = last.load(std::memory_order_relaxed); tick != seen && last.compare_exchange_strong(seen, tick, std::memory_order_relaxed))
+				logger::warn("[DCLF] frame values job {}: {} took {:.0f} ms (the sampling jobs behind it, and the engine's animation jobs that wait for them, wait too)",
+					a_seq, a_what, ms);
+		}
+	}
+
 	void FrameValues::Impl::RunSample(Job& a_job)
 	{
 		DCLF_ZONE("CS.DCLF.FrameValues.SampleJob");
+		const auto queued = std::chrono::steady_clock::now();
 		WaitTurn(a_job.chain);
+		NoteLongWait(queued, "the sampling job's wait for its chain turn", a_job.seq);
 		pendingFieldValues.insert(pendingFieldValues.end(), a_job.fieldValues.begin(), a_job.fieldValues.end());
 		// The builds open at the floors the last upload leased at.
 		a_job.oldestContentEpochs = sampleFloors;
@@ -861,7 +880,9 @@ namespace DCLF
 			if (a_job.latePlan)
 				BuildLateRows(a_job);
 			// Uploads into reused copies wait on the GPU, not here. Resolve waits for the submission thread to pass the point.
+			const auto resolveStart = std::chrono::steady_clock::now();
 			const auto writeAfter = a_job.writeAfter.Resolve();
+			NoteLongWait(resolveStart, "the upload's wait in its chain turn for the submission thread to pass its write-after point", a_job.seq);
 			if (!writeAfter.empty() && !a_job.uploads->QueueStreamingWait(writeAfter))
 				throw std::runtime_error("the dedicated uploader cannot wait for the frame its copies were bound to");
 			Upload(a_job);
