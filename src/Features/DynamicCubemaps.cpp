@@ -965,6 +965,11 @@ void DynamicCubemaps::CreateD3D11Textures()
 
 void DynamicCubemaps::Reset()
 {
+	// The reflection faces set activeReflections, once per snapshot. A repeated render draws none, so it keeps the choice of its
+	// snapshot's first render. Otherwise each repeat switched the reflections capture to the fake one (no sky), and the water's
+	// reflections flickered between the two cubemaps.
+	if (Snapshot::Render().repeat)
+		return;
 	activeReflections = globals::state->activeReflections;
 
 	// The adopted snapshot's sky: the game state after the update this frame rendered, as the live sky was here.
