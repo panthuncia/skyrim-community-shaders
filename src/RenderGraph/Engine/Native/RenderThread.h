@@ -20,10 +20,11 @@ namespace Snapshot
 * The game thread runs CS's game frame in its place (GameFrame): DrawFrame's game items in its order (the menus' PreDisplay, the
 * WorldPtToScreenPt3 camera, the driver's game half between the scrap heap's mark and release, the volumetric lighting flag, the frame
 * jobs, the UI recorded without render state, the save screenshot request, the scene graph's and the render passes' upkeep), and hands
-* the render half a FramePayload, which the snapshot carries. The render half (RenderHalf) draws it from the payload alone:
-* Renderer::Lock around Begin (CS's adoption and frame start), then without the lock DCLF's render half from the payload's ticket and the
-* driver's render half, then Renderer::Lock again around volumetric lighting, the UI point's replay and Renderer::End (CS's Present
-* hook: the render side's frame end only). A repeated render draws the same payload again.
+* the render half a FramePayload, which the snapshot carries. The render half (RenderHalf) draws it from the payload alone: Begin's CS
+* part (adoption and frame start) and the part of its body a routed render needs, DCLF's render half from the payload's ticket and the
+* driver's render half, the UI point's replay and Renderer::End (CS's Present hook: the render side's frame end only), all without
+* Renderer::Lock. Only a render that runs engine code (a window change in Begin's body, volumetric lighting, the interface drawn
+* inline) takes the lock, around the engine's Begin body and around that code and End. A repeated render draws the same payload again.
 *
 * The render half runs on CS's render thread, created at the first routed update's publish. Its loop renders the newest published
 * snapshot, or the adopted one again when none is new, and never waits for the game. A producer that must render on its own thread
