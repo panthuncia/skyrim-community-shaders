@@ -82,6 +82,8 @@ namespace DCLF::Runtime
 		void RetireTextureWindow(std::uint64_t a_texture);
 		/** @brief Runs a_run once the texture's window reaches a_revision and is GPU ready. Returns false when shutting down, and then a_run never runs. */
 		bool PostTextureGate(std::uint64_t a_texture, std::uint64_t a_revision, std::function<void()> a_run);
+		/** @brief For a report: the texture's window artifact, its revision and readiness. Any thread. */
+		std::string DescribeTextureWindow(std::uint64_t a_texture) const;
 
 	private:
 		std::unique_ptr<Graph> graph;
