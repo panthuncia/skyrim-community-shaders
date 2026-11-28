@@ -2,12 +2,13 @@
 
 // Hooks that make DCLF the only writer of fade state on the roots it lists.
 // The engine's fade writers skip those roots, and the GPU's results are written back at Main::Update's entry.
-// The animation job's fade updates are queued so FadeStateCS can repeat them.
+// The animation job's fade updates are queued so FadeStateCS can repeat them. The game half drains them into its ticket.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeRecords.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -48,13 +49,23 @@ namespace DCLF::Features::Fades
 		std::uint32_t generation = 0;
 	};
 	/**
-	 * @brief Render thread. The animation job's fade updates since the last list jobs, which FadeStateCS repeats before its cull test.
-	 * Swapped into a_roots, whose old storage the next drain fills.
+	 * @brief The animation job's fade updates of one game update, or of several when a ticket no render took folds into the next.
+	 * The game half drains them into its ticket (TicketPart::AnimatedFades); the render side reads the ticket's copy. Immutable.
 	 */
-	void TakeAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs);
-	/** @brief Render thread. Keeps the batch so the CPU stage's observer frame can step it a frame later. Swapped: a_roots gets old storage. */
-	void KeepAnimatedBatchForObserver(std::vector<AnimatedFadeRoot>& a_roots, const AnimatedFadeInputs& a_inputs);
-	void TakeObserverAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs);
+	struct AnimatedBatch
+	{
+		std::vector<AnimatedFadeRoot> roots;
+		AnimatedFadeInputs inputs{};
+		std::uint64_t serial = 0;  // grows with each batch, folds included
+	};
+	/**
+	 * @brief Render side. The rendered ticket's batch, or null when there is none or this render or an earlier one took it (a repeat).
+	 * FadeStateCS's commit and the CPU fade stage's kick both ask, and the first one in a frame gets it.
+	 */
+	std::shared_ptr<const AnimatedBatch> TakeAnimatedBatch();
+	/** @brief Render side. Keeps the batch so the CPU stage's observer frame can step it a frame later. */
+	void KeepAnimatedBatchForObserver(std::shared_ptr<const AnimatedBatch> a_batch);
+	std::shared_ptr<const AnimatedBatch> TakeObserverAnimatedBatch();
 	/** @brief The batch's updates counted per root slot of the frame's tables. Slots are sorted and unique. */
 	struct AnimatedStamps
 	{
@@ -63,28 +74,9 @@ namespace DCLF::Features::Fades
 	};
 	/**
 	 * @brief Counts a_roots per slot of the frame's tables, into a_stamps. A slot counts only if the tables still list the same node at
-	 * the same generation, since the slots were resolved against the writer tables. Render thread.
+	 * the same generation, since the slots were resolved against the writer tables. Render side.
 	 */
 	void CountAnimatedRoots(std::span<const AnimatedFadeRoot> a_roots, AnimatedStamps& a_stamps);
-	/** @brief Render thread. Swaps in the batch's counts if they were made before the list jobs' wait. */
-	bool TakeAnimatedStamps(AnimatedStamps& a_stamps);
-	/**
-	 * @brief Render thread, right before it waits for the list jobs. Turns the queued updates into the batch and counts it while the
-	 * job threads cull. Nothing pushes between the frame start and the list jobs' end.
-	 */
-	void PrepareAnimatedFades();
-	/** @brief Render thread, when the list jobs finish. Adds updates queued during the wait, which are then counted at the commit. */
-	void DrainAnimatedFades();
-	/**
-	 * @brief Render thread. Lets the CPU fade stage's producer do the drain instead. This is safe because nothing pushes
-	 * until the frame's sampling is done, and Main::Update's entry waits for the drain.
-	 */
-	void HandAnimatedDrainToWorker();
-	/** @brief CPU fade stage producer, after a hand-off. */
-	void TakeAnimatedBatchOnWorker(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs);
-	/** @brief Drains and drops a handed-off batch whose producer never ran. */
-	void DropAnimatedDrain();
-	void WaitAnimatedDrain();
 
 	/**
 	 * @brief Distance at which the engine's fade value drops below OnVisible's fade-out threshold.

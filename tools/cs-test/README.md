@@ -334,7 +334,9 @@ off TressFXSSE there (`game.mods_off`): it crashed the game at start-up. Add `*T
    run: Upscaling stops while another process has the foreground, so an unfocused run would never run DLSS, FSR or XeSS.
 5. Watches the slot's `CommunityShaders-Test.status.json` and the slot's game, found by its image path, until an outcome: the
    game's own, or `never-launched`, `crashed`, `never-loaded`, `hang` (a stalled status file) or `timeout`. The launch lock goes
-   at the helper's kPostLoad.
+   at the helper's kPostLoad. The game reports `no-progress` for a native run with a `mark` step whose render thread never ran
+   from world-ready to the exit (the world stayed on Main::DrawFrame, for example under a menu that stayed open): its marked
+   window's numbers are not valid.
 6. Kills its game by PID, never by name. A game still running is dumped first: `CommunityShadersCrashDump.exe --pid` from the
    slot writes every thread's stack and a minidump into the run folder (`CommunityShaders-Kill-*.txt`, `.dmp`). A run whose game
    ended by itself puts its shader cache back (see Lab).

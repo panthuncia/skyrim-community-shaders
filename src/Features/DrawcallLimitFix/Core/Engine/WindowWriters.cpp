@@ -39,6 +39,12 @@ namespace DCLF::WindowWriters
 				a_counters.waited.fetch_add(1, std::memory_order_relaxed);
 				a_counters.waitedUs.fetch_add(us, std::memory_order_relaxed);
 				for (auto max = a_counters.waitedMaxUs.load(std::memory_order_relaxed); us > max && !a_counters.waitedMaxUs.compare_exchange_weak(max, us, std::memory_order_relaxed);) {}
+				// The game thread waits for this job (its frame jobs), so a long wait is a game-thread wait. At most one line a second.
+				static std::atomic<std::int64_t> lastLog{ 0 };
+				const auto tick = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+				if (us >= 100000)
+					if (auto seen = lastLog.load(std::memory_order_relaxed); tick != seen && lastLog.compare_exchange_strong(seen, tick, std::memory_order_relaxed))
+						logger::warn("[DCLF] an engine animation job waited {} ms for the frame values' sampling", us / 1000);
 			}
 			EngineReadWindow::Suspend();
 		}

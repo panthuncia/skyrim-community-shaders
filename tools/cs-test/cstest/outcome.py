@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import MILESTONES
 
-GAME_OUTCOMES = ("passed", "failed", "config-error", "never-loaded", "device-lost", "crashed", "hang")
+GAME_OUTCOMES = ("passed", "failed", "config-error", "never-loaded", "device-lost", "crashed", "hang", "no-progress")
 HARNESS_OUTCOMES = ("never-launched", "timeout", "crashed", "never-loaded", "hang", "config-error", "failed")
 # The harness's phase checks wait this much longer than the game's own, so the game's outcome wins when it can report.
 GRACE_S = 20

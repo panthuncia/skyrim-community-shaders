@@ -107,10 +107,6 @@ namespace DCLF::Extensions
 	void StandInAfterWrites();
 	/** @brief Any thread, no lock. Each observer's structure. */
 	void StandInStructure(const void* a_parent);
-	/** @brief Render thread, right before it waits for the list jobs. Each observer's beforeListJobsWait. */
-	void StandInBeforeListJobsWait();
-	/** @brief Render thread, when the list jobs finish. Each observer's listJobsDone. */
-	void StandInListJobsDone();
 	// DCLF's main-camera verdicts as written at Main::Update's entry. Main thread, after that point. Reads no engine memory.
 	/** @brief A stood-in root's last written verdict. Visible if none is written yet. */
 	bool StandInVerdict(const void* a_root);

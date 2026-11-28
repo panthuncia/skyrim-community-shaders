@@ -998,7 +998,6 @@ namespace DCLF
 
 	void PrimaryCull::AfterListJobs()
 	{
-		Extensions::StandInListJobsDone();
 		if (!frameLive.exchange(false, std::memory_order_acq_rel))
 			return;
 		const std::int64_t start = Now();
@@ -1024,7 +1023,6 @@ namespace DCLF
 
 	void PrimaryCull::NoListJobs()
 	{
-		Extensions::StandInBeforeListJobsWait();
 		AfterListJobs();
 	}
 
@@ -1168,8 +1166,6 @@ namespace DCLF
 		{
 			static std::uint64_t thunk(std::uint64_t a_1, std::uint64_t a_2, std::uint64_t a_3, std::uint64_t a_4)
 			{
-				// The job threads cull meanwhile, so the render thread does what does not depend on them first.
-				Extensions::StandInBeforeListJobsWait();
 				std::uint64_t result;
 				{
 					DCLF_ZONE("CS.DCLF.ListJobsWait");

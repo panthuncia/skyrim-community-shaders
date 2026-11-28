@@ -42,7 +42,8 @@ namespace DCLF
 		bool utilityShader = false;     // the engine's utility shader exists (its shadow techniques)
 		std::shared_ptr<const FrameGlobals> globals;
 		std::shared_ptr<const LatePoses::FramePlan> latePlan;  // every render of the ticket uses it
-		std::array<std::shared_ptr<const void>, kTicketParts> parts;  // the features' values (RegisterTicketPart)
+		// The features' values (RegisterTicketPart). Mutable for TicketSuperseded's folds, on the game thread before the publish.
+		mutable std::array<std::shared_ptr<const void>, kTicketParts> parts;
 		// Native's routed updates: the scene fragment the game half took out of the post and installed the claims of. The ticket's first
 		// render hands it to the frame revision at its Begin (FrameDriver::ExpectTicket); a repeat hands nothing. Render side only.
 		mutable std::optional<RenderGraph::Frame::Revision::Fragment> scene;

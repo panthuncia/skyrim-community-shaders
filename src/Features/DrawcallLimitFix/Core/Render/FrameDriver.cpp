@@ -197,17 +197,25 @@ namespace DCLF
 	namespace
 	{
 		std::array<TicketPartCapture, kTicketParts> s_ticketParts{};  // install
+		std::array<TicketPartFold, kTicketParts> s_ticketPartFolds{};  // install
 	}
 
-	void RegisterTicketPart(TicketPart a_part, TicketPartCapture a_capture)
+	void RegisterTicketPart(TicketPart a_part, TicketPartCapture a_capture, TicketPartFold a_fold)
 	{
 		s_ticketParts[static_cast<std::size_t>(a_part)] = a_capture;
+		s_ticketPartFolds[static_cast<std::size_t>(a_part)] = a_fold;
 	}
 
 	const void* TicketPartOf(TicketPart a_part)
 	{
 		const auto* ticket = FrameDriver::Get().Ticket();
 		return ticket ? ticket->parts[static_cast<std::size_t>(a_part)].get() : nullptr;
+	}
+
+	std::shared_ptr<const void> TicketPartHeld(TicketPart a_part)
+	{
+		const auto* ticket = FrameDriver::Get().Ticket();
+		return ticket ? ticket->parts[static_cast<std::size_t>(a_part)] : nullptr;
 	}
 
 	bool TicketUtilityShader()
@@ -307,6 +315,10 @@ namespace DCLF
 
 	void FrameDriver::TicketSuperseded(const FrameTicket& a_old, const FrameTicket& a_fresh)
 	{
+		// The parts every update adds to carry the old ticket's updates, which no render will see otherwise.
+		for (std::size_t part = 0; part < kTicketParts; ++part)
+			if (const auto fold = s_ticketPartFolds[part])
+				a_fresh.parts[part] = fold(a_old.parts[part], a_fresh.parts[part]);
 		// Neither ticket reached a render yet: the game thread owns both scenes until the publish. A revision may wait for exactly the
 		// old one's fragment, so the fresh ticket takes it when it brought none; a fresh one supersedes it.
 		if (a_old.sceneHanded.exchange(true, std::memory_order_acq_rel) || !a_old.scene)

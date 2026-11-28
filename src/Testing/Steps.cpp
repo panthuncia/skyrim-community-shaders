@@ -312,6 +312,13 @@ namespace Testing
 		}
 		for (const auto& [substring, line] : NoLogHits())
 			failures.push_back(fmt::format("logged '{}': {}", substring, line));
+		// A perf window measured with the world on Main::DrawFrame: its numbers are not the render thread's.
+		bool noProgress = false;
+		{
+			std::scoped_lock lock(run.mutex);
+			const bool marked = std::ranges::any_of(run.config.steps, [](const Step& a_step) { return a_step.command == "mark"; });
+			noProgress = configured && marked && WorldNeverRouted();
+		}
 		logger::info("[TEST] exit at frame {}", run.frame);
 		{
 			std::scoped_lock lock(exitReportsMutex);
@@ -324,6 +331,13 @@ namespace Testing
 			reason += (reason.empty() ? "" : "; ") + failure;
 		if (!configured)
 			reason = "an exit outside a cs-test run";
+		if (failures.empty() && noProgress) {
+			Finish("no-progress",
+				"the render thread never ran from world-ready to the exit: the world was drawn on Main::DrawFrame (a menu stayed open?), so the "
+				"marked window's numbers are invalid",
+				0u);
+			return;
+		}
 		Finish(failures.empty() ? "passed" : "failed", std::move(reason), 0u);
 	}
 

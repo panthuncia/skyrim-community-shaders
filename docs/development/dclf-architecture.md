@@ -2028,6 +2028,9 @@ root's fade (Features/Fades; `Core/Scene/Model/Records.h`, `FadeRootStatic`; `Fa
 -   **Animated references' fade updates.** `UpdateAnimationJob` runs `FUN_1402cff60` -> `FUN_14147a160` for an animated reference the
     cull did not reach. `Hooks::AnimatedFade` records the nodes and inputs; the batch is stamped into `fadeAnimated`, and FadeStateCS
     applies that many updates before its cull test (`kFadeVerdictAnimated`). The CPU port does the same (`FadeState::AnimatedUpdate`).
+    The game half drains the queue into its frame ticket (`TicketPart::AnimatedFades`, an immutable `AnimatedBatch`); a ticket no
+    render took folds its batch into the next one. The render side reads the ticket's copy, once per ticket (a repeat steps
+    nothing), and neither thread waits for the other.
 -   **Who follows it.** FadeStateCS is authoritative for every root DCLF draws under. Phase 1 drops an input by its root's serviced
     verdict; where the published state did not service the root, the fade-out distance test applies (`kObjectFadeTest`). Shadow
     views drop a caster while its root fades (`RootFading`); `ShadowCasterReject` takes the material's alpha alone and reads no

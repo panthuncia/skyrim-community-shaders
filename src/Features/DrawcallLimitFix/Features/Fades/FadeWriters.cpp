@@ -1,5 +1,5 @@
-// Fade writer hooks. Threads involved: the main thread at Main::Update's entry, animation job threads,
-// cull threads in the OnVisible detours, and the render thread when the list jobs end.
+// Fade writer hooks. Threads involved: the main thread at Main::Update's entry and in the game half (the animated batch),
+// animation job threads, cull threads in the OnVisible detours, and the render side reading its ticket's batch.
 
 #include "Features/DrawcallLimitFix/Features/Fades/FadeScene.h"  // WriteFadeStores
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -9,13 +9,14 @@
 #include "Features/DrawcallLimitFix/Features/Fades/FadesInternal.h"
 #include "Features/DrawcallLimitFix/Features/Fades/FadesAddresses.h"
 
+#include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/RootStates.h"
-#include "RenderGraph/Async/EventQueue.h"
-#include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
+#include "RenderGraph/Async/EventQueue.h"
 
 #include <algorithm>
 #include <atomic>
@@ -23,7 +24,6 @@
 #include <cstddef>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <utility>
 
 namespace DCLF::Features::Fades
@@ -49,11 +49,9 @@ namespace DCLF::Features::Fades
 
 		// Lock-free queue of the animation job's fade updates. The inputs are the same for every call in one animation update.
 		// The first caller claims and publishes them. Later callers compare and set animatedVaried if they differ.
+		// Only the game half drains it (TakeAnimatedPart), after the update's animation jobs. Nothing pushes from its frame start
+		// to the next Main::Update's jobs, apart from rare late updates during the list jobs, which the next ticket takes.
 		RenderGraph::Frame::EventQueue<AnimatedFadeRoot> animatedNodes;
-		std::vector<AnimatedFadeRoot> animatedBatch;  // render thread
-		// The batch and its counts are prepared by the game half (before the list jobs' wait) and taken by the render side's commit,
-		// which run on two threads once native renders on its own thread. Held for the hand-off only, never across a drain wait.
-		std::mutex stampsLock;
 		enum : std::uint32_t
 		{
 			kAnimatedEmpty,
@@ -64,13 +62,8 @@ namespace DCLF::Features::Fades
 		AnimatedFadeInputs animatedInputs{};  // written by the claimer only, read once published
 		std::atomic<std::uint32_t> animatedVaried{ 0 };
 		RenderGraph::Frame::EventQueue<AnimatedFadeInputs, 64> animatedUnpublished;  // inputs seen before the claimer published, compared at drain
-		AnimatedFadeInputs batchInputs{};  // render thread, or the CPU stage's producer while a drain is handed off
-		std::atomic<bool> animatedDrainHanded{ false };
-		void EndAnimatedDrain()
-		{
-			animatedDrainHanded.store(false, std::memory_order_release);
-			animatedDrainHanded.notify_all();
-		}
+		std::uint64_t batchSerial = 0;                                               // game thread
+		std::atomic<std::uint64_t> takenSerial{ 0 };                                 // render side: the newest batch a render took
 		// Immutable tables published at Main::Update's entry and held until the next entry, when no OnVisible or gate runs.
 		std::atomic<const void*> fadeWriterTables{ nullptr };
 		std::shared_ptr<const void> fadeWriterTablesHeld;
@@ -243,8 +236,6 @@ namespace DCLF::Features::Fades
 
 	void WriteFadeWriters()
 	{
-		// Main::Update's jobs start pushing again soon, so a drain handed off last frame must end first. It is normally long done.
-		WaitAnimatedDrain();
 		// Publish the writer set before writing, so the engine writers skip the same roots the write-back covers.
 		PublishWriterTables();
 		WriteFadeStores([](const void* a_root) { return FadeWrittenByDclf(a_root); });
@@ -287,75 +278,82 @@ namespace DCLF::Features::Fades
 		return c;
 	}
 
-	// No hand-off check. Used by the producer, which holds the hand-off.
-	std::size_t DrainAnimatedFadesNow();
-
-	void WaitAnimatedDrain()
-	{
-		if (!animatedDrainHanded.load(std::memory_order_acquire))
-			return;
-		DCLF_ZONE("CS.DCLF.Fade.WaitAnimatedDrain");
-		while (animatedDrainHanded.load(std::memory_order_acquire))
-			animatedDrainHanded.wait(true, std::memory_order_acquire);
-	}
-
-	void HandAnimatedDrainToWorker()
-	{
-		WaitAnimatedDrain();
-		animatedDrainHanded.store(true, std::memory_order_release);
-	}
-
-	void TakeAnimatedBatchOnWorker(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs)
-	{
-		DrainAnimatedFadesNow();
-		a_roots.assign(animatedBatch.begin(), animatedBatch.end());
-		animatedBatch.clear();
-		a_inputs = std::exchange(batchInputs, {});
-		EndAnimatedDrain();
-	}
-
-	void DropAnimatedDrain()
-	{
-		DrainAnimatedFadesNow();
-		animatedBatch.clear();
-		batchInputs = {};
-		EndAnimatedDrain();
-	}
-
-	void TakeAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs)
-	{
-		WaitAnimatedDrain();
-		const std::lock_guard lock(stampsLock);
-		a_roots.swap(animatedBatch);
-		animatedBatch.clear();
-		a_inputs = std::exchange(batchInputs, {});
-	}
-
 	namespace
 	{
-		std::vector<AnimatedFadeRoot> observerBatch;  // render thread
-		AnimatedFadeInputs observerInputs{};
+		std::shared_ptr<const AnimatedBatch> observerBatch;  // render side
+		std::vector<std::uint32_t> stampScratch;             // render side, per slot, zero between counts
+
+		/** @brief Game half. Drains the queue into a_batch. The animation jobs ran before the frame start, so their updates are complete. */
+		void DrainAnimatedFades(AnimatedBatch& a_batch)
+		{
+			animatedNodes.Drain([&](AnimatedFadeRoot&& a_root) { a_batch.roots.push_back(a_root); });
+			if (animatedState.load(std::memory_order_acquire) == kAnimatedPublished) {
+				a_batch.inputs = animatedInputs;
+				a_batch.inputs.varied = animatedVaried.load(std::memory_order_relaxed);
+			}
+			animatedUnpublished.Drain([&](AnimatedFadeInputs&& a_inputs) {
+				if (a_batch.inputs.valid && std::memcmp(&a_inputs, &a_batch.inputs, offsetof(AnimatedFadeInputs, valid)) != 0)
+					a_batch.inputs.varied = 1;
+			});
+			animatedVaried.store(0, std::memory_order_relaxed);
+			animatedState.store(kAnimatedEmpty, std::memory_order_release);
+		}
+
+		/** @brief The game half's capture (TicketPart::AnimatedFades). Null when nothing was queued. */
+		std::shared_ptr<const void> TakeAnimatedPart()
+		{
+			auto batch = std::make_shared<AnimatedBatch>();
+			DrainAnimatedFades(*batch);
+			if (batch->roots.empty() && !batch->inputs.valid)
+				return nullptr;
+			batch->serial = ++batchSerial;
+			return batch;
+		}
+
+		/**
+		 * @brief A ticket no render took hands its updates to the next one, as the main fade step counts every update the adopted
+		 * snapshot stands for. The older batch's inputs stand for all, as within one update.
+		 */
+		std::shared_ptr<const void> FoldAnimatedParts(const std::shared_ptr<const void>& a_older, const std::shared_ptr<const void>& a_fresh)
+		{
+			if (!a_older)
+				return a_fresh;
+			const auto& older = *static_cast<const AnimatedBatch*>(a_older.get());
+			auto folded = std::make_shared<AnimatedBatch>(older);
+			if (a_fresh) {
+				const auto& fresh = *static_cast<const AnimatedBatch*>(a_fresh.get());
+				folded->roots.insert(folded->roots.end(), fresh.roots.begin(), fresh.roots.end());
+				if (!folded->inputs.valid)
+					folded->inputs = fresh.inputs;
+				else
+					folded->inputs.varied |= fresh.inputs.varied;
+			}
+			folded->serial = ++batchSerial;
+			return folded;
+		}
 	}
 
-	void KeepAnimatedBatchForObserver(std::vector<AnimatedFadeRoot>& a_roots, const AnimatedFadeInputs& a_inputs)
+	std::shared_ptr<const AnimatedBatch> TakeAnimatedBatch()
 	{
-		observerBatch.swap(a_roots);
-		observerInputs = a_inputs;
+		auto part = TicketPartHeld(TicketPart::AnimatedFades);
+		if (!part)
+			return nullptr;
+		auto batch = std::static_pointer_cast<const AnimatedBatch>(std::move(part));
+		// A repeat renders the same ticket: its updates were stepped once already.
+		if (batch->serial <= takenSerial.load(std::memory_order_relaxed))
+			return nullptr;
+		takenSerial.store(batch->serial, std::memory_order_relaxed);
+		return batch;
 	}
 
-	void TakeObserverAnimatedBatch(std::vector<AnimatedFadeRoot>& a_roots, AnimatedFadeInputs& a_inputs)
+	void KeepAnimatedBatchForObserver(std::shared_ptr<const AnimatedBatch> a_batch)
 	{
-		a_roots.swap(observerBatch);
-		observerBatch.clear();
-		a_inputs = std::exchange(observerInputs, {});
+		observerBatch = std::move(a_batch);
 	}
 
-	namespace
+	std::shared_ptr<const AnimatedBatch> TakeObserverAnimatedBatch()
 	{
-		// Render thread. The batch's counts, made before the list jobs' wait.
-		AnimatedStamps preparedStamps;
-		bool stampsPrepared = false;
-		thread_local std::vector<std::uint32_t> stampScratch;  // per slot, zero between counts
+		return std::exchange(observerBatch, nullptr);
 	}
 
 	void CountAnimatedRoots(std::span<const AnimatedFadeRoot> a_roots, AnimatedStamps& a_stamps)
@@ -383,68 +381,6 @@ namespace DCLF::Features::Fades
 			a_stamps.counts.push_back(counts[slot]);
 			counts[slot] = 0;
 		}
-	}
-
-	bool TakeAnimatedStamps(AnimatedStamps& a_stamps)
-	{
-		const std::lock_guard lock(stampsLock);
-		if (!std::exchange(stampsPrepared, false))
-			return false;
-		std::swap(a_stamps, preparedStamps);
-		return true;
-	}
-
-	void PrepareAnimatedFades()
-	{
-		// The producer owns the queue during a hand-off.
-		if (animatedDrainHanded.load(std::memory_order_acquire))
-			return;
-		const std::lock_guard lock(stampsLock);
-		DrainAnimatedFadesNow();
-		CountAnimatedRoots(animatedBatch, preparedStamps);
-		stampsPrepared = true;
-	}
-
-	void DrainAnimatedFades()
-	{
-		if (animatedDrainHanded.load(std::memory_order_acquire))
-			return;
-		// Nothing is expected here: the batch was taken before the wait. Late updates join it, and the commit counts it again.
-		const std::lock_guard lock(stampsLock);
-		const std::size_t late = animatedNodes.Drain([&](AnimatedFadeRoot&& a_root) { animatedBatch.push_back(a_root); });
-		const auto state = animatedState.load(std::memory_order_acquire);
-		if (!late && state == kAnimatedEmpty)
-			return;
-		stampsPrepared = false;
-		if (state == kAnimatedPublished) {
-			if (!batchInputs.valid) {
-				batchInputs = animatedInputs;
-				batchInputs.varied = animatedVaried.load(std::memory_order_relaxed);
-			} else if (std::memcmp(&animatedInputs, &batchInputs, offsetof(AnimatedFadeInputs, valid)) != 0) {
-				batchInputs.varied = 1;
-			}
-			animatedVaried.store(0, std::memory_order_relaxed);
-			animatedState.store(kAnimatedEmpty, std::memory_order_release);
-		}
-	}
-
-	std::size_t DrainAnimatedFadesNow()
-	{
-		// The animation job runs between two culls, so its updates are complete by now.
-		animatedBatch.clear();
-		const std::size_t drained = animatedNodes.Drain([&](AnimatedFadeRoot&& a_root) { animatedBatch.push_back(a_root); });
-		batchInputs = {};
-		if (animatedState.load(std::memory_order_acquire) == kAnimatedPublished) {
-			batchInputs = animatedInputs;
-			batchInputs.varied = animatedVaried.load(std::memory_order_relaxed);
-		}
-		animatedUnpublished.Drain([&](AnimatedFadeInputs&& a_inputs) {
-			if (batchInputs.valid && std::memcmp(&a_inputs, &batchInputs, offsetof(AnimatedFadeInputs, valid)) != 0)
-				batchInputs.varied = 1;
-		});
-		animatedVaried.store(0, std::memory_order_relaxed);
-		animatedState.store(kAnimatedEmpty, std::memory_order_release);
-		return drained;
 	}
 
 	float FadeDistanceOf(const SceneCapture::NodeRecord& a_root)
@@ -475,8 +411,9 @@ namespace DCLF::Features::Fades
 	{
 		// Must be the last observer, so the writer tables publish after the other observers' updateEntry.
 		// Without the primary cull no hooks go in.
-		if (!a_context.RegisterStandInObserver({ .updateEntry = &WriteFadeWriters, .beforeListJobsWait = &PrepareAnimatedFades, .listJobsDone = &DrainAnimatedFades }))
+		if (!a_context.RegisterStandInObserver({ .updateEntry = &WriteFadeWriters }))
 			return;
 		InstallWriterHooks();
+		RegisterTicketPart(TicketPart::AnimatedFades, &TakeAnimatedPart, &FoldAnimatedParts);
 	}
 }

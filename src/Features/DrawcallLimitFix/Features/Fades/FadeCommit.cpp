@@ -34,18 +34,18 @@ namespace DCLF::Features::Fades
 			const auto eye = FadeState::FadeEye();
 			std::copy_n(eye.data(), 3, a_inputs.eye);
 			a_inputs.lodAdjust = eye[3];
-			// Kept for their storage, which the batches rotate through. Render thread.
-			static std::vector<AnimatedFadeRoot> roots;
-			static AnimatedStamps stamps;
-			AnimatedFadeInputs anim{};
-			TakeAnimatedBatch(roots, anim);
+			// The ticket's animated batch, unless the CPU fade stage's kick took it this frame or a repeat already stepped it.
+			auto batch = TakeAnimatedBatch();
+			const AnimatedFadeInputs anim = batch ? batch->inputs : AnimatedFadeInputs{};
 			std::copy_n(anim.eye, 3, a_inputs.animEye);
 			a_inputs.animLodAdjust = anim.lodAdjust;
 			a_inputs.animCounter = anim.counter;
 			a_inputs.animDeltaTime = anim.deltaTime;
-			// Normally counted before the list jobs' wait.
-			if (!TakeAnimatedStamps(stamps))
-				CountAnimatedRoots(roots, stamps);
+			static AnimatedStamps stamps;  // render thread, kept for its storage
+			if (anim.valid)
+				CountAnimatedRoots(batch->roots, stamps);
+			else
+				stamps.slots.clear(), stamps.counts.clear();
 			TracyCZoneN(stampZone, "CS.DCLF.Fade.Stamp", true);
 			TracyCZoneValue(stampZone, stamps.slots.size());
 			static std::vector<std::uint32_t> stamped;  // render thread, kept for its storage
@@ -62,7 +62,7 @@ namespace DCLF::Features::Fades
 					}
 			}
 			TracyCZoneEnd(stampZone);
-			KeepAnimatedBatchForObserver(roots, anim);
+			KeepAnimatedBatchForObserver(std::move(batch));
 			// A version not filled yet gets the whole mirror.
 			if (const auto& animated = a_adopted.Of(a_buffers.fadeAnimated); !a_buffers.fadeAnimatedFilled.Holds(animated)) {
 				stamped.resize(std::min<std::size_t>(animatedWords.size(), animated.units));

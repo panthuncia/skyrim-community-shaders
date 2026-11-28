@@ -84,20 +84,6 @@ namespace DCLF::Extensions
 				observer.structure(a_parent);
 	}
 
-	void StandInBeforeListJobsWait()
-	{
-		for (const auto& observer : RegisteredStandInObservers())
-			if (observer.beforeListJobsWait)
-				observer.beforeListJobsWait();
-	}
-
-	void StandInListJobsDone()
-	{
-		for (const auto& observer : RegisteredStandInObservers())
-			if (observer.listJobsDone)
-				observer.listJobsDone();
-	}
-
 	bool StandInVerdict(const void* a_root) { return IndirectDraws::Get().AccumulatedVerdict(a_root); }
 	bool ListedVerdictOf(const void* a_root, bool& a_visible) { return IndirectDraws::Get().AccumulatedVerdictOf(a_root, a_visible); }
 }

@@ -79,7 +79,6 @@ namespace DCLF
 		void BeginFrameCamera();
 		/**
 		 * @brief Native, render thread, where the list jobs were queued and awaited: no engine list cull runs, so the cut's frame ends here.
-		 * The observers' beforeListJobsWait and listJobsDone run as if the jobs had.
 		 */
 		void NoListJobs();
 		/**
