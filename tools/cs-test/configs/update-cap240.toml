@@ -120,6 +120,19 @@ frames = 120
 do = "shot"
 arg = "settled"
 
+# Flicker through a camera cut at the cap (post-corrupt.md): a quarter turn, then consecutive frames.
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle z 180"
+
+[[steps]]
+at = "previous"
+frames = 0
+do = "burst"
+arg = "cut:90"
+
 [[steps]]
 at = "previous"
 frames = 10
@@ -130,3 +143,7 @@ reach = "world-ready"
 shots = ["start", "turn", "settled"]
 
 shot_refs = ["start", "turn", "settled"]
+
+[expect.flicker]
+max_spike = 20
+max_tiles = 8

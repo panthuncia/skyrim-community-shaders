@@ -54,11 +54,27 @@ frames = 30
 do = "menu"
 arg = "Tutorial Menu=hide"
 
+# Flicker after the save's load, once the pinned scene's steps stopped the fight (a fight's swings and hits flicker in every
+# mode, d3d11 too).
+[[steps]]
+at = "previous"
+frames = 0
+do = "burst"
+arg = "load-save:120"
+
 [[steps]]
 at = "previous"
 frames = 30
 do = "console"
 arg = "coc WhiterunDragonsreach"
+
+# Flicker after the load: consecutive frames from the first world frame under the kept loading menu, through the load
+# hold's release and world-ready (about 180 frames at 60 a second).
+[[steps]]
+at = "held-frame"
+frames = 0
+do = "burst"
+arg = "load-in:180"
 
 [[steps]]
 at = "world-ready"
@@ -104,6 +120,12 @@ at = "previous"
 frames = 1
 do = "console"
 arg = "coc Whiterun"
+
+[[steps]]
+at = "held-frame"
+frames = 0
+do = "burst"
+arg = "load-out:180"
 
 # Clear weather: a random foggy weather outside hides the scene and fails the shot.
 [[steps]]

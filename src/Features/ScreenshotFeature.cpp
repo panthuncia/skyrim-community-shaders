@@ -1322,6 +1322,9 @@ void ScreenshotFeature::StepBurst()
 	if (burst.lastPresent == present)
 		return;
 	burst.lastPresent = present;
+	// A frame whose present a load hold keeps back is never on screen, so a burst does not take it (Hooks.cpp's frameEnd).
+	if (DCLF::LoadHold::PresentsHeld() && !globals::features::upscaling.IsFrameGenerationActive())
+		return;
 	// Every capture asked (a frame skipped for each that could not be taken, at most as many as the count): once each is handed to
 	// the worker, the worker writes the files after them. A capture the render graph lost is given up after 600 frames.
 	if (burst.asked == burst.count || burst.attempts >= 2 * burst.count) {

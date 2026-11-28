@@ -424,7 +424,9 @@ void OverlayRenderer::RenderShaderCompilationStatus(const std::function<const ch
 
 	const uint32_t effectFailed = GetFailedEffectCount();
 	const bool showFailures = (failed && !hide) || effectFailed;
-	const bool compiling = shaderCache->IsCompiling();
+	// The pool can hold tasks the compilation set does not count (ORG requests). With nothing counted the card would show
+	// "0/0" for a frame or two after a load, so it shows only counted work.
+	const bool compiling = shaderCache->IsCompiling() && totalShaders > 0;
 	// DCLF's startup pipeline step, after the shader compile.
 	const auto pipelines = globals::features::drawcallLimitFix.GetPipelinePrecompileProgress();
 	if (!compiling && !pipelines.pending && !showFailures && !renderDocAvailable)

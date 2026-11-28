@@ -4,7 +4,6 @@
 
 #include "Features/DrawcallLimitFix/Features/TextureTransforms/TextureTransforms.h"
 #include "Features/DrawcallLimitFix/Api/ObjectContributors.h"
-#include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameValuePools.h"
 #include "Features/DrawcallLimitFix/Integrations/LinearLighting/LinearLighting.h"
 
@@ -15,10 +14,8 @@
 
 namespace DCLF::Features::TextureTransforms
 {
-	// Read only while this producer's Kick is the newest. Its materials are held by the publication its frame installed, released no earlier than the next capture.
-	inline bool Readable(const Api::FrameValuePoolProducer& a_producer, EngineReadWindow::Lease& a_lease) { return a_lease && a_producer.Newest(); }
-
-	// a_space is Linear Lighting's working space this frame, null while it is off.
+	// The game half at a ticket's frame start: its materials are held by the publication the render installed, released no earlier than
+	// the next capture. a_space is Linear Lighting's working space this frame, null while it is off.
 	inline void Read(const TextureTransformList::Entry& a_entry, std::size_t a_buffer, const Integrations::LinearLighting::WorkingSpace* a_space, float (&a_values)[4])
 	{
 		const auto* material = a_entry.material;
