@@ -46,9 +46,9 @@ namespace DCLF::Scene
 		 * @brief DCLF's scene step: moves once per world render, only while DCLF runs (at the game half's BeginFrame, or at a render's
 		 * StepRender), and at an update the cadence renders nothing for. Not the CS frame (RenderGraph::FrameClock). Every step comes
 		 * from one counter, so steps are unique and grow on each side. Inside native's game half (GameHalfScope, on its thread) it is
-		 * the game half's step; anywhere else the render's.
+		 * the game half's step, and on the game thread while the render thread runs (GameSide); anywhere else the render's.
 		 */
-		std::uint32_t SceneStep() const { return t_gameHalf ? gameStep : renderStep; }
+		std::uint32_t SceneStep() const { return GameSide() ? gameStep : renderStep; }
 		/**
 		 * @brief Render half: the render's scene step. A ticket's first render keeps the ticket's step when no step was taken since
 		 * (always in guest and on one thread); otherwise, and for a repeated render, it takes the next.
@@ -68,6 +68,12 @@ namespace DCLF::Scene
 		static void SetGameHalf(bool a_in) { t_gameHalf = a_in; }
 		/** @brief Whether this thread is inside native's game half. */
 		static bool InGameHalf() { return t_gameHalf; }
+		/**
+		 * @brief Whether the caller reads the game half's state: inside native's game half, or on the game thread while the render
+		 * thread runs. Main::Update's DCLF hooks (PrimaryCull::AtUpdateEntry, the tree list loop) run on the game thread outside the
+		 * game half, and the render side's frame is the render thread's to replace.
+		 */
+		static bool GameSide();
 		/**
 		 * @brief What the frame start installed, as the render side reads it: the publication and its tables, lookups, catalog,
 		 * candidates, light entries and claims. Native's game half installs into FrameView's own members; its frame start ends with
@@ -353,8 +359,8 @@ namespace DCLF::Scene
 			const auto& tables = RenderSide() ? renderFrame->tables : acceptedTables;
 			return tables ? *tables : EmptyTables();
 		}
-		/** @brief Whether the caller reads the adopted installed frame: outside native's game half once one is adopted. */
-		bool RenderSide() const { return !t_gameHalf && renderFrame != nullptr; }
+		/** @brief Whether the caller reads the adopted installed frame: off native's game side (GameSide) once one is adopted. */
+		bool RenderSide() const { return !GameSide() && renderFrame != nullptr; }
 		static const Tables& EmptyTables()
 		{
 			static const Tables empty;
