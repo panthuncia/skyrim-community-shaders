@@ -9,7 +9,7 @@ import signal
 import time
 from pathlib import Path
 
-from . import collect, lab as lab_mod, locks, mo2, presentmon, procs, shotref
+from . import collect, cpuload, lab as lab_mod, locks, mo2, presentmon, procs, shotref
 from .config import diff, resolve
 from .outcome import Final, Watcher, frames_after, read_status, summary_line
 from .paths import CONFIG_DIR, LOG_FILE, STATUS_FILE
@@ -86,6 +86,7 @@ def _install_signals():
 def watch(slot, contract, harness, gate=None, background=True, log=print, clock=time.monotonic, sleep=time.sleep):
     """Watches the slot's status file and game until the run is over. Returns (Final, last status, the game PIDs seen)."""
     watcher = Watcher(contract, harness)
+    watch.cpu = cpuload.CpuLoad()
     status_path = slot.skse / STATUS_FILE
     start = clock()
     seen = set()
@@ -100,6 +101,8 @@ def watch(slot, contract, harness, gate=None, background=True, log=print, clock=
 
 # fg.presentmon's sampler for the run being watched.
 watch.sampler = None
+# The machine's CPU load during the run being watched (cpuload.py).
+watch.cpu = None
 
 
 def _start_presentmon(contract, harness, games, log):
@@ -119,6 +122,7 @@ def _start_presentmon(contract, harness, games, log):
 
 def _watch_loop(slot, contract, harness, log, clock, sleep, watcher, status_path, start, gate, background, seen):
     status = None
+    raised = set()
     focused = False
     last_phase = None
     while True:
@@ -126,6 +130,12 @@ def _watch_loop(slot, contract, harness, log, clock, sleep, watcher, status_path
         t = clock() - start
         games = procs.pids_of(slot.exe)
         seen.update(games)
+        # Other processes that keep every CPU busy (another lead's build) starve the game's updates to a few a second in every
+        # mode (post-collapse.md). Above normal, the game keeps its rate beside them, as a foreground game does on a player's PC.
+        for pid in set(games) - raised:
+            raised.add(pid)
+            if procs.raise_priority(pid):
+                log(f"  game {pid}: above-normal priority")
         if gate:
             gate.check(games, watcher.game_seen)
         _start_presentmon(contract, harness, games, log)
@@ -134,6 +144,7 @@ def _watch_loop(slot, contract, harness, log, clock, sleep, watcher, status_path
             status = fresh
         if games and not focused and not background and procs.focus(games[0]):
             focused = True
+        watch.cpu.sample(games[0] if games else None, (status or {}).get("phase") == "world")
         if status is not None and status.get("phase") != last_phase:
             last_phase = status.get("phase")
             log(f"  {t:6.1f} s  phase {last_phase}, frame {status.get('frame')}")
@@ -406,6 +417,9 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
     detected = collect.detectors(collect.final_status(run_dir, status))
     if collect.detectors_text(detected):
         line += f" ({collect.detectors_text(detected)})"
+    cpu = watch.cpu.result() if watch.cpu else None
+    if cpuload.text(cpu):
+        line += f"; {cpuload.text(cpu)}"
     result = {
         "run_id": contract["run_id"],
         "name": contract["name"],
@@ -434,6 +448,7 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
         "warning_kinds": scan["warning_kinds"],
         "collected": collected,
         "presents": presents,
+        "cpu_load": cpu,
         "summary": line,
     }
     (run_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
