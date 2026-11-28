@@ -1468,3 +1468,16 @@ pushes until the user is back.
      mode). Open: a rare fresh frame without sunlight then a slow recovery (seen twice); a small one-frame pose jump in guest
      and D3D12 load-save bursts; cadence idle motion near the 20 limit. Merge check 11/11 (native-interior Vulkan and
      first-person-switch left out: they fail on F2 until post-f2 merges).
+
+## 2026-11-28: Cloud Shadows scratch sized for a frame; tap-error detail; a menu crash is the engine's (post-fatals; director accepted)
+
+256. **Cloud Shadows' layer scratch holds a whole frame's reads** (`post-fatals.md`). The fatal "a run's layer operations
+     read more than 32 faces" was a real count, not a handover leak: after a load the other faces' masks still hold the
+     previous cell's weather, so each new layer's propagation copies read from different faces; four or five new layers
+     exceed 32. `kScratchSlots = kLayers*(kFaces-1)+kFaces` (166; ~10.4 MB of R8 at 256x256); the fatal stays as the
+     invariant and prints the queued ops (a bigger scratch rather than direct reads, which could race between undivided
+     face dispatches). graph-switches passes. The "uncovered epoch" tap error did not reproduce in six stressed runs; its
+     message now names each uncovered epoch's shape and recording state, the revision's versions, the payload pools, the
+     CPU-pipeline flag and the batches. A crash on the loading-screen thread is the engine's: `BSDirectInputManager::
+     GetDeviceData` (AE 68678) ignores a failed DirectInput read and Poll reads unwritten entries; no CS change. Merge check
+     7/7 (native-tour logged a fault address while passing: snap7-devloss8).
