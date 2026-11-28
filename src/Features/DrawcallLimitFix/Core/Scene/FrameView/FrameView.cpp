@@ -18,6 +18,8 @@
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadingFields.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/RenderThread.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "Snapshot/EngineReads.h"
 #include "Snapshot/Publication.h"
 #include "Snapshot/Retire.h"
@@ -84,6 +86,19 @@ namespace DCLF::Scene
 			renderStep = a_ticketStep;
 		renderSerial.fetch_add(1, std::memory_order_acq_rel);
 		DCLF::SceneClock::Set(renderStep);
+	}
+
+	bool FrameView::GameSide()
+	{
+		if (t_gameHalf)
+			return true;
+		if (!RenderGraph::Engine::Native::RenderThread::Running() || !FrameAnchors::IsMainThread())
+			return false;
+		// Only the game thread gets here, so the flag needs no atomics.
+		static bool logged = false;
+		if (!std::exchange(logged, true))
+			logger::info("[DCLF] the game thread reads DCLF's frame state outside the game half while the render thread runs; it reads the game half's");
+		return true;
 	}
 
 	void FrameView::PostFrameInputs()

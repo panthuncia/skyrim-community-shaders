@@ -44,6 +44,7 @@
 #include <deque>
 #include <mutex>
 #include <format>
+#include <map>
 #include <set>
 #include <thread>
 #include <vector>
@@ -303,6 +304,7 @@ namespace DCLF
 			winrt::com_ptr<ID3D11ShaderResourceView> view;
 			Replies* replies = nullptr;
 			std::uint64_t cookie = 0;
+			std::uint64_t serial = 0;  // its entry in Importer::waiting
 			std::chrono::steady_clock::time_point queued = std::chrono::steady_clock::now();
 		};
 		// Published by the render thread, immutable.
@@ -322,6 +324,33 @@ namespace DCLF
 			std::atomic<std::shared_ptr<const Published>> published;
 			std::atomic<std::uint32_t> requestsPending{ 0 };
 			std::atomic<std::uint64_t> requestsAnswered{ 0 };
+			// Requests not answered yet, oldest first, for DescribeWaiting. An entry goes before its request lets go of the view.
+			enum class Stage : std::uint8_t
+			{
+				Gated,     // waiting for the streamed texture's base window
+				Queued,    // waiting for the import thread
+				Importing  // the import thread is on it
+			};
+			struct Waiting
+			{
+				const ID3D11ShaderResourceView* view = nullptr;  // an identity, alive while the entry is
+				std::uint32_t sourceTag = ~0u;
+				Stage stage = Stage::Queued;
+				std::chrono::steady_clock::time_point since;
+				std::string path;  // a streamed texture's file
+			};
+			std::mutex waitingLock;
+			std::map<std::uint64_t, Waiting> waiting;
+			std::uint64_t nextSerial = 0;  // under waitingLock
+
+			void Enter(std::uint64_t a_serial, Stage a_stage)
+			{
+				std::scoped_lock lock(waitingLock);
+				if (const auto it = waiting.find(a_serial); it != waiting.end()) {
+					it->second.stage = a_stage;
+					it->second.since = std::chrono::steady_clock::now();
+				}
+			}
 
 			void Notify()
 			{
@@ -720,8 +749,13 @@ namespace DCLF
 			return { a_entry->index, a_entry };
 		}
 
-		static void Answered(Importer& a_importer, Replies& a_replies, ID3D11ShaderResourceView* a_view, std::uint64_t a_cookie, Binding a_binding)
+		static void Answered(Importer& a_importer, std::uint64_t a_serial, Replies& a_replies, ID3D11ShaderResourceView* a_view, std::uint64_t a_cookie,
+			Binding a_binding)
 		{
+			{
+				std::scoped_lock lock(a_importer.waitingLock);
+				a_importer.waiting.erase(a_serial);
+			}
 			Reply reply;
 			reply.view = a_view;
 			reply.cookie = a_cookie;
@@ -764,9 +798,10 @@ namespace DCLF
 						counters.slowest.resize(6);
 				}
 			} timing{ a_work, a_published, started, a_work.sourceTag };
+			a_importer.Enter(a_work.serial, Importer::Stage::Importing);
 			auto* key = a_work.view.get();
 			if (!key) {
-				Answered(a_importer, *a_work.replies, nullptr, a_work.cookie, a_published.fixed->null);
+				Answered(a_importer, a_work.serial, *a_work.replies, nullptr, a_work.cookie, a_published.fixed->null);
 				return;
 			}
 			auto& table = *a_published.registry;
@@ -815,7 +850,7 @@ namespace DCLF
 				entry->ticket = {};
 				binding = AnswerOf(entry, reject);
 			}
-			Answered(a_importer, *a_work.replies, key, a_work.cookie, std::move(binding));
+			Answered(a_importer, a_work.serial, *a_work.replies, key, a_work.cookie, std::move(binding));
 		}
 
 		static void RunImporter(Importer& a_importer)
@@ -1150,14 +1185,31 @@ namespace DCLF
 		work.sourceTag = a_sourceTag;
 		work.replies = &a_replies;
 		work.cookie = a_cookie;
-		impl->importer->requestsPending.fetch_add(1, std::memory_order_relaxed);
+		auto& importer = *impl->importer;
+		importer.requestsPending.fetch_add(1, std::memory_order_relaxed);
+		const auto streamed = TextureStreaming::IdOf(a_view);
+		const bool gate = streamed && !TextureStreaming::BaseReady(a_view);
+		{
+			Impl::Importer::Waiting waiting{ a_view, a_sourceTag, gate ? Impl::Importer::Stage::Gated : Impl::Importer::Stage::Queued, std::chrono::steady_clock::now(), {} };
+			std::uint32_t resident = 0, wanted = 0;
+			if (streamed)
+				TextureStreaming::Describe(a_view, waiting.path, resident, wanted);
+			std::scoped_lock lock(importer.waitingLock);
+			work.serial = ++importer.nextSerial;
+			importer.waiting.emplace(work.serial, std::move(waiting));
+		}
 		// A streamed texture is answered once its base window exists. Until then its objects are not admitted.
-		if (const auto streamed = TextureStreaming::IdOf(a_view); streamed && !TextureStreaming::BaseReady(a_view)) {
+		if (gate) {
 			TextureStreaming::RequestBase(a_view);
 			auto gated = std::make_shared<Impl::Work>(std::move(work));
-			if (SceneScheduler::Graph().PostTextureGate(streamed, TextureStreaming::kBaseRevision, [impl = impl.get(), gated] { impl->Queue(std::move(*gated)); }))
+			const auto gateRun = [impl = impl.get(), gated] {
+				impl->importer->Enter(gated->serial, Impl::Importer::Stage::Queued);
+				impl->Queue(std::move(*gated));
+			};
+			if (SceneScheduler::Graph().PostTextureGate(streamed, TextureStreaming::kBaseRevision, gateRun))
 				return;
 			work = std::move(*gated);
+			importer.Enter(work.serial, Impl::Importer::Stage::Queued);
 		}
 		impl->Queue(std::move(work));
 	}
@@ -1342,6 +1394,11 @@ namespace DCLF
 		return a_owner ? static_cast<const Impl::Entry*>(a_owner)->window : nullptr;
 	}
 
+	std::uint32_t GpuTextures::ImportedIndex(const void* a_owner)
+	{
+		return a_owner ? static_cast<const Impl::Entry*>(a_owner)->index : kInvalid;
+	}
+
 	std::string GpuTextures::DescribeSuperseded() const
 	{
 		const auto registry = impl->registry;
@@ -1374,6 +1431,33 @@ namespace DCLF
 		for (auto& [ms, text] : std::exchange(counters.slowest, {}))
 			out.slowest.push_back(std::move(text));
 		return out;
+	}
+
+	std::string GpuTextures::DescribeWaiting(std::size_t a_max) const
+	{
+		auto& importer = *impl->importer;
+		static constexpr const char* kStages[] = { "waiting for its base window", "queued for the import thread", "being imported" };
+		const auto now = std::chrono::steady_clock::now();
+		std::array<std::size_t, 3> byStage{};
+		std::string listed;
+		std::size_t shown = 0;
+		std::scoped_lock lock(importer.waitingLock);
+		if (importer.waiting.empty())
+			return "none";
+		for (const auto& [serial, waiting] : importer.waiting) {
+			const auto stage = static_cast<std::size_t>(waiting.stage);
+			++byStage[stage];
+			if (shown++ >= a_max)
+				continue;
+			const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - waiting.since).count();
+			const std::string texture = waiting.path.empty() ? std::format("view {}", static_cast<const void*>(waiting.view)) : waiting.path;
+			std::string window;
+			if (const auto streamed = TextureStreaming::IdOf(waiting.view))
+				window = std::format("; base ready {}, {}", TextureStreaming::BaseReady(waiting.view), SceneScheduler::Graph().DescribeTextureWindow(streamed));
+			listed += std::format("{}[{}] {} ({}) {} for {} ms{}", listed.empty() ? "" : "; ", serial, texture, SourceName(waiting.sourceTag), kStages[stage], ms, window);
+		}
+		return std::format("{} requests ({} waiting for a base window, {} queued, {} being imported); oldest: {}", importer.waiting.size(), byStage[0], byStage[1],
+			byStage[2], listed);
 	}
 
 	GpuTextures::Stats GpuTextures::GetStats() const

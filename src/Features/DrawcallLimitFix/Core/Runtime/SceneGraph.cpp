@@ -12,6 +12,7 @@
 #include <ORGModuleServices/Async/WindowGates.h>
 
 #include <array>
+#include <format>
 #include <span>
 
 namespace DCLF::Runtime
@@ -80,6 +81,19 @@ namespace DCLF::Runtime
 	bool SceneGraph::PostTextureGate(std::uint64_t a_texture, std::uint64_t a_revision, std::function<void()> a_run)
 	{
 		return textureGates->PostGate(*graph, a_texture, a_revision, std::move(a_run));
+	}
+
+	std::string SceneGraph::DescribeTextureWindow(std::uint64_t a_texture) const
+	{
+		static constexpr const char* kReadiness[] = { "missing", "blocked", "queued", "preparing", "CPU ready", "upload submitted", "GPU ready", "published",
+			"superseded", "cancelled" };
+		const auto snapshot = graph->Snapshot(Graph::ArtifactKey{ kTextureWindow, a_texture, 0 });
+		const auto readiness = static_cast<std::size_t>(snapshot.readiness);
+		const char* state = readiness < std::size(kReadiness) ? kReadiness[readiness] : "failed";
+		std::string waits;
+		if (const auto& set = snapshot.gpuSubmissions; set && set->describe)
+			waits = std::format(", waits on {} (complete {})", set->describe(), set->isComplete ? set->isComplete() : false);
+		return std::format("window {} revision {} {}{}", a_texture, snapshot.revision, state, waits);
 	}
 
 	bool SceneGraph::PostGrowth(GrowthWork a_work)

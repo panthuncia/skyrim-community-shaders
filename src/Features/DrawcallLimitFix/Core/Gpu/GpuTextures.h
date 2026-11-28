@@ -218,7 +218,16 @@ namespace DCLF
 		/** @brief For reports. The window a binding's owner imported, as an identity, or null. */
 		static const void* ImportedWindow(const void* a_owner);
 
+		/** @brief For reports. The heap index a binding's owner was imported at, or kInvalid. */
+		static std::uint32_t ImportedIndex(const void* a_owner);
+
 		Stats GetStats() const;
+
+		/**
+		 * @brief For a report: the requests not answered yet, counted by where they wait (the base window's gate, the import queue, the
+		 * import itself), and the oldest a_max with their texture and window state. Any thread.
+		 */
+		std::string DescribeWaiting(std::size_t a_max) const;
 
 		void Clear();
 

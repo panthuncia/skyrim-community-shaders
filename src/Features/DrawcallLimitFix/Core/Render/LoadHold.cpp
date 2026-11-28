@@ -260,6 +260,8 @@ namespace DCLF::LoadHold
 				claims ? (hold.settled ? "installed, unchanged" : "installed, changing") : "not installed", publication ? publication->sequence : 0ull,
 				publication && publication->built, publication ? publication->commitFrame : 0u, hold.firstFrame, hold.heldThisFrame ? "yes" : "no", WaitedText(),
 				hold.actorsWithout3DFirst, hold.actorsWithout3DLast, FrameDriver::Get().DescribeClaimsGate());
+			// Names the textures a material wait is stuck on, and where each waits.
+			logger::warn("[DCLF] load hold: texture requests not answered: {}", GpuTextures::Get().DescribeWaiting(8));
 		}
 
 		/** @brief Render thread. Whether one world frame of a hold is settled. */
