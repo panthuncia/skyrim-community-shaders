@@ -1,5 +1,5 @@
 // The water port's captures: the engine state BSWaterShader's setup reads each frame, and a water shape's own fields.
-// Render thread. EffectFrame.cpp samples the Effect port's frame values the same way.
+// CaptureFrame is the render thread's; CaptureGameFrame the game half's. EffectFrame.cpp samples the Effect port's frame values the same way.
 
 #include "Features/DrawcallLimitFix/Features/Effects/EffectConstants.h"
 #include "Features/DrawcallLimitFix/Features/Water/Port/WaterPort.h"
@@ -100,6 +100,19 @@ namespace DCLF::Features::Water::Port
 		}
 	}
 
+	namespace
+	{
+		/** @brief The FrameInputs fields CS's own features set: Linear Lighting, Unified Water, Physical Sky and the map menu. */
+		void ReadHooks(FrameInputs& f)
+		{
+			f.linearLighting = globals::features::linearLighting.IsLinearLightingActive() && globals::state && globals::state->customPixelShader;
+			const auto uw = globals::features::unifiedWater.GetFlowRewrite();
+			f.unifiedWater = { uw.active, uw.width, uw.height, uw.offsetX, uw.offsetY };
+			f.physicalSkySampler = globals::features::physicalSky.IsRendering();
+			f.mapMenuOpen = globals::state && globals::state->isMapMenuOpen;
+		}
+	}
+
 	void CaptureGame(Snapshot::Builder& a_builder)
 	{
 		if (!Snapshot::FrameCamera::Owned())
@@ -175,12 +188,22 @@ namespace DCLF::Features::Water::Port
 		}
 		// Native: the RenderWorld driver's water blend test (the post-resolve wrote the engine's global from the same test).
 		f.rawWater = native ? ::RenderGraph::Engine::Native::WorldPass::RawWater() : Read<bool>(Address::kRawWater);
+		ReadHooks(f);
+		return f;
+	}
 
-		f.linearLighting = globals::features::linearLighting.IsLinearLightingActive() && globals::state && globals::state->customPixelShader;
-		const auto uw = globals::features::unifiedWater.GetFlowRewrite();
-		f.unifiedWater = { uw.active, uw.width, uw.height, uw.offsetX, uw.offsetY };
-		f.physicalSkySampler = globals::features::physicalSky.IsRendering();
-		f.mapMenuOpen = globals::state && globals::state->isMapMenuOpen;
+	FrameInputs CaptureGameFrame(const RE::BSShaderAccumulator* a_accumulator)
+	{
+		if (!Snapshot::FrameCamera::Owned())
+			return CaptureFrame(a_accumulator);
+		// The render thread adopts and renders snapshots of its own meanwhile, so nothing here reads the render side.
+		const auto& building = Snapshot::Building();
+		const auto* block = building ? building->Block<GameBlock>() : nullptr;
+		FrameInputs f = block ? block->inputs : FrameInputs{};
+		if (!block)
+			ReadGame(f);
+		f.frame = globals::state ? globals::state->frameCount : 0;
+		ReadHooks(f);
 		return f;
 	}
 

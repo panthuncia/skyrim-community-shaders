@@ -307,8 +307,10 @@ namespace DCLF::Features::Water::Port
 		vs[5].v[3] = power;
 
 		// PS b1, in SetupMaterial's order.
-		ps[12] = Make(a_frame.ssrEnabled ? a_frame.ssrIntensity : 0.0f, a_frame.ssrBlur, 1.0f / static_cast<float>(a_frame.renderWidth),
-			1.0f / static_cast<float>(a_frame.renderHeight));
+		// The game half's inputs have no target size (CaptureGameFrame): DCLF's draws take it from the frame row's VPOSOffset.
+		const float inverseWidth = a_frame.renderWidth ? 1.0f / static_cast<float>(a_frame.renderWidth) : 0.0f;
+		const float inverseHeight = a_frame.renderHeight ? 1.0f / static_cast<float>(a_frame.renderHeight) : 0.0f;
+		ps[12] = Make(a_frame.ssrEnabled ? a_frame.ssrIntensity : 0.0f, a_frame.ssrBlur, inverseWidth, inverseHeight);
 		ps[13] = Make(a_frame.ssrPerturbation, 0.0f, 0.0f, 0.0f);
 		const auto& light = a_frame.waterLighting;
 		auto lit = [&](std::size_t a_offset) {

@@ -979,7 +979,9 @@ void DCLFWaterPixelStatics()
 	FogFarColor = material.PS[9];
 	FogParam = material.PS[10];
 	DepthControl = material.PS[11];
-	SSRParams = material.PS[12];
+	// zw is the inverse target size, as in VPOSOffset. The material row is the game half's, which has no target size, so the
+	// frame row's, made for each render, gives it: a resized target then reads its own size.
+	SSRParams = float4(material.PS[12].xy, VPOSOffset.xy);
 	SSRParams2 = material.PS[13];
 
 	// SetupGeometry's TextureProj: the texture space times the world-view-projection, the world relative to the eye (FUN_1412f83b0).

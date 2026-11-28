@@ -744,6 +744,9 @@ namespace RenderGraph::Engine::Scaleform
 			capture.display.viewport[1] = y;
 			capture.display.viewport[2] = w;
 			capture.display.viewport[3] = h;
+			const bool renderTexture = (a_viewport.flags & kViewportRenderTexture) != 0;
+			capture.display.layout[0] = renderTexture ? 0.0f : static_cast<float>(a_viewport.bufferWidth);
+			capture.display.layout[1] = renderTexture ? 0.0f : static_cast<float>(a_viewport.bufferHeight);
 
 			float m[6] = { 2.0f / fw, 0.0f, 0.0f, 0.0f, -2.0f / fh, 0.0f };
 			m[2] = -1.0f - m[0] * fx0;
@@ -862,8 +865,11 @@ namespace RenderGraph::Engine::Scaleform
 				return EngineTargets::Renderer;
 			if (!ViewTargets(rtv, nullptr, a_out))
 				return EngineTargets::None;
-			if (rss.depthStencil < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL)) {
-				const auto& depth = renderer->GetDepthStencilData().depthStencils[rss.depthStencil];
+			// DrawInterface keeps the depth-stencil the frame left bound, kMAIN's at the engine's UI point. A replay on the render
+			// thread follows none of the engine's frame, so the shadow state's depth there is another thread's: it takes kMAIN's.
+			const auto depthIndex = a_atReplay ? static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN) : static_cast<std::uint32_t>(rss.depthStencil);
+			if (depthIndex < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL)) {
+				const auto& depth = renderer->GetDepthStencilData().depthStencils[depthIndex];
 				if (depth.texture) {
 					a_out.depth.copy_from(Tripwire::Unwrap(depth.texture));
 					D3D11_TEXTURE2D_DESC desc{};

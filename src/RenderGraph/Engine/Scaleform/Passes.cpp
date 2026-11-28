@@ -821,12 +821,23 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			frame->height = height;
 			frame->clear = display.clearTarget && state.pendingFirst == 0;
 			frame->format = surface.colourFormat;
-			frame->viewport = { display.viewport[0], display.viewport[1], display.viewport[2], display.viewport[3], 0.0f, 1.0f };
+			// GFx lays a movie out for the screen size it was loaded at. After a window resize the target has another size, so the
+			// layout is stretched onto it, as a D3D11 swap chain kept at the old size is stretched onto the window.
+			float viewport[4] = { display.viewport[0], display.viewport[1], display.viewport[2], display.viewport[3] };
+			if (display.scratch == -1 && display.layout[0] > 0.0f && display.layout[1] > 0.0f) {
+				const float sx = static_cast<float>(width) / display.layout[0];
+				const float sy = static_cast<float>(height) / display.layout[1];
+				viewport[0] *= sx;
+				viewport[1] *= sy;
+				viewport[2] *= sx;
+				viewport[3] *= sy;
+			}
+			frame->viewport = { viewport[0], viewport[1], viewport[2], viewport[3], 0.0f, 1.0f };
 			// D3D11 clips to the viewport, since the renderer's rasterizer state has no scissor.
-			const float left = std::clamp(display.viewport[0], 0.0f, static_cast<float>(width));
-			const float top = std::clamp(display.viewport[1], 0.0f, static_cast<float>(height));
-			const float right = std::clamp(display.viewport[0] + display.viewport[2], left, static_cast<float>(width));
-			const float bottom = std::clamp(display.viewport[1] + display.viewport[3], top, static_cast<float>(height));
+			const float left = std::clamp(viewport[0], 0.0f, static_cast<float>(width));
+			const float top = std::clamp(viewport[1], 0.0f, static_cast<float>(height));
+			const float right = std::clamp(viewport[0] + viewport[2], left, static_cast<float>(width));
+			const float bottom = std::clamp(viewport[1] + viewport[3], top, static_cast<float>(height));
 			frame->scissor = { static_cast<std::int32_t>(std::floor(left)), static_cast<std::int32_t>(std::floor(top)),
 				static_cast<std::uint32_t>(std::ceil(right) - std::floor(left)), static_cast<std::uint32_t>(std::ceil(bottom) - std::floor(top)) };
 

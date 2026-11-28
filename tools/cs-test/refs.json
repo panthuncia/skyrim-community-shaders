@@ -744,45 +744,81 @@
     "accepted": "2026-11-27"
   },
   "native-vulkan+window-resize-stress-taa/large0": {
-    "sha256": "3e2d3d582280429f0e8ce21c07aca627a5177f346d7e599c4da9f7b22321d525",
+    "sha256": "ac0b7197726673f1d617f3dd0df77ebb9a569a8b41d058ff6b747a87b045d40f",
     "size": "1920x1080",
-    "run": "1127-173829-s7-devloss3-native-vulkan-window-resize-stress-taa-s7-devloss3-r-final2",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
     "accepted": "2026-11-27"
   },
   "native-vulkan+window-resize-stress-taa/large1": {
-    "sha256": "54b7aad0513f28fc161b69711587fbd96ee2ecfacfa3cf1e485c2b36270cab4e",
+    "sha256": "def1ae3f1d8edf7e37131d7286167a28c3e17198e335dc2a22a9978f3501b586",
     "size": "1920x1080",
-    "run": "1127-173829-s7-devloss3-native-vulkan-window-resize-stress-taa-s7-devloss3-r-final2",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
     "accepted": "2026-11-27"
   },
   "native-vulkan+window-resize-stress-taa/large2": {
-    "sha256": "1defbdf56519c1a822ac62f34080dd6757794a64b23a48223f3384f18e3ff198",
+    "sha256": "000795d490f7b2acef92b58dca17fcdd01667b18a717847333e2895e5ad7c3f6",
     "size": "1920x1080",
-    "run": "1127-173829-s7-devloss3-native-vulkan-window-resize-stress-taa-s7-devloss3-r-final2",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
     "accepted": "2026-11-27"
   },
   "native-vulkan+window-resize-stress-taa/large3": {
-    "sha256": "a591bcc30b5af826966db7cc39f6835e661b9af2d7f36705d5aa7346c37ebc82",
+    "sha256": "f8634855d2452ba4f9a7c8199dc0d975860cab54de3f537095877cc3ac4099e4",
     "size": "1920x1080",
-    "run": "1127-173829-s7-devloss3-native-vulkan-window-resize-stress-taa-s7-devloss3-r-final2",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
     "accepted": "2026-11-27"
   },
   "native-vulkan+window-resize-stress-taa/large4": {
-    "sha256": "3430bce71ddd6eb40d672c3540332bfbea8e877c940f31e5d35ba035f47226e7",
+    "sha256": "1ff6c4bafa9f8c343c586215f15a066dd1dff9da91b658522ac9d6ec641951d7",
     "size": "1920x1080",
-    "run": "1127-173829-s7-devloss3-native-vulkan-window-resize-stress-taa-s7-devloss3-r-final2",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
     "accepted": "2026-11-27"
   },
   "native-vulkan+window-resize-stress-taa/large5": {
-    "sha256": "bce990186c2d6cfd908f3a47f92e3386615fff01b4c5054947851aae3b6a6e7f",
+    "sha256": "83d4d6c4cda772747a57b2813ce040f12973f2558ea3981911355b07c168809e",
     "size": "1920x1080",
-    "run": "1127-173829-s7-devloss3-native-vulkan-window-resize-stress-taa-s7-devloss3-r-final2",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+window-resize-stress-taa/small0": {
+    "sha256": "41e07e8822becbbfcfc30f4298b12a4cdb8b9784d846dd8fbe3b3259962be6b3",
+    "size": "1280x720",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+window-resize-stress-taa/small1": {
+    "sha256": "6ffa158113ce60eaa5e85089848b8b91e80c5440b004b5cc4884a81c56967d10",
+    "size": "1280x720",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+window-resize-stress-taa/small2": {
+    "sha256": "47a20304bd687a226fe37e52639a44f9af9f9a4a1c4abf5d0a0d681e092e73cc",
+    "size": "1280x720",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+window-resize-stress-taa/small3": {
+    "sha256": "cd32f103975cfc7baeb0744a095b6692cf170181e224737656ec3e7f407bf7db",
+    "size": "1280x720",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+window-resize-stress-taa/small4": {
+    "sha256": "83012cf9a32c4a216c0e4500a3a811315d66311b205aed1da5a1f3311c871eaa",
+    "size": "1280x720",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+window-resize-stress-taa/small5": {
+    "sha256": "10b307226b34dc67b9c916f65ab517917175adb48752d8624c05a8a20515ef1a",
+    "size": "1280x720",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
     "accepted": "2026-11-27"
   },
   "native-vulkan+window-resize-stress-taa/start": {
-    "sha256": "655ee191ab48ab0ee5c280f162596df64a1254b205f680f5401be5e1e0229347",
+    "sha256": "e2f6432140004fdac238fca35fa5d4d7bb3503f1a263f982ad235d0d3b6df1b4",
     "size": "1920x1080",
-    "run": "1127-173829-s7-devloss3-native-vulkan-window-resize-stress-taa-s7-devloss3-r-final2",
+    "run": "1127-194452-s7-resizeui-native-vulkan-window-resize-stress-taa-s7-resizeui-k-final",
     "accepted": "2026-11-27"
   }
 }
