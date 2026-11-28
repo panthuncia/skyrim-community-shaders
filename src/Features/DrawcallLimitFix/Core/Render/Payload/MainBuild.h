@@ -185,6 +185,7 @@ namespace DCLF::Draws
 		// The frame inputs the resolutions read, plus every pair's frame textures and binding owners, kept by count.
 		// The owner bundle is rebuilt only when an owner joins or leaves.
 		std::uint64_t frameWitness = 0;
+		std::uint64_t rowsClears = 0;  // MainRows::clears when its pairs last wrote their rows
 		std::array<std::uint64_t, 2> frameRegisters{};
 		std::array<std::uint32_t, 128> frameRegisterCounts{};
 		ankerl::unordered_dense::map<const void*, std::pair<std::shared_ptr<const void>, std::uint32_t>> ownerCounts;

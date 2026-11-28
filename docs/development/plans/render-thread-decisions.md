@@ -1366,3 +1366,39 @@ pushes until the user is back.
      after. Open (snap7-mvec2): renders whose upload runs between the next update's start and its publish draw objects one
      update ahead of the camera (5-10% of renders at cap 30, 21% at cap 240); a fragile `FrameGlobals` release timing.
      Merge checks 9/9 and 10/10.
+
+## 2026-11-28: lock-free renders, B5 audit, float-index clue, flicker check, water fixed (snap7-lock, post-land, snap7-devloss6, post-flicker, snap7-water2; director accepted)
+
+246. **The render thread takes `Renderer::Lock` only for renders that run engine code** (`snap7-lock.md`, L-a..d): window
+     changes, TVL volumetric lighting, the inline interface. Otherwise `Frame::Driver::StartRendererFrame` (Begin's CS part)
+     plus a ported Begin body (frame flag, jitter through its current call target, shadow-state reset) run lock-free, and the
+     engine's Renderer::End is called without the lock (its body touches only render-owned memory; SSE Display Tweaks
+     patches its limiter). Before, every render took the lock (2-3.4 s held per 10 s, up to 21 ms); now 0 in steady play,
+     so repeats can no longer starve game-side holders (decal manager, texture purge, save screenshot, cell purge).
+247. **B5 is wrong placement rows** (`post-land.md`): after a coc back outside, the producer's placement rows can hold other
+     objects' or stale transforms (9,808 of 9,852 wrong in one repro; geometry right; persists until the next coc). A
+     per-shot native audit (`Diagnostics/Scene/FrameAudit.cpp`, kept on) names whose place a wrong row holds; new config
+     `land-cocs`. Cause open (snap7-mvec2, which restructures sampling). The D3D12 grey-land start shot is a separate texture
+     import stall; white land and a `FrameView::GetSunCandidates` game-thread race go to post-small.
+248. **The render-thread device loss reads a descriptor heap index from float data** (`snap7-devloss6.md`): every fault
+     address in all rounds is heap base 0x14610000 + index x 16 with the index a float (0.571 in 19 runs; 0.51-0.62; exactly
+     80, 50, 640, 2048). BasicRHI retries the fault query for 3 s after a loss (it failed with -13 before the driver marked
+     the device lost) and decodes float indices in the report (BasicRHI snap7/devloss6). Ruled out: stale view refs (poison
+     never fired), graph teardown, CPU slot lifetimes, missing cross-epoch barriers. Trigger: the first frames after a DCLF
+     graph attach. The interim wait stays (snap7-devloss7).
+249. **cs-test checks frame-to-frame flicker** (`post-flicker.md`; the user asked for it after the water flickered). A
+     `burst` step captures consecutive rendered frames render-side (labelled render/snapshot/repeat; native costs x1.01-1.16
+     frame time); `flicker.py` scores 40 px tiles for A-B-A spikes and fails a run past `expect.flicker` (max_spike 20,
+     max_tiles 8, calibrated so d3d11's worst real case, a turning water wheel, passes). Bursts are in river, taa-water,
+     update-cap30, native-interior and a new `flicker-scenes`. Found: the native water flicker (F1, fixed below) and one
+     broken D3D12 repeat frame in Dragonsreach (F2, post-small).
+250. **The water renders correctly again** (`snap7-water2.md`). After a resize, `MainBuild::BeginRows` clears every DCLF
+     material and pipeline row and a resident region rewrote only the pairs its logs named, so the water's pairs read the null
+     descriptor (dark, rippled river): a region that saw a newer clear count now resolves every pair once. The native water
+     blend took its normals parity from the live frame counter while the mask wrote from the snapshot's, so the river vanished
+     on every other snapshot (with or without a resize): it now uses the snapshot's counter. Dynamic Cubemaps fell back to the
+     no-sky cube on repeats (no faces drawn): a repeat keeps its snapshot's choice. native-river's worst flicker spike 51.7
+     (64 tiles) -> 2.6 (0); resize references retaken with the river right, guest's added. Merge checks: 10/10 on lock,
+     8/10 on land/devloss6/flicker (native-river failing on F1 as intended; cadence-drop-cells' coc did not take once), 10/10
+     with the water fix. That cadence shot also showed precipitation as untextured squares and a missing near-land patch
+     (open).

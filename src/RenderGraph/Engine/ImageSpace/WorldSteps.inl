@@ -651,9 +651,15 @@ WorldSteps& World()
 	return world;
 }
 
-/** @brief gFrameCounter (525008 / 411489). Its parity picks the frame's normals target and water history. */
+/**
+* @brief gFrameCounter (525008 / 411489). Its parity picks the frame's normals target and water history. Native: the snapshot's, which
+* the water mask's normals target came from (EngineNormalsParity). The live counter moves with the game thread, so on every other
+* snapshot the water blend read the normals target the mask did not write, and the river vanished for a frame.
+*/
 std::uint32_t EngineFrameCounter()
 {
+	if (const auto* inputs = SnapshotInputs(); inputs && inputs->read)
+		return inputs->frameCounter;
 	static REL::Relocation<const std::uint32_t*> counter{ REL::RelocationID(525008, 411489) };
 	return *counter.get();
 }
