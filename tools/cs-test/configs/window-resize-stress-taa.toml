@@ -176,6 +176,6 @@ do = "exit"
 [expect]
 reach = "world-ready"
 shots = ["start", "small0", "large0", "small1", "large1", "small2", "large2", "small3", "large3", "small4", "large4", "small5", "large5"]
-# DCLF drew black after a resize while its shadow mask binding named the old target (snap7-devloss3). Native's small shots
-# have no references yet: the HUD keeps the old size there.
+# DCLF drew black after a resize while its shadow mask binding named the old target (snap7-devloss3). Native's references
+# have the HUD scaled and masked (snap7-resizeui); the river is missing in its small shots (an open water item).
 shot_refs = ["start", "small0", "large0", "small1", "large1", "small2", "large2", "small3", "large3", "small4", "large4", "small5", "large5"]
