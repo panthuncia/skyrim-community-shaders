@@ -1402,3 +1402,24 @@ pushes until the user is back.
      8/10 on land/devloss6/flicker (native-river failing on F1 as intended; cadence-drop-cells' coc did not take once), 10/10
      with the water fix. That cadence shot (camera at (0, 0) with only LODs loaded because the coc had not taken: not a bug
      itself) also showed scattered white squares that may be real corruption (post-corrupt).
+
+## 2026-11-28: retired tickets return their scene; each render draws its ticket's rows (snap7-mvec2/2b; director accepted)
+
+251. **A ticket that retires without handing its DCLF scene to a render puts the scene back in the post**
+     (`snap7-mvec2.md`). A routed game half takes DCLF's scene fragment into its `FrameTicket`; a ticket can retire unrendered
+     (the cadence skips its snapshot, or a main-thread frame such as the loading-menu hold replaces it), and the scene was
+     lost. The scene builder builds only after a Begin took the last scene, so it stopped; the frame revision planned after
+     the `Interior` change waited forever for a fragment, the staged interior graphs never attached, and DCLF drew the
+     exterior publication with the interior camera through every later load (Dragonsreach "drawn as the exterior", the coc
+     that "did not take", and the white squares). `FrameTicket::~FrameTicket` returns an untaken scene through
+     `Revision::ReturnPostedFragment` (fills only an empty post, skips a scene older than one a Begin already took). A frame
+     revision not adopted 600 frames after it was planned logs what it waits for; the load hold's stall line shows the claims
+     gate. Forced repro: 2/6 stalled before, 0/5 after. The extra shadow-mask view reference only shifted timing.
+252. **Each render draws exactly its ticket's object state** (snap7-mvec2): rows reach the GPU only through staged records
+     applied in ticket order, so no upload sends a later ticket's rows (counter 0 at cap 30 and cap 240; mvec-turn sharp).
+     Grass wind time steps once per render (keyed on the commit's scene step), and new tables start without wind motion.
+     Menu scenes keep the engine's previous bones (one render per update, no TAA). Open, with post-corrupt: on repeats, the
+     player's arm drawn black once (A), Dragonsreach fires purple-blue (B), Riverwood mist missing once (C); an
+     update-cap240 turn shot once had the camera pointing at the ground with no player. cadence-drop-cells now restores health
+     and closes the Health Low tutorial like the other pinned configs. Merge check 9/11 (cap240 passed on rerun; cadence was
+     the tutorial), cadence 2/2 after the config fix.
