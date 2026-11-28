@@ -1423,3 +1423,14 @@ pushes until the user is back.
      update-cap240 turn shot once had the camera pointing at the ground with no player. cadence-drop-cells now restores health
      and closes the Health Low tutorial like the other pinned configs. Merge check 9/11 (cap240 passed on rerun; cadence was
      the tutorial), cadence 2/2 after the config fix.
+
+## 2026-11-28: game half's frame for sun candidates; F2 narrowed (post-small, post-small2; director accepted)
+
+253. **The game thread reads the game half's frame** (`post-small.md`): `PrimaryCull::AtUpdateEntry` called
+     `FrameView::GetSunCandidates` on the render side's `renderFrame`, which the render thread can replace (a crash after a
+     `dclf:cull` toggle); it now reads the game half's frame. A load hold released with no progress logs the texture
+     requests not answered (by stage, the oldest eight with file, source and window state); the D3D12 import stall did not
+     return in 22 runs. The white land is probably fixed by decision 250's row rewrite after a clear (35 coc-outs clean).
+     F2 is real on Vulkan and D3D12: on repeat renders the depth prepass culling drops most of the near scene (sky shows);
+     not occlusion, portals, async compute or skipped epochs; the cull's camera/inputs from the latch are the suspect
+     (post-f2). New config `dragonsreach-bursts` reproduces it. Merge check 7/7.
