@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -127,6 +128,10 @@ namespace DCLF::Integrations::AdvancedSkin
 		};
 
 		// Render thread only, apart from the replies the import thread pushes.
+		// Captures a freed row waits before it is reused. Renders lag the captures by at most FrameValues' staged tickets (8), so a row
+		// freed this long ago is named by no ticket a render can still draw.
+		constexpr std::uint32_t kRowReuseCaptures = 16;
+
 		struct MaterialState
 		{
 			GpuTextures::Replies replies;
@@ -140,7 +145,9 @@ namespace DCLF::Integrations::AdvancedSkin
 			org::OwnedDescriptorBinding sampler;
 			// Row 0 is the disabled profile, which a slot with no skin surface names. It is never freed.
 			std::vector<MaterialTableEntry> table = std::vector<MaterialTableEntry>(1);
-			std::vector<std::uint32_t> freeRows;
+			// Freed rows and the capture that freed them, oldest first. A render draws its own ticket's shading rows with the table its
+			// upload sends, which can be a later ticket's, so a row is reused only once no render can still draw a ticket that named it.
+			std::deque<std::pair<std::uint32_t, std::uint32_t>> freeRows;
 			std::unordered_map<MaterialRow, std::uint32_t, MaterialRowHash, MaterialRowEqual> rowIndex;
 			std::vector<MaterialSlotState> slots;
 			std::vector<std::uint32_t> members;
@@ -171,7 +178,7 @@ namespace DCLF::Integrations::AdvancedSkin
 			// No slot names it, so its stale bytes are never read. Puts already made keep their owners until the GPU is done.
 			a_state.rowIndex.erase(entry.row);
 			entry.owners.reset();
-			a_state.freeRows.push_back(a_row);
+			a_state.freeRows.emplace_back(a_row, a_state.captures);
 		}
 
 		void JoinSlot(MaterialState& a_state, std::uint32_t a_slot)
@@ -300,9 +307,9 @@ namespace DCLF::Integrations::AdvancedSkin
 			if (const auto it = a_state.rowIndex.find(a_row); it != a_state.rowIndex.end())
 				return it->second;
 			std::uint32_t index;
-			if (!a_state.freeRows.empty()) {
-				index = a_state.freeRows.back();
-				a_state.freeRows.pop_back();
+			if (!a_state.freeRows.empty() && a_state.captures - a_state.freeRows.front().second >= kRowReuseCaptures) {
+				index = a_state.freeRows.front().first;
+				a_state.freeRows.pop_front();
 			} else {
 				index = static_cast<std::uint32_t>(a_state.table.size());
 				a_state.table.emplace_back();
