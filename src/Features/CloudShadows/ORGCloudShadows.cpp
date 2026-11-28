@@ -347,8 +347,11 @@ namespace
 				return i;
 		return 0;
 	}
-	// The most distinct faces one run may read. More is fatal.
-	constexpr std::uint32_t kScratchSlots = 32;
+	// The most faces the runs of one anchor may read in a frame. Only copies read, and CloudShadows::PropagateToCompletion makes
+	// them: each layer is new at most once a frame and is copied to the five other faces, and each propagation copies once to the
+	// top layer, once per face. So no frame reads more. More is fatal. A frame after a load or a weather change reaches dozens
+	// (the faces' layer masks are from the old cell's weather), more than the 32 slots this had.
+	constexpr std::uint32_t kScratchSlots = kLayers * (kFaces - 1) + kFaces;
 	// A tap's rows: the gather entries, then the scatter entries.
 	constexpr std::uint32_t kGatherWords = kScratchSlots;
 	constexpr std::uint32_t kScatterWords = kLayers * kFaces;
@@ -674,8 +677,16 @@ bool ORGCloudShadows::QueueLayerOp(LayerOpPoint a_point, LayerOp a_op)
 		} else {
 			if (value != kZero && !(ops->sources[a_op.face] & (1u << value))) {
 				// Slots taken by earlier face taps this frame are not free, since their gathers run with this one.
-				if (ops->sourceCount + (a_point == LayerOpPoint::SkyReflections ? ops->SlotsTaken() : 0) >= kScratchSlots)
-					Fatal(fmt::format("a run's layer operations read more than {} faces", kScratchSlots));
+				if (ops->sourceCount + (a_point == LayerOpPoint::SkyReflections ? ops->SlotsTaken() : 0) >= kScratchSlots) {
+					std::string queued;
+					for (const auto& op : ops->ops)
+						queued += fmt::format(" {}<{}@{}", op.dst, op.src == kClearOp ? -1 : static_cast<int>(op.src), op.face);
+					Fatal(fmt::format(
+						"a frame's layer operations read more than {} faces (point {}, {} read by this run, {} by earlier face taps of "
+						"frame {}; queued dst<src@face:{}; next {}<{}@{})",
+						kScratchSlots, static_cast<int>(a_point), ops->sourceCount, ops->SlotsTaken(), RenderGraph::Frame::Driver::Current().frame, queued,
+						a_op.dst, a_op.src, a_op.face));
+				}
 				ops->sources[a_op.face] |= 1u << value;
 				++ops->sourceCount;
 			}
