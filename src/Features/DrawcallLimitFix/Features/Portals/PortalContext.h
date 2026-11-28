@@ -5,8 +5,13 @@
 #include <memory>
 #include <vector>
 
+#include <ankerl/unordered_dense.h>
+
 namespace DCLF::Portals
 {
+	/** @brief A portal graph's rooms: room -> graph room index. Replaced whole when the graph changes, never edited. */
+	using RoomIndex = ankerl::unordered_dense::map<const void*, std::uint32_t>;
+
 	/** @brief CPU-owned immutable context. Its identity travels with room membership, queries and verdicts. */
 	struct Context
 	{
@@ -22,6 +27,8 @@ namespace DCLF::Portals
 		std::array<float, 4> walkSphere{}, walkPlane{};
 		bool strict = false, bothSides = true;
 		std::vector<std::uint32_t> programs;
+		// The walk's graph rooms (PortalViews::ProgramOf), null without a graph.
+		std::shared_ptr<const RoomIndex> rooms;
 		// The crossed portals' shared nodes, which its visibility map holds with an empty frustum (Traverse, 0x1414a4804). Identities only, never dereferenced.
 		std::vector<const void*> sharedNodes;
 	};

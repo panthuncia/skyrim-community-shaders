@@ -7,7 +7,10 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowCameras.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalBytecode.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalProgramModel.h"
 #include "Features/DrawcallLimitFix/Features/Portals/PortalPrograms.h"
@@ -968,6 +971,7 @@ namespace DCLF
 	{
 		// FUN_1401a43c0: every room holding the camera's near-plane centre walked from (only the first as the first), else unbound space.
 		DCLF_ZONE("CS.DCLF.PortalViews");
+		walkThread.store(std::this_thread::get_id(), std::memory_order_relaxed);
 		frame.valid = false;
 		frame.sceneFrame = Scene::FrameView::Get().SceneStep();
 		// Always encode on exit, even with no programs, so FadeStateCS, BuildDraws and the checks read this frame's words.
@@ -988,12 +992,14 @@ namespace DCLF
 			edgeFlags.clear();
 			edgeGraph = graph;
 			++graphVersion;
-			roomIndex.clear();
+			// A new map: render sides may still read the last one through their tickets' contexts.
+			auto rooms = std::make_shared<Portals::RoomIndex>();
 			const auto* graphRooms = At<const void* const*>(graph, kGraphRooms);
 			const std::uint32_t count = graphRooms ? At<std::uint32_t>(graph, kGraphRoomCount) : 0;
 			for (std::uint32_t i = 0; i < count; ++i)
 				if (graphRooms[i])
-					roomIndex.emplace(graphRooms[i], i);
+					rooms->emplace(graphRooms[i], i);
+			roomIndex = std::move(rooms);
 		}
 		frame.roomKeys.clear();
 		frame.rooms.clear();
@@ -1279,20 +1285,58 @@ namespace DCLF
 		return verdict.visible;
 	}
 
+	void PortalViews::NoteWalkRead(const char* a_what) const
+	{
+		const auto walker = walkThread.load(std::memory_order_relaxed);
+		if (walker == std::thread::id{} || walker == std::this_thread::get_id())
+			return;
+		static std::atomic<bool> encodedLogged{ false }, contextLogged{ false };
+		auto& logged = std::string_view(a_what) == "Encoded" ? encodedLogged : contextLogged;
+		if (!logged.exchange(true, std::memory_order_relaxed))
+			logger::error("[DCLF] portals: PortalViews::{} read on another thread than its walk's, which rewrites it meanwhile; read the frame's context "
+						  "(FrameContext) instead",
+				a_what);
+	}
+
+	const Portals::Context* PortalViews::FrameContext() const
+	{
+		if (::RenderGraph::Engine::Native::Active() && !Scene::FrameView::InGameHalf() && ::FrameAnchors::IsRenderOwner())
+			return static_cast<const Portals::Context*>(TicketPartOf(TicketPart::Portals));
+		return mainContext.get();
+	}
+
+	std::span<const std::uint32_t> PortalViews::FramePrograms() const
+	{
+		const auto* context = FrameContext();
+		return context ? std::span<const std::uint32_t>(context->programs) : std::span<const std::uint32_t>();
+	}
+
+	std::uint64_t PortalViews::ProgramsVersion() const
+	{
+		const auto* context = FrameContext();
+		return structure.load(std::memory_order_relaxed) * 0x9E3779B97F4A7C15ull ^ (context ? context->roomsGeneration : 0u);
+	}
+
 	std::uint32_t PortalViews::ProgramOf(const RE::NiAVObject* a_node) const
 	{
-		if (!edgeGraph)
+		const auto* context = FrameContext();
+		const auto* rooms = context ? context->rooms.get() : nullptr;
+		if (!rooms)
 			return kPortalNoProgram;
 		for (const auto* node = a_node; node; node = node->parent)
-			if (const auto it = roomIndex.find(node); it != roomIndex.end())
+			if (const auto it = rooms->find(node); it != rooms->end())
 				return 1 + it->second;
 		return 0;
 	}
 
 	std::uint32_t PortalViews::ProgramOfRoom(const void* a_room) const
 	{
-		const auto it = edgeGraph ? roomIndex.find(a_room) : roomIndex.end();
-		return it != roomIndex.end() ? 1 + it->second : kPortalNoProgram;
+		const auto* context = FrameContext();
+		const auto* rooms = context ? context->rooms.get() : nullptr;
+		if (!rooms)
+			return kPortalNoProgram;
+		const auto it = rooms->find(a_room);
+		return it != rooms->end() ? 1 + it->second : kPortalNoProgram;
 	}
 
 	void PortalViews::NoteStructure(const RE::NiNode* a_parent)
@@ -1343,6 +1387,7 @@ namespace DCLF
 		context->frame = frame.sceneFrame;
 		context->generation = ++contextGeneration;
 		context->roomsGeneration = graphVersion;
+		context->rooms = roomIndex;
 		context->programs = encoded;
 		mainContext = std::move(context);
 		if (!publishVisible.load(std::memory_order_acquire))
