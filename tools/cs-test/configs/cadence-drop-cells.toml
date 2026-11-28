@@ -2,7 +2,7 @@
 # exterior, Dragonsreach, Riverwood), a shot once each settles, then exit. Checks the game-side side effects
 # (Snapshot/SideEffects.h) where cells, actors, decals, fades after a teleport and the flow-map pool are exercised.
 # Native only. Compose it: native-vulkan+cadence-drop-cells. Each shot is 120 game frames (40 rendered frames) after its
-# load's world-ready, past the fade-in.
+# load's world-ready, past the fade-in. A 180-frame burst follows each coc (flicker after loads).
 extends = ["base"]
 
 [run]
@@ -57,6 +57,12 @@ do = "console"
 arg = "coc Whiterun"
 
 [[steps]]
+at = "load-start"
+frames = 0
+do = "burst"
+arg = "load-whiterun:180"
+
+[[steps]]
 at = "world-ready"
 frames = 400
 do = "shot"
@@ -69,6 +75,12 @@ do = "console"
 arg = "coc WhiterunDragonsreach"
 
 [[steps]]
+at = "held-frame"
+frames = 0
+do = "burst"
+arg = "load-dragonsreach:180"
+
+[[steps]]
 at = "world-ready"
 frames = 400
 do = "shot"
@@ -79,6 +91,12 @@ at = "previous"
 frames = 10
 do = "console"
 arg = "coc Riverwood"
+
+[[steps]]
+at = "held-frame"
+frames = 0
+do = "burst"
+arg = "load-riverwood:180"
 
 [[steps]]
 at = "world-ready"
@@ -96,3 +114,9 @@ reach = "world-ready"
 shots = ["whiterun", "dragonsreach", "riverwood"]
 
 shot_refs = ["whiterun", "dragonsreach", "riverwood"]
+
+# Flicker after each load (post-corrupt.md): from the hold's first world frame (or the first Present after a nearby coc's held
+# presents) through world-ready. The global limits of post-flicker.md.
+[expect.flicker]
+max_spike = 20
+max_tiles = 8

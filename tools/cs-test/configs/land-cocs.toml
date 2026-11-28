@@ -62,6 +62,12 @@ do = "console"
 arg = 'coc WhiterunDragonsreach'
 
 [[steps]]
+at = "held-frame"
+frames = 0
+do = "burst"
+arg = "load-in-0:180"
+
+[[steps]]
 at = "world-ready"
 frames = 400
 do = "shot"
@@ -96,6 +102,12 @@ at = "previous"
 frames = 1
 do = "console"
 arg = 'coc Whiterun'
+
+[[steps]]
+at = "held-frame"
+frames = 0
+do = "burst"
+arg = "load-out-0:180"
 
 [[steps]]
 at = "world-ready"
@@ -160,6 +172,12 @@ do = "console"
 arg = 'coc WhiterunDragonsreach'
 
 [[steps]]
+at = "held-frame"
+frames = 0
+do = "burst"
+arg = "load-in-1:180"
+
+[[steps]]
 at = "world-ready"
 frames = 400
 do = "shot"
@@ -194,6 +212,12 @@ at = "previous"
 frames = 1
 do = "console"
 arg = 'coc Whiterun'
+
+[[steps]]
+at = "held-frame"
+frames = 0
+do = "burst"
+arg = "load-out-1:180"
 
 [[steps]]
 at = "world-ready"
@@ -554,3 +578,8 @@ arg = ''
 [expect]
 reach = "world-ready"
 shots = ["inside-0", "inside-0b", "inside-0c", "exterior-0", "exterior-0b", "inside-1", "inside-1b", "inside-1c", "exterior-1", "exterior-1b", "inside-2", "inside-2b", "inside-2c", "exterior-2", "exterior-2b", "inside-3", "inside-3b", "inside-3c", "exterior-3", "exterior-3b", "inside-4", "inside-4b", "inside-4c", "exterior-4", "exterior-4b", "exterior-0e", "exterior-0f", "exterior-1e", "exterior-1f", "exterior-2e", "exterior-2f", "exterior-3e", "exterior-3f", "exterior-4e", "exterior-4f"]
+
+# Flicker after the first two rounds' loads (post-corrupt.md).
+[expect.flicker]
+max_spike = 20
+max_tiles = 8
