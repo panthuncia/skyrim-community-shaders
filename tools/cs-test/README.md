@@ -337,6 +337,10 @@ off TressFXSSE there (`game.mods_off`): it crashed the game at start-up. Add `*T
    at the helper's kPostLoad. The game reports `no-progress` for a native run with a `mark` step whose render thread never ran
    from world-ready to the exit (the world stayed on Main::DrawFrame, for example under a menu that stayed open): its marked
    window's numbers are not valid.
+   The game runs in the above-normal priority class. Other processes that keep every CPU busy (a parallel build, another game
+   compiling shaders) starve its updates to 2-4 a second in every mode, d3d11 and guest included; above normal, it keeps its rate
+   beside them, as a foreground game does on a player's PC. The watch also counts the seconds in the world when other processes
+   saturated the CPUs (`result.json` `cpu_load`); five or more add a clause to the summary line naming the build tools running.
 6. Kills its game by PID, never by name. A game still running is dumped first: `CommunityShadersCrashDump.exe --pid` from the
    slot writes every thread's stack and a minidump into the run folder (`CommunityShaders-Kill-*.txt`, `.dmp`). A run whose game
    ended by itself puts its shader cache back (see Lab).

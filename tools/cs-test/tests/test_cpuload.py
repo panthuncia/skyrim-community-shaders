@@ -19,7 +19,7 @@ class FakeTimes:
 
 def load_with(times, tools=None):
     return cpuload.CpuLoad(cpus=4, system=lambda: (times.idle, times.total), process=lambda pid: times.game,
-                           tools=lambda: tools or {"cl.exe": 3, "ninja.exe": 1})
+                           tools=lambda game: tools or {"cl.exe": 3, "ninja.exe": 1})
 
 
 def test_counts_saturated_world_seconds():

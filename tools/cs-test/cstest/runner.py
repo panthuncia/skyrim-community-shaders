@@ -122,6 +122,7 @@ def _start_presentmon(contract, harness, games, log):
 
 def _watch_loop(slot, contract, harness, log, clock, sleep, watcher, status_path, start, gate, background, seen):
     status = None
+    raised = set()
     focused = False
     last_phase = None
     while True:
@@ -129,6 +130,12 @@ def _watch_loop(slot, contract, harness, log, clock, sleep, watcher, status_path
         t = clock() - start
         games = procs.pids_of(slot.exe)
         seen.update(games)
+        # Other processes that keep every CPU busy (another lead's build) starve the game's updates to a few a second in every
+        # mode (post-collapse.md). Above normal, the game keeps its rate beside them, as a foreground game does on a player's PC.
+        for pid in set(games) - raised:
+            raised.add(pid)
+            if procs.raise_priority(pid):
+                log(f"  game {pid}: above-normal priority")
         if gate:
             gate.check(games, watcher.game_seen)
         _start_presentmon(contract, harness, games, log)

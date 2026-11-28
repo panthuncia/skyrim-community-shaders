@@ -39,8 +39,11 @@ if IS_WINDOWS:
     _kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
     _kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
     _kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    _kernel32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+PROCESS_SET_INFORMATION = 0x0200
+ABOVE_NORMAL_PRIORITY_CLASS = 0x8000
 STILL_ACTIVE = 259
 WM_CLOSE = 0x0010
 GW_OWNER = 4
@@ -92,6 +95,19 @@ def alive(pid):
         if not _kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
             return False
         return code.value == STILL_ACTIVE
+    finally:
+        _kernel32.CloseHandle(handle)
+
+
+def raise_priority(pid):
+    """Puts a process in the above-normal priority class. Returns whether it worked."""
+    if not IS_WINDOWS or not pid:
+        return False
+    handle = _kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, int(pid))
+    if not handle:
+        return False
+    try:
+        return bool(_kernel32.SetPriorityClass(handle, ABOVE_NORMAL_PRIORITY_CLASS))
     finally:
         _kernel32.CloseHandle(handle)
 

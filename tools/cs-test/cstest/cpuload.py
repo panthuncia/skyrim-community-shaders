@@ -55,10 +55,12 @@ def process_time(pid):
         kernel32.CloseHandle(wintypes.HANDLE(handle))
 
 
-def busy_tools():
-    """Running processes whose names are in TOOLS, counted by name."""
+def busy_tools(game):
+    """Running processes whose names are in TOOLS, counted by name, without the run's own game."""
     names = collections.Counter()
     for pid in procs.all_pids():
+        if pid == game:
+            continue
         name = Path(procs.image_path(pid) or "").name.lower()
         if name in TOOLS:
             names[name] += 1
@@ -100,7 +102,7 @@ class CpuLoad:
         self.others_max = max(self.others_max, others * self.cpus)
         if busy >= SATURATED and others >= OTHERS:
             if self.stretch_s == 0.0:
-                self.seen_tools.update(self.tools())
+                self.seen_tools.update(self.tools(pid))
             self.saturated_s += seconds
             self.stretch_s += seconds
             self.longest_s = max(self.longest_s, self.stretch_s)
@@ -118,4 +120,4 @@ def text(result):
         return ""
     tools = ", ".join(f"{name} x{count}" if count > 1 else name for name, count in result["tools"].items())
     return (f"CPUs saturated by other processes {result['saturated_s']:.0f} s in the world (up to {result['others_max_cpus']:.1f} of "
-            f"{result['cpus']} CPUs{': ' + tools if tools else ''}): game updates starve in every mode")
+            f"{result['cpus']} CPUs{': ' + tools if tools else ''})")
