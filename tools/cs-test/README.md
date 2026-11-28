@@ -117,6 +117,7 @@ The shipped configs:
 | `flicker-scenes` | a 60-frame burst (see Bursts and flicker) in each pinned still scene: the autoloaded save (grass, trees, shadows), the sky above it, Riverwood's river down and along it (water), Whiterun (shadows) and Dragonsreach (an interior), with `expect.flicker` limits; compose it, `d3d11+flicker-scenes` (the reference), `guest+flicker-scenes`, `native-vulkan+flicker-scenes`, `native-vulkan+flicker-scenes+cap30`, and with `--set game.uncapped=true` |
 | `flicker`, `flicker-taa`, `flicker-dlss`, `flicker-none` | a 120-frame burst at the pinned save scene, with that upscale method; `native-flicker*` and `native-d3d12-flicker*` compose them with a mode |
 | `river-flicker` | 120-frame bursts down at Riverwood's river and along it |
+| `dragonsreach-bursts` | Dragonsreach and eight 300-frame bursts, scored for one-frame breaks (F2, broken repeat renders); compose it, `native-vulkan+dragonsreach-bursts`, and with `--set dclf.cull=frustum` it breaks more often |
 | `cap30` | the update-rate cap at 30, no steps: compose it after a scenario, `native-vulkan+flicker-scenes+cap30` |
 | `cadence-still` | the cadence shot comparison's steps: god mode, AI off, time stopped, a shot in Dragonsreach and one in Whiterun once each settled; `cadence.py` (below) runs it with the cadence off and on |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
