@@ -1784,7 +1784,7 @@ namespace DCLF::Features::MenuViews::Scenes::Native
 		{
 			WaterResult r;
 			if (!ComputeWater(a_frame, a_geometry, r, a_detail))
-				return "its water constants could not be computed";
+				return a_detail.starts_with("no water shader for") ? kBuilding : "its water constants could not be computed";
 			Draw draw{};
 			draw.shader = Shader::Water;
 			// The vertex stage reads Wading, which State strips from the pixel descriptor, so the key is the vertex descriptor (the water
