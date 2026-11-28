@@ -244,6 +244,11 @@ stays under 4.6. Native's flickering river reaches 54 with 68-138 tiles. The con
 Capturing costs native and d3d11 1-16% of the frame time (Dev-Fast) and guest up to 60%: compare `pre_frame_ms` and
 `burst_frame_ms` before reading a pacing-sensitive result.
 
+Bursts after loads (`docs/development/plans/post-corrupt.md`): cadence-drop-cells, native-interior, land-cocs, native-tour and
+first-person-switch burst from `held-frame` (or `load-start` after a nearby coc, whose Presents are held) through world-ready; the
+save's load is burst after the pinned steps stop the guard fight, which flickers in every mode. Frames whose present a load hold
+keeps back are never on screen and are not taken. Plain D3D11 has no `held-frame`.
+
 ### Snapshot detectors
 
 The game writes two more reports at exit: `report.engine_reads` (live engine reads per world frame, by category and feature;
