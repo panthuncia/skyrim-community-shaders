@@ -311,6 +311,16 @@
 			"description": ""
 		},
 		{
+			"name": "BASICRHI_VK_VIEW_REF_POISON",
+			"key": "",
+			"type": "string",
+			"default": "",
+			"choices": [],
+			"kind": "other",
+			"family": "basicrhi",
+			"description": "1: a released buffer view ref pair covers an unbound address range that names it, so a stale ref faults there and the fault report names the pair (snap7-devloss5)"
+		},
+		{
 			"name": "CS_AB_PROBE",
 			"key": "",
 			"type": "string",
