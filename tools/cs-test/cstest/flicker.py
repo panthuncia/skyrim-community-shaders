@@ -10,8 +10,8 @@ measures are taken per tile, in 8-bit luma:
   |s - a|, less |a - b| (what did not come back). Motion and eye adaptation move one way, so they score 0; noise (TAA
   jitter, water ripples) scores a little everywhere. A tile's spike at a frame is its cells' mean spike.
 
-A tile flickers at a frame when its spike is over SPIKE (the event threshold). The burst's numbers are the worst tile spike,
-the tiles with events in at least two frames (repeated flicker), the median tile spike (the noise floor), the frame-mean
+A tile has an event at each one-frame spike over SPIKE, and at each two-frame hold over it that is not made of one-frame spikes.
+The burst's numbers are the worst tile spike, the tiles with two or more events (repeated flicker), the median tile spike (the noise floor), the frame-mean
 spike (whole-frame pumping), and the frame times before and during the burst (what capturing cost).
 `expect.flicker` fails a run whose burst is over its limits (see check).
 """
@@ -150,17 +150,18 @@ def analyse(burst_dir):
                 change_max[t], change_frame[t] = v, i + 1
     change_mean = [s / (n - 1) for s in change_sum]
 
-    # Flicker: per tile and frame, the largest hold's spike.
-    spike = [[0.0] * tiles for _ in range(n)]
+    # Flicker: per hold, tile and frame, the spike; spike[f][t] is the largest hold's.
+    by_hold = {k: [[0.0] * tiles for _ in range(n)] for k in HOLDS}
     for k in HOLDS:
         for f in range(1, n - k):
             held = grids[f] if k == 1 else [sum(v) / k for v in zip(*grids[f:f + k])]
-            tile_spikes = _tile_means(_spikes(grids[f - 1], held, grids[f + k]), index, counts)
-            row = spike[f]
-            for t, v in enumerate(tile_spikes):
-                if v > row[t]:
-                    row[t] = v
-    events = [[f for f in range(n) if spike[f][t] > SPIKE] for t in range(tiles)]
+            by_hold[k][f] = _tile_means(_spikes(grids[f - 1], held, grids[f + k]), index, counts)
+    spike = [[max(by_hold[k][f][t] for k in HOLDS) for t in range(tiles)] for f in range(n)]
+    one, two = by_hold[1], by_hold[2]
+    # A tile's events: one-frame spikes over the threshold, and two-frame holds whose frames are not one-frame spikes themselves
+    # (a one-frame spike also scores, at half, as a hold that includes it).
+    events = [[f for f in range(n) if one[f][t] > SPIKE or (two[f][t] > SPIKE and one[f][t] <= SPIKE and (f + 1 >= n or one[f + 1][t] <= SPIKE))]
+              for t in range(tiles)]
     peak = [max(spike[f][t] for f in range(n)) for t in range(tiles)]
     peak_frame = [max(range(n), key=lambda f, t=t: spike[f][t]) for t in range(tiles)]
     flagged = [t for t in range(tiles) if len(events[t]) >= 2]
@@ -248,7 +249,7 @@ def check_run(contract, harness, run_dir):
             result["failures"].append(f"burst {name}: flicker spike {found['max_spike']} over {limits['max_spike']} at x {at['x'][0]}-{at['x'][1]}, "
                                       f"y {at['y'][0]}-{at['y'][1]}, frame {at['frame']['index']}")
         if "max_tiles" in limits and found.get("flicker_tiles", 0) > limits["max_tiles"]:
-            result["failures"].append(f"burst {name}: {found['flicker_tiles']} tiles flicker in two or more frames, at most {limits['max_tiles']}")
+            result["failures"].append(f"burst {name}: {found['flicker_tiles']} tiles flicker two or more times, at most {limits['max_tiles']}")
     return result
 
 

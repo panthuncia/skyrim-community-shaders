@@ -114,6 +114,10 @@ The shipped configs:
 | `sao-cs`, `sao-cs-downscaled` | the engine's compute SAO (`bSAO_CS_Enable`, then also `bSAO_CS_Downscaled`, set through `[prefs_ini]`), a shot in third and first person: its four dispatches are post chain steps; compose it, `guest+sao-cs`, `native-vulkan+sao-cs` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
 | `cadence-repeat`, `cadence-drop` | the snapshot cadence test mode (`snapshot.cadence`, native only): the render half runs three times per game update, or for one update in three; a shot after settling, after a turn and once settled again; compose them, `native-vulkan+cadence-repeat` |
+| `flicker-scenes` | a 60-frame burst (see Bursts and flicker) in each pinned still scene: the autoloaded save (grass, trees, shadows), the sky above it, Riverwood's river down and along it (water), Whiterun (shadows) and Dragonsreach (an interior), with `expect.flicker` limits; compose it, `d3d11+flicker-scenes` (the reference), `guest+flicker-scenes`, `native-vulkan+flicker-scenes`, `native-vulkan+flicker-scenes+cap30`, and with `--set game.uncapped=true` |
+| `flicker`, `flicker-taa`, `flicker-dlss`, `flicker-none` | a 120-frame burst at the pinned save scene, with that upscale method; `native-flicker*` and `native-d3d12-flicker*` compose them with a mode |
+| `river-flicker` | 120-frame bursts down at Riverwood's river and along it |
+| `cap30` | the update-rate cap at 30, no steps: compose it after a scenario, `native-vulkan+flicker-scenes+cap30` |
 | `cadence-still` | the cadence shot comparison's steps: god mode, AI off, time stopped, a shot in Dragonsreach and one in Whiterun once each settled; `cadence.py` (below) runs it with the cadence off and on |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
 | `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |
@@ -189,6 +193,56 @@ fails when more than 23% of its tiles are wrong, or its mean lightness moved by 
 The failure says how many tiles of which kind and where, for example
 `shot start: 89 of 144 tiles wrong: 49 dark by 86 (x 0-1320, y 0-720), 39 flat (detail 1.3, reference 20.4; x 0-1920, y 0-1080)`.
 The thresholds come from 741 good pairs and 525 quarter-frame pairs of 2026-11-26's runs (`docs/development/plans/snap3-shotref.md`).
+
+### Bursts and flicker
+
+A `burst` step captures consecutive rendered frames on the render side, for flicker that lasts one frame (screen captures are too
+slow for that, and shots are about a dozen frames apart because each waits for its readback).
+
+```toml
+[[steps]]
+at = "previous"
+frames = 300
+do = "burst"
+arg = "river:60"        # <name>:<count>[:grid], a count of 3-600; grid: no PNGs
+
+[expect.flicker]
+max_spike = 20          # the worst tile spike, 8-bit luma
+max_tiles = 8           # tiles with two or more flicker events
+min_frames = 50         # optional: frames with a grid
+```
+
+- The game (`src/Features/Screenshot/Burst.*`, `ScreenshotFeature::StepBurst`) takes the next Presents from the first that renders the
+  step's snapshot or newer, one capture a Present. Graph modes (guest and native) copy each frame into a ring of twelve readback
+  buffers on the render graph; plain D3D11 uses staging copies. Nothing waits for the GPU. A frame that cannot be taken (the ring
+  full) is skipped and listed, never copied with D3D11 in a graph mode.
+- Each frame is labelled with its Present, render frame, snapshot and whether it repeats the previous frame's snapshot, so repeats and
+  fresh renders are told apart. The screenshot worker reduces it to a 240x135 grid of cell lumas (8x8 pixels at 1080p) and saves a
+  PNG unless the arg ends in `grid`.
+- `<run>/bursts/<name>/` holds `burst.json` (frames, skipped frames, the median frame time before the burst), `grid.bin` and the PNGs.
+  The harness keeps the first frame's PNG and those around the three worst tiles' spikes, and deletes the rest.
+- The step after a burst waits until its files are written (as after a shot).
+
+`cstest/flicker.py` scores each burst in 40x40 pixel tiles (48x27 at 1080p), in 8-bit luma:
+
+- **change**: a tile's mean absolute change from one frame to the next. Motion, noise and flicker all raise it.
+- **spike**: a jump that comes back. For each cell and each frame, the value held for one or two frames against the frames before
+  and after: when it is above both or below both, the smaller of the two jumps, less what did not come back. Camera motion and eye
+  adaptation move one way and score nothing. A tile's spike is its cells' mean.
+- A tile has an **event** at each one-frame spike over 6, and at each two-frame hold over 6 that is not made of one-frame spikes. It
+  **flickers** with two or more events; a single broken frame has events but flickers nowhere, so `max_spike` catches it. The burst reports the worst spike with its tile and frame, the
+  flickering tiles, the noise floor (median spike), the frame-mean spike (the whole frame pumping), a tile map (`#` flickering, `+`
+  one event, `o` over 3) and the frame time before and during the burst (`slowdown`).
+
+`result.json`'s `flicker` has every burst's measures and the failures; the summary line gets one clause per burst, for example
+`burst river: spike 53.84 at 1400,560 f49, 68 flickering tiles, change 0.6, x1.07 frame time`. Score a run again with
+`python tools/cs-test/cstest/flicker.py <run folder or burst folder>`.
+
+Calibration (2026-11-28, `docs/development/plans/post-flicker.md`): d3d11 and guest at the `flicker-scenes` scenes have a noise floor
+of 0.01 and a worst spike of 14.8, Riverwood's turning water wheel at 25 frames a second, with 3 tiles flickering; every other scene
+stays under 4.6. Native's flickering river reaches 54 with 68-138 tiles. The configs use `max_spike = 20`, `max_tiles = 8`.
+Capturing costs native and d3d11 1-16% of the frame time (Dev-Fast) and guest up to 60%: compare `pre_frame_ms` and
+`burst_frame_ms` before reading a pacing-sensitive result.
 
 ### Snapshot detectors
 
