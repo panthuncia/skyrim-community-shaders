@@ -519,17 +519,30 @@ bool SkySync::Update(const RE::Sky* sky)
 	return transitionCompleted || casterSettled;
 }
 
+void SkySync::PublishWorkingLightColors(const std::optional<std::array<RE::NiColor, 3>>& a_colors)
+{
+	const std::scoped_lock lock(workingLightColorsLock);
+	workingLightColors = a_colors;
+}
+
+std::optional<std::array<RE::NiColor, 3>> SkySync::WorkingLightColors() const
+{
+	const std::scoped_lock lock(workingLightColorsLock);
+	return workingLightColors;
+}
+
 void SkySync::ApplyLightColor(const RE::Sky* sky) const
 {
 	// Without an override the sun light keeps the weather sunlight, already cleared for this frame in Sky_Update
-	if (!workingLightColors)
+	const auto workingColors = WorkingLightColors();
+	if (!workingColors)
 		return;
 
 	const auto [source, target] = GetLightBodies();
 	auto bodyLight = [&](Caster body) {
 		const int idx = static_cast<int>(body);
 		// Only a moon's phase: its horizon dim already comes through currentDim
-		return (*workingLightColors)[idx] * (body == Caster::Sun ? 1.0f : colors[idx].w);
+		return (*workingColors)[idx] * (body == Caster::Sun ? 1.0f : colors[idx].w);
 	};
 	const float sourceShare = shadowFader.sourceShare;
 	const RE::NiColor color = bodyLight(source) * sourceShare + bodyLight(target) * (1.0f - sourceShare);

@@ -2029,7 +2029,15 @@ void PhysicalSky::Reset()
 	const float shadowBottomKm = settings.cloudLayer.low.GetShadowBottomKm(lowCloudBaseKm, settings.shadowVolumeRange, kShadowVolW);
 	const float lowCloudThicknessKm = lowCloudTopKm - shadowBottomKm;
 	auto& skySync = globals::features::skySync;
-	skySync.workingLightColors = std::nullopt;
+	// The light colours are published once, at the end, never cleared in between: the game side's Sky::Update reads them while this
+	// runs on the render thread in native, and a cleared value there lit one snapshot with the weather's sunlight (post-sun.md).
+	std::optional<std::array<RE::NiColor, 3>> lightColors;
+	struct Publish
+	{
+		SkySync& skySync;
+		const std::optional<std::array<RE::NiColor, 3>>& colors;
+		~Publish() { skySync.PublishWorkingLightColors(colors); }
+	} publish{ skySync, lightColors };
 
 	auto& linearLighting = globals::features::linearLighting;
 
@@ -2060,8 +2068,6 @@ void PhysicalSky::Reset()
 
 	if (!allGood) {
 		lightning.Update(*this, worldspaceID, false);
-		if (skySync.loaded && skySync.settings.Enabled)
-			skySync.workingLightColors = std::nullopt;
 		// Some shader paths read cloud shadow and lightning fields without checking enabled, so clear them all
 		cbData = {};
 		volMainHistoryValid = false;
@@ -2164,7 +2170,7 @@ void PhysicalSky::Reset()
 			color /= pbrCompensationMult;
 			return RE::NiColor(color.x, color.y, color.z);
 		};
-		skySync.workingLightColors = std::array{
+		lightColors = std::array{
 			LightConvFn(cbData.sunlightColor),
 			LightConvFn(cbData.masserColor),
 			LightConvFn(cbData.secundaColor)
