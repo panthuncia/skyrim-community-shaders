@@ -24,6 +24,8 @@ namespace DCLF::Reports
 			c.frames, c.sampled / n, c.settled / n, c.seeded / n, c.rowsChanged / n, c.skins / n, c.paletteRowsChanged / n, c.shadingSampled / n, c.shadingChanged / n,
 			c.wetnessChanged / n, c.runs / n, c.bytes / n / 1024.0, c.sampleUs / n, c.uploadUs / n, c.maxTotalUs, c.refused, c.defects,
 			c.failures, c.reusedInFlight, PooledBackings::SceneCopies());
+		if (c.stillRows || c.stillBlocks || c.aheadUploads)
+			line += fmt::format("; {} rows and {} palette blocks drawn still (repeats), {} uploads sent a later ticket's rows", c.stillRows, c.stillBlocks, c.aheadUploads);
 		// Late poses. Hidden nodes found, and the plans and rows they shrank.
 		if (const auto late = LatePoses::TakeReport(); !late.empty())
 			line += "; " + late;

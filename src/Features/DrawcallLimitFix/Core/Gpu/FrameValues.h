@@ -207,6 +207,8 @@ namespace DCLF
 			// Producers that reused a copy a frame in flight still bound. Their uploads waited for it on the GPU.
 			std::uint64_t reusedInFlight = 0;
 			std::uint64_t plans = 0, planResets = 0, planItems = 0;
+			// Native: rows and palette blocks a repeated render drew still, and uploads that sent a later ticket's rows than their own.
+			std::uint64_t stillRows = 0, stillBlocks = 0, aheadUploads = 0;
 		};
 		/** @brief Takes and resets the counters. */
 		Counters TakeCounters();
