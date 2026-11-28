@@ -438,7 +438,17 @@ namespace DCLF::LoadHold
 		return (now == HoldState::Holding || now == HoldState::Releasing) && withMenu.load(std::memory_order_relaxed);
 	}
 
-	bool PresentsHeld() { return state.load(std::memory_order_acquire) == HoldState::Holding && !withMenu.load(std::memory_order_relaxed); }
+	bool PresentsHeld()
+	{
+		const auto now = state.load(std::memory_order_acquire);
+		const bool menu = withMenu.load(std::memory_order_relaxed);
+		// Guest's main thread draws the world under the kept loading menu, which does not cover it: those frames would show the world
+		// half drawn (DCLF's classes withheld). The last loading screen frame stays on screen until the menu closes. Native draws no
+		// world while its snapshot's loading menu is open.
+		if (menu && !::RenderGraph::Engine::Native::Active())
+			return now == HoldState::Holding || now == HoldState::Releasing;
+		return now == HoldState::Holding && !menu;
+	}
 
 	void NoteHeld(View a_view)
 	{
