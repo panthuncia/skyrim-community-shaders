@@ -135,4 +135,4 @@ do = "exit"
 reach = "world-ready"
 shots = ["start", "whiterun", "dragonsreach"]
 
-shot_refs = ["start", "whiterun"]   # not dragonsreach: native draws the hearth fire as a ceiling-high orange column (post-refs.md, B1)
+shot_refs = ["start", "whiterun", "dragonsreach"]

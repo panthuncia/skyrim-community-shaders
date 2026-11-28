@@ -163,4 +163,4 @@ do = "exit"
 reach = "world-ready"
 shots = ["river-noon", "river-sky-noon", "sky-night", "dragonsreach"]
 
-shot_refs = ["river-noon", "sky-night"]   # not dragonsreach (B1, the hearth fire) or river-sky-noon (B3, the player not faded at the camera); post-refs.md
+shot_refs = ["river-noon", "sky-night", "dragonsreach"]   # not river-sky-noon: native draws the player solid at the camera (post-refs.md, B3)

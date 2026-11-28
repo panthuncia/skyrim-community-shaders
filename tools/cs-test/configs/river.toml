@@ -106,4 +106,4 @@ do = "exit"
 reach = "world-ready"
 shots = ["river", "river-east"]
 
-shot_refs = ["river"]   # not river-east: native draws an orange haze over Riverwood's smelter (post-refs.md, B1)
+shot_refs = ["river", "river-east"]

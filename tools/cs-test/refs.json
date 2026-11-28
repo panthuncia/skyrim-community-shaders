@@ -108,9 +108,9 @@
     "accepted": "2026-11-27"
   },
   "guest+map/whiterun": {
-    "sha256": "3b9938102c62f1cad7716fdc82bc30aa744b34fa1ad075d7ea0cad2ea07f039e",
+    "sha256": "ea4d09c45a2e9d86f2936fd0da49ca03be39a31c5c64dc9b6c48ac08f4d69f72",
     "size": "1920x1080",
-    "run": "1127-004543-s7-map-guest-map-s7-map-fin-guest-map",
+    "run": "1127-215645-post-bugs-guest-map-post-bugs-ref-guest-map",
     "accepted": "2026-11-27"
   },
   "guest+menu-book/book-open": {
@@ -186,9 +186,9 @@
     "accepted": "2026-11-27"
   },
   "native-d3d12+map/whiterun": {
-    "sha256": "c966fea2f02b698b052eb22b6a7ffb02a9021db4c4e3a7541a3b7762f47a1e39",
+    "sha256": "f72d0c2209c00e256cb367188a7e5a25e92dbd878cd37c93f5cc45bcf7bcdc9b",
     "size": "1920x1080",
-    "run": "1127-004805-s7-map-native-d3d12-map-s7-map-fin-d3d12-map",
+    "run": "1127-220114-post-bugs-native-d3d12-map-post-bugs-ref2-native-d3d12-map",
     "accepted": "2026-11-27"
   },
   "native-d3d12-quick/start": {
@@ -196,6 +196,12 @@
     "size": "1920x1080",
     "run": "1126-185705-dir-native-d3d12-quick-dir-s7dk-native-d3d12-quick",
     "accepted": "2026-11-26"
+  },
+  "native-vulkan+cadence-drop-cells/dragonsreach": {
+    "sha256": "2eb9e96fe6f81adf6396dedd328e1e0281c820535a54d4d49460ee4de7a399de",
+    "size": "1920x1080",
+    "run": "1127-214421-post-bugs-native-vulkan-cadence-drop-cells-post-bugs-ref-cadence-drop-cells",
+    "accepted": "2026-11-27"
   },
   "native-vulkan+cadence-drop-cells/riverwood": {
     "sha256": "bc55c7781febf20e33c0008860ad6749eb6491c4aa8a2c6d7e18adba9e03b54a",
@@ -225,6 +231,12 @@
     "sha256": "e868457375d75e8c81de3d4835c72200a60af6b10184db080b8258773a841050",
     "size": "1920x1080",
     "run": "1127-184827-post-refs-native-vulkan-cloud-shadows-post-refs-n2-cs",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+cloud-shadows/interior": {
+    "sha256": "36656feddde748776e5b561519db5e9a90af154ebc99cfba3b3a929945ca2263",
+    "size": "1920x1080",
+    "run": "1127-220234-post-bugs-native-vulkan-cloud-shadows-post-bugs-ref2-cloud-shadows",
     "accepted": "2026-11-27"
   },
   "native-vulkan+facegen/racemenu": {
@@ -438,33 +450,45 @@
     "accepted": "2026-11-26"
   },
   "native-vulkan+native-interior/dragonsreach": {
-    "sha256": "b025bfa7423a8ebd43270201d12258e67b8777f22ff3b64011fd60259f7a06ef",
+    "sha256": "7fc32e8670fad137027977bbe4b9ad9742a11b831824dd3bbdce9abecace32fa",
     "size": "1920x1080",
-    "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
+    "run": "1127-213530-post-bugs-native-vulkan-native-interior-post-bugs-fix1-nvk-ni",
     "accepted": "2026-11-27"
   },
   "native-vulkan+native-interior/dragonsreach2": {
-    "sha256": "108bb7c8a71c91c66aeefede8c82d44f8510166f1bb6b42b6a88785f3dbee3df",
+    "sha256": "17b236ab9a26ce01626cb8f15c47707d9d86d16dd8cd9bb8312cc531eedfb334",
     "size": "1920x1080",
-    "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
+    "run": "1127-213530-post-bugs-native-vulkan-native-interior-post-bugs-fix1-nvk-ni",
     "accepted": "2026-11-27"
   },
   "native-vulkan+native-interior/vl-custom": {
-    "sha256": "0d22c1f3732d5b7eed2ca7fb20926d6b1570124595f3ffe73907ea505a554a2c",
+    "sha256": "d40e242bfa312084820030b97e0a1fefedeac945c36c1b180c24bcfe5717cd7c",
     "size": "1920x1080",
-    "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
+    "run": "1127-213530-post-bugs-native-vulkan-native-interior-post-bugs-fix1-nvk-ni",
     "accepted": "2026-11-27"
   },
   "native-vulkan+native-interior/vl-exterior": {
-    "sha256": "5861b2283ba5e61b4a8586f693ab4a404353df3744c7c8392641b7dab2e08cde",
+    "sha256": "f9ff58170901040b242e8d40af5cb361fcdf93caba702dd460c7f3cdc7ceefbe",
     "size": "1920x1080",
-    "run": "1127-085427-dir-native-vulkan-native-interior-dir-s7t2-ni3",
+    "run": "1127-213530-post-bugs-native-vulkan-native-interior-post-bugs-fix1-nvk-ni",
     "accepted": "2026-11-27"
   },
   "native-vulkan+native-river/river": {
     "sha256": "dc407aeb1bb2ff52be8c1d0931a2dbf510e4a928de44f11e1162d0ec5d894086",
     "size": "1920x1080",
     "run": "1127-175223-post-refs-native-vulkan-native-river-post-refs-n1-river",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+native-river/river-east": {
+    "sha256": "555406cd0a30c4c5d88308f93c4a16b1e4fdd7e472568612e8c586094fbb3980",
+    "size": "1920x1080",
+    "run": "1127-214800-post-bugs-native-vulkan-native-river-post-bugs-ref-native-river",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+native-tour/dragonsreach": {
+    "sha256": "0d6bb7b70c58ae7ed5f69c843193bbca6a8962d2de524d6120e9c1c9bd9c10fe",
+    "size": "1920x1080",
+    "run": "1127-213914-post-bugs-native-vulkan-native-tour-post-bugs-ref-native-tour",
     "accepted": "2026-11-27"
   },
   "native-vulkan+native-tour/start": {
@@ -641,6 +665,12 @@
     "run": "1127-172256-post-refs-native-vulkan-shadows-blend-post-refs-n1-sb",
     "accepted": "2026-11-27"
   },
+  "native-vulkan+sky-native/dragonsreach": {
+    "sha256": "69a54f1a483974c10f0cb654a58eb9a1e58a151aebaef1483bfac4a807844624",
+    "size": "1920x1080",
+    "run": "1127-215240-post-bugs-native-vulkan-sky-native-post-bugs-ref-sky-native",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+sky-native/river-noon": {
     "sha256": "a566499f74b02f53620127b1977ae94b5791fe7b63dd317b55c571b3877734d9",
     "size": "1920x1080",
@@ -657,6 +687,12 @@
     "sha256": "4137d79530782e8ca748745e8a5f4d53729ffb5835a7cfe5c23fa4725250868f",
     "size": "1920x1080",
     "run": "1127-175430-post-refs-native-vulkan-taa-water-post-refs-n1-taaw",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+taa-water/river-east": {
+    "sha256": "bde001c3efe1cb09e800cca5bd4219e160dd11a0c5b6d809a759cf3a7907efc7",
+    "size": "1920x1080",
+    "run": "1127-215014-post-bugs-native-vulkan-taa-water-post-bugs-ref-taa-water",
     "accepted": "2026-11-27"
   },
   "native-vulkan+ui-menus/console": {

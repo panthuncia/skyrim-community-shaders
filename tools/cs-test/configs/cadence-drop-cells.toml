@@ -95,4 +95,4 @@ do = "exit"
 reach = "world-ready"
 shots = ["whiterun", "dragonsreach", "riverwood"]
 
-shot_refs = ["whiterun", "riverwood"]   # not dragonsreach: native's hearth fire column (post-refs.md, B1)
+shot_refs = ["whiterun", "dragonsreach", "riverwood"]

@@ -119,4 +119,4 @@ shots = ["river", "river-east"]
 # A step whose planned state differs from the engine's (CheckStepState) logs this once per effect.
 no_log = ["frame tap error", "differs from the engine's state at its first draw"]
 
-shot_refs = ["river"]   # not river-east: native's orange haze over Riverwood's smelter (post-refs.md, B1)
+shot_refs = ["river", "river-east"]
