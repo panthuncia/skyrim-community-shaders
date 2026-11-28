@@ -86,8 +86,9 @@ namespace RenderGraph::Engine::Native::RenderThread
 	void Park(ParkReason a_reason);
 
 	/**
-	 * @brief Render thread: waits for the GPU work of the render before this one, once per render. DCLF's depth commit calls it:
-	 * without it a render overlapping the one before lost the device (snap7-devloss.md). Elsewhere it returns at once.
+	 * @brief Render thread: waits for the GPU work of the render before this one, once per render: its own last render, or after a park
+	 * what the game thread submitted while parked. DCLF's depth commit calls it: without it a render overlapping the one before lost
+	 * the device (snap7-devloss.md, snap7-devloss7.md). Elsewhere it returns at once.
 	 */
 	void WaitForLastRender();
 

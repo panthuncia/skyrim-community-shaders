@@ -55,6 +55,8 @@ namespace RenderGraph::Engine::Native::RenderThread
 			bool started = false;
 			bool parkAsked = false;  // a producer asked the render thread to stop after its frame
 			bool parked = false;     // the render thread stopped (or has not rendered yet)
+			// The GPU point of what the game thread submitted while the render thread was parked, set when it releases the park.
+			std::optional<::org::GraphHost::GpuPoint> parkedRenders;
 			std::atomic<bool> running{ false };
 			// Parks by producer since the last line, and the producers' wait.
 			std::uint64_t parks = 0;
@@ -88,6 +90,11 @@ namespace RenderGraph::Engine::Native::RenderThread
 						thread.changed.wait(lock, [&] { return !thread.parkAsked; });
 						thread.parked = false;
 						thread.running.store(true, std::memory_order_release);
+						// The game thread's renders while parked are the last renders before this one: the first depth commit waits
+						// for them as it waits for this thread's own last render.
+						if (thread.parkedRenders)
+							t_lastRender = std::move(thread.parkedRenders);
+						thread.parkedRenders.reset();
 					}
 				}
 				RenderHalf();
@@ -517,6 +524,8 @@ namespace RenderGraph::Engine::Native::RenderThread
 		}
 		if (thread.parkAsked) {
 			thread.parkAsked = false;
+			if (thread.parked)
+				thread.parkedRenders = ::RenderGraph::Frame::Retirement::SubmittedGpuPoint();
 			thread.changed.notify_all();
 		}
 	}
