@@ -187,6 +187,7 @@ namespace DCLF::Features::ShadowMask
 		std::string why;
 		if (!Native::Build(View::World, *run, lights.lights, lights.mask, lights.sun, why))
 			::RenderGraph::Fatal("shadow masks", std::format("native's world masks cannot be built: {}", why));
+		WatchSun(set, *run);
 		SubmitMaskRunWithSun(View::World, lights.lights, std::move(run));
 	}
 

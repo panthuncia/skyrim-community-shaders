@@ -154,6 +154,12 @@ namespace DCLF::Features::ShadowMask
 	void DrawWorldMasks(const float a_clear[4]);
 
 	/**
+	 * @brief Native, at the world masks once their run is built: logs the sun's inputs (mask flags, the set's sun, its cascades, the
+	 * frame's sun light) that changed since the last world render, a diagnostic for the rare render with no sunlight (SunWatch.cpp).
+	 */
+	void WatchSun(const Shadows::Native::LightSet* a_set, const Run& a_run);
+
+	/**
 	 * @brief Native: a menu scene's shadow masks (UI3DSceneManager::Render's call of SE 51856 / AE 52728) for a render CS draws itself, with
 	 * no engine function called. kSHADOW_MASK is cleared, the draws are built from the menu scene node's kept shadow lights with the menu
 	 * camera's eye a_eye, and they run at the anchor. Fatal when they cannot be built. Render owner.
