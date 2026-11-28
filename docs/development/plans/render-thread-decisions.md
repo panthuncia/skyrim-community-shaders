@@ -1481,3 +1481,18 @@ pushes until the user is back.
      CPU-pipeline flag and the batches. A crash on the loading-screen thread is the engine's: `BSDirectInputManager::
      GetDeviceData` (AE 68678) ignores a failed DirectInput read and Poll reads unwritten entries; no CS change. Merge check
      7/7 (native-tour logged a fault address while passing: snap7-devloss8).
+
+## 2026-11-28: the render side reads its ticket's portal walk (post-f2; director accepted)
+
+257. **Native's render side reads the main portal walk from its ticket** (`post-f2.md`; F2). Dragonsreach draws through
+     DCLF's CPU pipeline; the CPU fade stage's kick copied `PortalViews::Encoded()` on the render thread while the game
+     thread's next `Main::Update` walk rewrote it in place, so about one repeat render in 1,500 culled most of the near scene
+     (portal test rejected 1744 lanes instead of 937). The room map behind `ProgramOf`/`ProgramsVersion` had the same race.
+     The game half puts its main portal context in `TicketPart::Portals`; `PortalViews::FrameContext()`/`FramePrograms()`
+     give native's render side the ticket's context (guest and same-thread frames read the last walk); the room map is
+     immutable, replaced whole on a graph change. `Encoded()` and `MainContext()` log once when read off the walk's thread.
+     dragonsreach-bursts: 0 breaks in 48 bursts (Vulkan and D3D12, frustum and occlusion). Open (post-stamp): StampFrustum's
+     "in view last frame" is stamp-1 though consecutive renders' stamps can differ by 2; the GPU programs publication still
+     falls back to `Encoded()`. Merge check 7/9: native-interior and first-person-switch pass again; flicker-scenes' river
+     caught a fresh render without sunlight (post-sun) and cadence-drop-cells' load into Dragonsreach a ghosted fresh frame
+     followed by a repeat without the player (post-ghost).
