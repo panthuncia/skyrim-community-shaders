@@ -4,6 +4,7 @@
 #include "Snapshot/EngineReads.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
@@ -15,6 +16,7 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "Snapshot/Publication.h"
 #include "Testing/Testing.h"
+#include "TextureStreaming/Streamer.h"
 
 #include <algorithm>
 #include <array>
@@ -415,6 +417,20 @@ namespace DCLF::LoadHold
 	}
 
 	bool Active() { return state.load(std::memory_order_acquire) == HoldState::Holding; }
+
+	std::string DescribeWaiting()
+	{
+		const auto* publication = Scene::FrameView::Get().InstalledPublication();
+		if (!publication)
+			return "no installed publication";
+		const auto imports = GpuTextures::Get().GetStats();
+		const auto streaming = TextureStreaming::GetStats();
+		return fmt::format(
+			"publication {} (committed at scene frame {}, settled {}), objects waiting: {}; imports pending {}, answered {}; streamed textures {}, with a "
+			"window {}, graph windows {}, retried {}, load failures {}",
+			publication->sequence, publication->commitFrame, publication->settled, WaitingText(publication), imports.requestsPending, imports.requestsAnswered,
+			streaming.textures, streaming.withWindow, streaming.graphWindows, streaming.graphRetried, streaming.loadFailures);
+	}
 
 	bool MenuHeld()
 	{

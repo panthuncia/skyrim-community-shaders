@@ -8,6 +8,8 @@
 
 #include <PCH.h>
 
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Scene/FrameAudit.h"
 #include "Features/HDRDisplay.h"
 #include "Features/PhysicalSky.h"
 #include "Features/Screenshot/Avif.h"
@@ -17,6 +19,7 @@
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "RenderGraph/Switches.h"
+#include "Snapshot/FrameCamera.h"
 #include "Snapshot/Publication.h"
 #include "State.h"
 #include "Utils/Clipboard.h"
@@ -939,8 +942,16 @@ void ScreenshotFeature::ProcessCaptureRequest()
 		} else {
 			captureDeferred = false;
 			// A scripted shot names the snapshot its frame rendered (cs-test's cadence comparison reads it).
-			if (!captureOutputPath.empty())
-				logger::info("[TEST] shot {} rendered snapshot {} (render frame {})", captureOutputPath.stem().string(), Snapshot::CurrentId(), Snapshot::Render().frame);
+			if (!captureOutputPath.empty()) {
+				// The eye the frame drew with, to compare with the player's place the shot step logged, and in native what DCLF still withholds.
+				const auto& camera = Snapshot::FrameCamera::Main();
+				const auto& eye = camera.GetCameraPosAdjust();
+				const auto& view = camera.GetCameraView();
+				logger::info("[TEST] shot {} rendered snapshot {} (render frame {}), eye {:.0f} {:.0f} {:.0f}, view rows ({:.2f} {:.2f} {:.2f}) ({:.2f} {:.2f} {:.2f}) ({:.2f} {:.2f} {:.2f}){}",
+					captureOutputPath.stem().string(), Snapshot::CurrentId(), Snapshot::Render().frame, eye.x, eye.y, eye.z, view._11, view._12, view._13, view._21,
+					view._22, view._23, view._31, view._32, view._33,
+					Snapshot::FrameCamera::Owned() ? "; " + DCLF::LoadHold::DescribeWaiting() + "; " + DCLF::Diagnostics::AuditFrameRows() : std::string());
+			}
 			try {
 				Capture();
 			} catch (const std::exception& e) {

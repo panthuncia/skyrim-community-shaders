@@ -105,9 +105,28 @@ frames = 0
 do = "console"
 arg = "fw 81a"
 
+# Where the player is after the coc (B5: the player once ended up below the land).
 [[steps]]
 at = "previous"
-frames = 400
+frames = 0
+do = "place"
+arg = "exterior +0"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "place"
+arg = "exterior +30"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "place"
+arg = "exterior +130"
+
+[[steps]]
+at = "previous"
+frames = 270
 do = "shot"
 arg = "vl-exterior"
 
