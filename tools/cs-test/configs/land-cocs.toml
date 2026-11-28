@@ -1,0 +1,556 @@
+# B5 hunt: the suite scene, then five rounds of native-interior's steps (Dragonsreach with its shots and Volumetric Lighting's
+# custom interior size, a coc back out to Whiterun), the place logged and two shots after each coc back out, then
+# one with frustum culling only and one with occlusion culling again (DCLF's epochs are built again for each). Native Vulkan.
+extends = ["native-vulkan"]
+
+# God mode first: a hostile NPC in the save can kill the player before the shots.
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+# AI off: the save's hostile guards follow into Dragonsreach and fight, which makes the shots differ between runs.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+# The rest of the suite's pinned scene (see first-person-switch): combat off, time stopped at 13:00 (the sun shafts through
+# Dragonsreach's windows move with the hour), the weather locked, the Health Low tutorial closed.
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.restoreav health 1000"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "menu"
+arg = "Tutorial Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "console"
+arg = 'coc WhiterunDragonsreach'
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "shot"
+arg = 'inside-0'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = 'inside-0b'
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "setting"
+arg = 'VolumetricLighting.InteriorCustomSize={"Width":256,"Height":160,"Depth":60}'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'VolumetricLighting.InteriorQuality=3'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = 'inside-0c'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = 'coc Whiterun'
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = 'fw 81a'
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "place"
+arg = 'exterior 0 +30'
+
+[[steps]]
+at = "previous"
+frames = 370
+do = "shot"
+arg = 'exterior-0'
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = 'exterior-0b'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = 'frustum'
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = 'exterior-0e'
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = 'occlusion'
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = 'exterior-0f'
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'VolumetricLighting.InteriorQuality=2'
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "console"
+arg = 'coc WhiterunDragonsreach'
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "shot"
+arg = 'inside-1'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = 'inside-1b'
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "setting"
+arg = 'VolumetricLighting.InteriorCustomSize={"Width":256,"Height":160,"Depth":60}'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'VolumetricLighting.InteriorQuality=3'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = 'inside-1c'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = 'coc Whiterun'
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = 'fw 81a'
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "place"
+arg = 'exterior 1 +30'
+
+[[steps]]
+at = "previous"
+frames = 370
+do = "shot"
+arg = 'exterior-1'
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = 'exterior-1b'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = 'frustum'
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = 'exterior-1e'
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = 'occlusion'
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = 'exterior-1f'
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'VolumetricLighting.InteriorQuality=2'
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "console"
+arg = 'coc WhiterunDragonsreach'
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "shot"
+arg = 'inside-2'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = 'inside-2b'
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "setting"
+arg = 'VolumetricLighting.InteriorCustomSize={"Width":256,"Height":160,"Depth":60}'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'VolumetricLighting.InteriorQuality=3'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = 'inside-2c'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = 'coc Whiterun'
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = 'fw 81a'
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "place"
+arg = 'exterior 2 +30'
+
+[[steps]]
+at = "previous"
+frames = 370
+do = "shot"
+arg = 'exterior-2'
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = 'exterior-2b'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = 'frustum'
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = 'exterior-2e'
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = 'occlusion'
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = 'exterior-2f'
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'VolumetricLighting.InteriorQuality=2'
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "console"
+arg = 'coc WhiterunDragonsreach'
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "shot"
+arg = 'inside-3'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = 'inside-3b'
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "setting"
+arg = 'VolumetricLighting.InteriorCustomSize={"Width":256,"Height":160,"Depth":60}'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'VolumetricLighting.InteriorQuality=3'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = 'inside-3c'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = 'coc Whiterun'
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = 'fw 81a'
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "place"
+arg = 'exterior 3 +30'
+
+[[steps]]
+at = "previous"
+frames = 370
+do = "shot"
+arg = 'exterior-3'
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = 'exterior-3b'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = 'frustum'
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = 'exterior-3e'
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = 'occlusion'
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = 'exterior-3f'
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'VolumetricLighting.InteriorQuality=2'
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "console"
+arg = 'coc WhiterunDragonsreach'
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "shot"
+arg = 'inside-4'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = 'inside-4b'
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "setting"
+arg = 'VolumetricLighting.InteriorCustomSize={"Width":256,"Height":160,"Depth":60}'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'VolumetricLighting.InteriorQuality=3'
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = 'inside-4c'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = 'coc Whiterun'
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = 'fw 81a'
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "place"
+arg = 'exterior 4 +30'
+
+[[steps]]
+at = "previous"
+frames = 370
+do = "shot"
+arg = 'exterior-4'
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = 'exterior-4b'
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = 'frustum'
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = 'exterior-4e'
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "dclf:cull"
+arg = 'occlusion'
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = 'exterior-4f'
+wait = "settled"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = 'VolumetricLighting.InteriorQuality=2'
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+arg = ''
+
+[expect]
+reach = "world-ready"
+shots = ["inside-0", "inside-0b", "inside-0c", "exterior-0", "exterior-0b", "inside-1", "inside-1b", "inside-1c", "exterior-1", "exterior-1b", "inside-2", "inside-2b", "inside-2c", "exterior-2", "exterior-2b", "inside-3", "inside-3b", "inside-3c", "exterior-3", "exterior-3b", "inside-4", "inside-4b", "inside-4c", "exterior-4", "exterior-4b", "exterior-0e", "exterior-0f", "exterior-1e", "exterior-1f", "exterior-2e", "exterior-2f", "exterior-3e", "exterior-3f", "exterior-4e", "exterior-4f"]
