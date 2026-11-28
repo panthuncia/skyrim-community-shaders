@@ -1400,5 +1400,5 @@ pushes until the user is back.
      no-sky cube on repeats (no faces drawn): a repeat keeps its snapshot's choice. native-river's worst flicker spike 51.7
      (64 tiles) -> 2.6 (0); resize references retaken with the river right, guest's added. Merge checks: 10/10 on lock,
      8/10 on land/devloss6/flicker (native-river failing on F1 as intended; cadence-drop-cells' coc did not take once), 10/10
-     with the water fix. That cadence shot also showed precipitation as untextured squares and a missing near-land patch
-     (open).
+     with the water fix. That cadence shot (camera at (0, 0) with only LODs loaded because the coc had not taken: not a bug
+     itself) also showed scattered white squares that may be real corruption (post-corrupt).
