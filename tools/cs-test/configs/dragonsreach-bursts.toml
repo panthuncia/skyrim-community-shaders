@@ -1,6 +1,7 @@
-# Repeat breaks (F2, post-small.md): Dragonsreach, then eight 300-frame bursts of consecutive rendered frames, scored for
-# one-frame breaks. Native repeat renders sometimes draw with part of the scene missing. Compose it with a mode,
-# native-vulkan+dragonsreach-bursts (about one break a run) or with --set dclf.cull=frustum (several a run).
+# Repeat breaks (F2, post-f2.md): Dragonsreach, then eight 300-frame bursts of consecutive rendered frames, scored for
+# one-frame breaks. Native repeat renders used to cull most of the near scene (the CPU pipeline's portal programs were read
+# while the game thread rewrote them). Compose it with a mode: native-vulkan+dragonsreach-bursts, and with
+# --set dclf.cull=frustum. Each step after a burst waits up to 180 s for its 300 PNGs (60 s was too short on a busy machine).
 
 [run]
 timeout_s = 900
@@ -56,48 +57,56 @@ arg = "f2-0:300"
 [[steps]]
 at = "previous"
 frames = 20
+wait_s = 180
 do = "burst"
 arg = "f2-1:300"
 
 [[steps]]
 at = "previous"
 frames = 20
+wait_s = 180
 do = "burst"
 arg = "f2-2:300"
 
 [[steps]]
 at = "previous"
 frames = 20
+wait_s = 180
 do = "burst"
 arg = "f2-3:300"
 
 [[steps]]
 at = "previous"
 frames = 20
+wait_s = 180
 do = "burst"
 arg = "f2-4:300"
 
 [[steps]]
 at = "previous"
 frames = 20
+wait_s = 180
 do = "burst"
 arg = "f2-5:300"
 
 [[steps]]
 at = "previous"
 frames = 20
+wait_s = 180
 do = "burst"
 arg = "f2-6:300"
 
 [[steps]]
 at = "previous"
 frames = 20
+wait_s = 180
 do = "burst"
 arg = "f2-7:300"
 
 [[steps]]
 at = "previous"
 frames = 10
+wait_s = 180
 do = "exit"
 
 [expect]

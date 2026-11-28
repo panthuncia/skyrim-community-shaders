@@ -45,6 +45,7 @@ namespace DCLF
 		Fades,       // the fade update's engine inputs (Features/Fades/FadeState.cpp)
 		AnimatedFades,  // the animation job's fade updates (Features/Fades/FadeWriters.cpp)
 		FirstPerson,  // the first-person latch and skeleton walk (Features/FirstPerson/FirstPersonView.cpp)
+		Portals,      // the main camera's portal programs (Features/Portals/PortalsFeature.cpp)
 		Count
 	};
 	inline constexpr std::size_t kTicketParts = static_cast<std::size_t>(TicketPart::Count);

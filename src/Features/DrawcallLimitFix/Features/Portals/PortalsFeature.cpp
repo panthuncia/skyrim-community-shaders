@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/EngineEvents.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 
 namespace DCLF::Features::Portals
 {
@@ -17,10 +18,16 @@ namespace DCLF::Features::Portals
 		constexpr Engine::Offset kPortalWalkCallSite{ { 36564, 0x9bf }, { 35571, 0xdb }, { 36564, 0x9d1 } };  // Main::Update -> FUN_1401a43c0, the main camera's portal walk
 		constexpr Engine::Offset kPortalWalk{ { 13408 }, { 13257 } };
 
-		// For set parity: the programs as encoded now.
+		/** @brief The game half's main portal context, for its ticket. */
+		std::shared_ptr<const void> TakeTicketPart()
+		{
+			return PortalViews::Get().MainContext();
+		}
+
+		/** @brief The frame's programs, for the CPU pipeline's culls and set parity (PortalViews::FramePrograms). */
 		std::span<const std::uint32_t> ProgramWords()
 		{
-			return PortalViews::Get().Encoded();
+			return PortalViews::Get().FramePrograms();
 		}
 
 		/** @brief Main::Update's portal walk (FUN_1401a43c0). DCLF's walk follows it with the same camera, before the list build. */
@@ -88,6 +95,7 @@ namespace DCLF::Features::Portals
 				.judge = &Judge,
 				.test = &PortalTest,
 				.programWords = &ProgramWords });
+			RegisterTicketPart(TicketPart::Portals, &TakeTicketPart);
 			RegisterPrograms(a_context);
 			a_context.RegisterStandInObserver({ .updateEntry = &RoomVisibility::SetLive });
 			RoomVisibility::Install();

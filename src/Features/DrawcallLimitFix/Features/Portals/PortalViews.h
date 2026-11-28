@@ -6,6 +6,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <ankerl/unordered_dense.h>
@@ -64,21 +65,36 @@ namespace DCLF
 		/** @brief Encodes this frame's programs as FadeStateCS and BuildDraws read them (PortalPrograms.h). */
 		void Encode(std::vector<std::uint32_t>& a_words) const;
 		/** @brief This frame's Encode, made at Build so the GPU copy and the CPU checks read the same words. */
-		const std::vector<std::uint32_t>& Encoded() const { return encoded; }
+		const std::vector<std::uint32_t>& Encoded() const
+		{
+			NoteWalkRead("Encoded");
+			return encoded;
+		}
 		/** @brief Owned main-view context, independent of mutable walk scratch. Render thread. */
-		Portals::ContextHold MainContext() const { return mainContext; }
+		Portals::ContextHold MainContext() const
+		{
+			NoteWalkRead("MainContext");
+			return mainContext;
+		}
 		/**
 		 * @brief PortalPrograms.hlsli's PortalTest on the CPU. Returns 1 in view, 0 culled, -1 no program.
 		 * a_nodeFlags bits: always-draw 11, preprocessed 12, preprocess-hidden 20.
 		 */
 		static int Visible(std::span<const std::uint32_t> a_words, std::uint32_t a_program, const float a_centre[3], float a_radius, std::uint32_t a_nodeFlags,
 			std::string& a_why);
-		/** @brief The program a node is culled through: 1 + its nearest room's index, 0 for unbound space. Render thread. */
+		/**
+		 * @brief The main walk the caller's frame reads. Native's render side: its ticket's (the game thread's next walk rewrites this
+		 * object meanwhile). Otherwise the last walk's. Null before the first.
+		 */
+		const Portals::Context* FrameContext() const;
+		/** @brief FrameContext's programs, empty without one. */
+		std::span<const std::uint32_t> FramePrograms() const;
+		/** @brief The program a node is culled through: 1 + its nearest room's index, 0 for unbound space. FrameContext's rooms. */
 		std::uint32_t ProgramOf(const RE::NiAVObject* a_node) const;
-		/** @brief A walked room's program (1 + its room index), else kPortalNoProgram. Render thread. */
+		/** @brief A walked room's program (1 + its room index), else kPortalNoProgram. FrameContext's rooms. */
 		std::uint32_t ProgramOfRoom(const void* a_room) const;
 		/** @brief Changes whenever ProgramOf's answers may have changed. */
-		std::uint64_t ProgramsVersion() const { return structure.load(std::memory_order_relaxed) * 0x9E3779B97F4A7C15ull ^ graphVersion; }
+		std::uint64_t ProgramsVersion() const;
 		/** @brief Notes that a room's, portal shared node's or multibound node's child changed. Any thread. */
 		void NoteStructure(const RE::NiNode* a_parent);
 
@@ -246,7 +262,13 @@ namespace DCLF
 		ankerl::unordered_dense::set<const void*> crossed;                   // portals keyed this frame
 		Program temp;                                                        // the engine's temp frustum (0x14332a710)
 		const void* edgeGraph = nullptr;                                     // the graph edgeFlags are for
-		ankerl::unordered_dense::map<const void*, std::uint32_t> roomIndex;  // room -> index (ProgramOf)
+		/**
+		 * @brief Logs, once per accessor, a read of the walk's own state from another thread than the walk's. Its next walk rewrites
+		 * that state meanwhile; other threads read a context (FrameContext). Cheap: one thread id compare.
+		 */
+		void NoteWalkRead(const char* a_what) const;
+		std::atomic<std::thread::id> walkThread{};  // Build's thread
+		std::shared_ptr<const Portals::RoomIndex> roomIndex;                 // room -> index, for the walk's contexts
 		std::uint64_t graphVersion = 0;                                      // bumped with every new graph
 		std::atomic<std::uint64_t> structure{ 0 };                           // NoteStructure
 		std::vector<std::uint32_t> encoded;                                  // Encoded
