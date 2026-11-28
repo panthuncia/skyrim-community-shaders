@@ -272,6 +272,12 @@ namespace RenderGraph::Frame::Revision
 	*/
 	std::optional<Fragment> TakePostedFragment(FragmentSourceId a_source);
 
+	/**
+	* @brief Any thread. Puts back a fragment that TakePostedFragment took and no Begin was handed, so the next taker finds it. Only into
+	* an empty post: a newer fragment posted meanwhile replaces it, and a_fragment is released. True when it went back.
+	*/
+	bool ReturnPostedFragment(FragmentSourceId a_source, Fragment a_fragment);
+
 	/** @brief Where adoption stands, for the test runner's "adopted" await. */
 	struct AdoptionMark
 	{

@@ -32,6 +32,8 @@ namespace DCLF
 	struct FrameTicket
 	{
 		FrameTicket() = default;
+		// A scene no render was handed goes back to the post (FrameDriver.cpp).
+		~FrameTicket();
 		FrameTicket(const FrameTicket&) = delete;
 		FrameTicket& operator=(const FrameTicket&) = delete;
 

@@ -132,20 +132,20 @@ namespace DCLF
 		void NoteAdopted(std::shared_ptr<const void> a_publication);
 		/** @brief Inside the adoption point: a revision left DCLF's scene, so no coverage counts until a render decides it again. */
 		void NoteStoppedDrawing();
+		/** @brief Where the claims' installation gate stands (drawing, the last coverage, the stops), for the load hold's stall line. */
+		std::string DescribeClaimsGate() const;
 		/** @brief Render thread. The ticket the frame renders, null before the first. */
 		const FrameTicket* Ticket() const { return ticket.get(); }
 		/**
 		 * @brief The tickets made, those no render took, those a repeated render made again, and renders whose ticket's scene was not the
-		 * one the frame revision had adopted (they draw no DCLF work), and scenes a superseded ticket handed on, since the last take.
+		 * one the frame revision had adopted (they draw no DCLF work), scenes a superseded ticket handed on, and scenes a ticket that
+		 * retired without handing its scene put back in the post (returned) or let go for a newer one (released), since the last take.
 		 */
 		struct TicketCounts
 		{
-			std::uint64_t made = 0, unrendered = 0, remade = 0, unpaired = 0, carried = 0;
+			std::uint64_t made = 0, unrendered = 0, remade = 0, unpaired = 0, carried = 0, returned = 0, released = 0;
 		};
-		TicketCounts TakeTicketCounts()
-		{
-			return { ticketsMade.exchange(0), ticketsUnrendered.exchange(0), ticketsRemade.exchange(0), ticketsUnpaired.exchange(0), ticketScenesCarried.exchange(0) };
-		}
+		TicketCounts TakeTicketCounts();
 		/**
 		 * @brief Native, game thread, at a publish: a_old's snapshot was never rendered (the cadence dropped it, or a newer publish
 		 * replaced it before a render took it). Its scene fragment goes to a_fresh when a_fresh took none.
