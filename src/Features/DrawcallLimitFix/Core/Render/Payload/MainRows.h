@@ -137,6 +137,8 @@ namespace DCLF::Draws
 		} animated;
 		const void* identity = nullptr;
 		std::uint32_t generation = 0;  // the tables generation its rows were written for
+		// Counts the times every row was cleared (new resources or tables). A region whose pairs saw an older count resolves them all.
+		std::uint64_t clears = 0;
 		bool active = false;
 		// Counters since the last report.
 		std::uint64_t builds = 0, materialsWritten = 0, pipelinesWritten = 0, resyncs = 0;
