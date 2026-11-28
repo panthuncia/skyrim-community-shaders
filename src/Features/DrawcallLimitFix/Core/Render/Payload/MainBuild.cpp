@@ -382,6 +382,7 @@ namespace DCLF::Draws
 			rows.identity = in.addresses.identity;
 			rows.generation = in.tablesGeneration;
 			++rows.resyncs;
+			++rows.clears;
 			rows.productDirty.MarkEvery();
 		}
 		++rows.builds;
@@ -1361,6 +1362,11 @@ namespace DCLF::Draws
 		frameWitness |= 1;
 		bool everyPair = frameWitness != r.frameWitness;
 		r.frameWitness = frameWitness;
+		// Cleared rows hold nothing for pairs nothing else names, such as the deferred ranges' water after a resize.
+		if (r.rowsClears != rows.clears) {
+			everyPair = true;
+			r.rowsClears = rows.clears;
+		}
 		if (!r.materialCursor.Continues(tables.materialLog, in.tablesGeneration) || !r.lookupCursor.Continues(lookups.materialLog, lookups.logGeneration)) {
 			everyPair = true;
 			r.materialCursor.Restart(in.tablesGeneration);
