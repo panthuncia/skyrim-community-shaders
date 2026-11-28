@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
+#include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
@@ -254,11 +255,11 @@ namespace DCLF::LoadHold
 			logger::warn(
 				"[DCLF] load hold: released after {} frames, {:.0f} ms ({}), {}; {} passes of DCLF's classes withheld. Still waiting: objects by reason: {}; "
 				"draw families {}; claims {}; the installed publication {} (built {}, committed at frame {}, the world's first frame {}); a view held this frame: "
-				"{}; waited for: {}; actors without 3D: {} at the first world frame, {} now. What is not ready stays withheld until it is",
+				"{}; waited for: {}; actors without 3D: {} at the first world frame, {} now. What is not ready stays withheld until it is. Claims gate: {}",
 				hold.frames, ms, mode, a_why, hold.withheld, WaitingText(publication), IndirectDraws::Get().DrawFamiliesWaiting(),
 				claims ? (hold.settled ? "installed, unchanged" : "installed, changing") : "not installed", publication ? publication->sequence : 0ull,
 				publication && publication->built, publication ? publication->commitFrame : 0u, hold.firstFrame, hold.heldThisFrame ? "yes" : "no", WaitedText(),
-				hold.actorsWithout3DFirst, hold.actorsWithout3DLast);
+				hold.actorsWithout3DFirst, hold.actorsWithout3DLast, FrameDriver::Get().DescribeClaimsGate());
 		}
 
 		/** @brief Render thread. Whether one world frame of a hold is settled. */

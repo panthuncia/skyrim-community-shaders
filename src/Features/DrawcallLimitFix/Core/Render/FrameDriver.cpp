@@ -77,6 +77,42 @@ namespace DCLF
 		RenderGraph::Frame::Revision::FragmentSourceId s_sceneSource = RenderGraph::Frame::Revision::kMaxFragmentSources;
 		// Main thread: IndirectDraws::SceneRecordedFrames at the last Begin.
 		std::uint64_t s_sceneRecordedSeen = 0;
+
+		/**
+		 * @brief The newest scene serial a Begin took, and the scenes retired tickets returned to the post or let go. Never destroyed: a
+		 * ticket can retire during process teardown.
+		 */
+		struct SceneReturns
+		{
+			std::atomic<std::uint64_t> taken{ 0 }, returned{ 0 }, released{ 0 };
+		};
+		SceneReturns& Returns()
+		{
+			static auto* returns = new SceneReturns;
+			return *returns;
+		}
+	}
+
+	FrameTicket::~FrameTicket()
+	{
+		// The game half took the scene out of the post, and no render's Begin was handed it: the cadence skipped the snapshot, or a frame
+		// on the main thread replaced it, which no superseded-ticket step carries. Nothing renders the ticket now. The scene builder makes
+		// the next scene only once a Begin took this one, and a frame revision with DCLF's epochs waits for a fragment recorded for it, so
+		// without this both would wait forever and DCLF would keep drawing the old scene. It goes back to the post for the next taker,
+		// unless a Begin took a newer scene since or a newer one is posted.
+		if (!scene || sceneHanded.exchange(true, std::memory_order_acq_rel))
+			return;
+		auto& returns = Returns();
+		const bool returned = scene->serial > returns.taken.load(std::memory_order_acquire) &&
+		                      RenderGraph::Frame::Revision::ReturnPostedFragment(s_sceneSource, std::move(*scene));
+		(returned ? returns.returned : returns.released).fetch_add(1, std::memory_order_relaxed);
+	}
+
+	FrameDriver::TicketCounts FrameDriver::TakeTicketCounts()
+	{
+		auto& returns = Returns();
+		return { ticketsMade.exchange(0), ticketsUnrendered.exchange(0), ticketsRemade.exchange(0), ticketsUnpaired.exchange(0), ticketScenesCarried.exchange(0),
+			returns.returned.exchange(0), returns.released.exchange(0) };
 	}
 
 	// Scene/FrameView/FrameView.cpp. Whether DCLF's first claims are installed. Render thread.
@@ -153,7 +189,13 @@ namespace DCLF
 				source.segments.push_back(segment);
 				source.labels.push_back(label(static_cast<RenderGraphRuntime::Segment>(segment)));
 			}
-		source.taken = [](const std::shared_ptr<const void>& a_scene) { IndirectDraws::Get().SceneTaken(a_scene); };
+		source.taken = [](const std::shared_ptr<const void>& a_scene) {
+			IndirectDraws::Get().SceneTaken(a_scene);
+			auto& taken = Returns().taken;
+			const std::uint64_t serial = IndirectDraws::SerialOf(a_scene);
+			for (std::uint64_t seen = taken.load(std::memory_order_acquire); serial > seen && !taken.compare_exchange_weak(seen, serial, std::memory_order_acq_rel);) {
+			}
+		};
 		source.adopt = [](const std::shared_ptr<const void>& a_scene) { IndirectDraws::Get().InstallScene(a_scene); };
 		source.drop = [](const std::shared_ptr<const void>& a_scene, Revision::FragmentDrop a_why, std::string_view a_text, std::span<const std::uint32_t> a_epochs) {
 			IndirectDraws::Get().DropScene(a_scene, a_why, a_text, a_epochs);
@@ -282,6 +324,13 @@ namespace DCLF
 	void FrameDriver::NoteStoppedDrawing()
 	{
 		coveredLast.store(0, std::memory_order_release);
+	}
+
+	std::string FrameDriver::DescribeClaimsGate() const
+	{
+		const auto& view = Scene::FrameView::Get();
+		return fmt::format("not drawing yet {}, installed {}, last coverage {} (stops asked {}, applied {}); {}", view.NotDrawingYet(), view.HasInstalled(),
+			coveredLast.load(std::memory_order_acquire), view.StopsAsked(), view.StopsApplied(), IndirectDraws::Get().CoverageState());
 	}
 
 	void FrameDriver::SceneFrameStart()
