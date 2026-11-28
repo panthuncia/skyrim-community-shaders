@@ -74,7 +74,10 @@ namespace DCLF::Features::Grass
 		std::shared_ptr<const ComputeProgram> cull, args;
 		std::atomic<bool> ready{ false };
 		std::shared_ptr<GrassCounts> counts;
-		float prevTimeBase = 0.0f;
+		// The wind time the last render drew and the one before it, stepped once per render (timeFrame), so a second depth commit in
+		// the same render sends the same pair.
+		float timeBase = 0.0f, prevTimeBase = 0.0f;
+		std::uint32_t timeFrame = ~0u;
 		bool countsZeroed = false, owned = false;
 		bool smallStart = false;  // CS_DCLF_TABLE_START=small: the tables start and stay small (no floors in Require)
 		std::uint32_t bindingGeneration = ~0u;

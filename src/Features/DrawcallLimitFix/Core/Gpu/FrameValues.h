@@ -52,8 +52,9 @@ namespace DCLF
 	 * @brief Makes the per-frame values a frame's draws read: placements, skin palettes and shading rows.
 	 *
 	 * Two kinds of job run on DCLF's pool, one after another in kick order (one chain). The game half kicks a sampling job per ticket:
-	 * it applies the new placement plans to the set it keeps, samples only what moved under engine-read leases, and runs the game-side
-	 * pools' samples. The render half kicks an upload job per render: it reads only the sampled rows, fills the render's CPU slot (forward
+	 * it applies the new placement plans to the set it keeps, samples only what moved under engine-read leases, stages what it changed,
+	 * and runs the game-side pools' samples. The render half kicks an upload job per render: it applies the staged tickets up to its own
+	 * to the rows it sends (never a later ticket's, which the game half may sample meanwhile), fills the render's CPU slot (forward
 	 * sort rows, live spheres), runs the per-render pools, and uploads the changed rows on the dedicated upload queue. It then signals
 	 * the frame-wait timeline, always, even after a failure. The GPU waits for that signal and the render thread never does. Nothing
 	 * the render half kicks takes an engine-read lease.
@@ -87,15 +88,17 @@ namespace DCLF
 		/**
 		 * @brief Game half, once per ticket (rendered or not). Runs the pools' frame starts and the game-side pools' kicks, and kicks the
 		 * ticket's sampling job with its one-shot inputs. Without a graph or dedicated upload queue the inputs wait for the next one.
+		 * Returns the newest sampling job's sequence, which the ticket's renders pass to Kick.
 		 */
-		void KickSample(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
+		std::uint64_t KickSample(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
 			std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals, std::shared_ptr<RootViews> a_rootViews);
 		/**
 		 * @brief Render thread, at the scene's start, each render. Leases the render's backings, kicks its upload job after every sampling
-		 * job kicked before it, and sets the host's frame wait to its sequence number. Returns false when there is no graph or dedicated
-		 * upload queue. The frame then waits for nothing.
+		 * job kicked before it, and sets the host's frame wait to its sequence number. The upload sends the rows of the tickets sampled up
+		 * to a_ticketSample (the render's ticket's KickSample result), never a later ticket's. Returns false when there is no graph or
+		 * dedicated upload queue. The frame then waits for nothing.
 		 */
-		bool Kick(std::shared_ptr<const FrameGlobals> a_globals);
+		bool Kick(std::shared_ptr<const FrameGlobals> a_globals, std::uint64_t a_ticketSample);
 		/** @brief Render thread, before Kick. Kick also leases late-pose placement and palette backings, filled by the same producer. */
 		void SetLatePoses(std::shared_ptr<const LatePoses::FramePlan> a_plan);
 		/** @brief Render thread, at the depth commit. Draws from here read the late backings. The shadow epoch keeps the first ones. */
@@ -207,8 +210,9 @@ namespace DCLF
 			// Producers that reused a copy a frame in flight still bound. Their uploads waited for it on the GPU.
 			std::uint64_t reusedInFlight = 0;
 			std::uint64_t plans = 0, planResets = 0, planItems = 0;
-			// Native: rows and palette blocks a repeated render drew still, and uploads that sent a later ticket's rows than their own.
-			std::uint64_t stillRows = 0, stillBlocks = 0, aheadUploads = 0;
+			// Native: rows and palette blocks a repeated render drew still. Uploads that sent a later ticket's rows than their own (0 unless
+			// renders stopped while tickets piled up), and uploads that held a later ticket's staged rows back.
+			std::uint64_t stillRows = 0, stillBlocks = 0, aheadUploads = 0, heldBack = 0;
 		};
 		/** @brief Takes and resets the counters. */
 		Counters TakeCounters();
