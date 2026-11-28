@@ -1,0 +1,201 @@
+# Flicker across pinned still scenes: a 60-frame burst (consecutive rendered frames, scored by cstest/flicker.py) at the
+# autoloaded save (grass, trees, shadows), looking up at the sky, at Riverwood's river (water) down and along it, in Whiterun
+# (building and NPC shadows) and in Dragonsreach (an interior). Each burst writes a PNG of its frames; the harness keeps the
+# ones around the worst spike. Compose it with a mode and a cap: d3d11+flicker-scenes (the reference),
+# guest+flicker-scenes, native-vulkan+flicker-scenes, native-vulkan+flicker-scenes+cap30 (repeats at every other frame or
+# more), native-vulkan+flicker-scenes --set game.uncapped=true (many repeats).
+extends = ["base"]
+
+[run]
+timeout_s = 600
+
+# The suite's pinned scene (update-cap30.toml): god mode, AI and combat off, time stopped at 13:00, the weather locked,
+# the Health Low tutorial closed, the player put back where the save has it.
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.restoreav health 1000"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "menu"
+arg = "Tutorial Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos x 32216"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos y -16692"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos z -4446"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle x 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 200"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "burst"
+arg = "meadery:60"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle x -45"
+
+[[steps]]
+at = "previous"
+frames = 200
+do = "burst"
+arg = "sky:60"
+
+# Riverwood's river (river.toml's place and angles).
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Riverwood"
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "console"
+arg = "player.setpos x 19300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos y -45300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos z -80"
+
+[[steps]]
+at = "previous"
+frames = 8
+do = "console"
+arg = "player.setangle x 12"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 0"
+
+[[steps]]
+at = "previous"
+frames = 390
+do = "burst"
+arg = "river:60"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 90"
+
+[[steps]]
+at = "previous"
+frames = 290
+do = "burst"
+arg = "river-east:60"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "burst"
+arg = "whiterun:60"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "burst"
+arg = "dragonsreach:60"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+
+# Calibrated on d3d11 and guest at these scenes (post-flicker.md): their worst spike was 14.8 (Riverwood's turning water
+# wheel at 25 frames a second), with at most 3 tiles flickering twice; native's flickering river reached 54 and 68-138 tiles.
+[expect.flicker]
+max_spike = 20
+max_tiles = 8

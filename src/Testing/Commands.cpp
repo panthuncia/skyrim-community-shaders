@@ -490,6 +490,42 @@ namespace Testing
 			return true;
 		}
 
+		/**
+		* @brief "burst": `<name>:<count>[:grid]`, captures of count consecutive rendered frames into <run>/bursts/<name> (ScreenshotBurst):
+		* burst.json, grid.bin and a PNG of each frame (not with `grid`). The harness scores their frame-to-frame changes.
+		*/
+		bool Burst(const std::string& a_arg, std::string& a_error)
+		{
+			const auto first = a_arg.find(':');
+			const auto name = a_arg.substr(0, first);
+			std::string count = first == std::string::npos ? std::string{} : a_arg.substr(first + 1);
+			bool png = true;
+			if (const auto second = count.find(':'); second != std::string::npos) {
+				if (count.substr(second + 1) != "grid") {
+					a_error = fmt::format("burst '{}': the third part may only be 'grid'", a_arg);
+					return false;
+				}
+				png = false;
+				count.resize(second);
+			}
+			std::uint32_t frames = 0;
+			const auto [end, parsed] = std::from_chars(count.data(), count.data() + count.size(), frames);
+			const bool nameOk = !name.empty() && std::ranges::all_of(name, [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_'; });
+			if (!nameOk || parsed != std::errc{} || end != count.data() + count.size() || frames < 3 || frames > 600) {
+				a_error = fmt::format("burst '{}': expected <name>:<count>[:grid], a name of letters, digits, '-' and '_' and a count of 3-600", a_arg);
+				return false;
+			}
+			auto directory = RunDirectory();
+			directory = (directory.empty() ? logger::log_directory().value_or(std::filesystem::path{}) / "dclf-shots" : directory) / "bursts" / name;
+			std::error_code error;
+			std::filesystem::create_directories(directory, error);
+			// As a shot: inside a game update, from the next update's snapshot.
+			const std::uint64_t minSnapshot = Snapshot::InGameUpdate() ? Snapshot::LastGameId() + 1 : 0;
+			globals::features::screenshotFeature.RequestBurst(directory, frames, png, minSnapshot);
+			logger::info("[TEST] burst {} of {} frames asked at game snapshot {}: from snapshot {} on", name, frames, Snapshot::LastGameId(), minSnapshot);
+			return true;
+		}
+
 		bool Window(const std::string& a_arg, std::string& a_error)
 		{
 			DXGI_SWAP_CHAIN_DESC desc{};
@@ -803,6 +839,7 @@ namespace Testing
 				LogPlace(a_arg.empty() ? std::string_view("place step") : std::string_view(a_arg));
 				return true;
 			});
+			RegisterCommand("burst", Burst);
 			RegisterCommand("loadscreen", ForceLoadScreen);
 			RegisterCommand("loadscreens", LoadScreenCycle::Start);
 			RegisterCommand("window", Window);

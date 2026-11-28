@@ -1,9 +1,11 @@
 #pragma once
 
 #include "Feature.h"
+#include "Features/Screenshot/Burst.h"
 #include "Features/Screenshot/ORGScreenshot.h"
 #include "Utils/Subrect.h"
 #include <DirectXTex.h>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <filesystem>
@@ -66,6 +68,12 @@ struct ScreenshotFeature : public Feature
 	 * (DCLF's test harness, dclf:shot=, cs-test's shots). Later requests wait behind it.
 	 */
 	void RequestCapture(std::filesystem::path a_outputPath, std::uint64_t a_minSnapshot = 0);
+	/**
+	 * @brief Any thread: a burst (ScreenshotBurst) of a_count captures of consecutive rendered frames, from the first Present whose
+	 * frame renders a_minSnapshot or newer, into a_directory. It waits behind earlier requests and counts as one in
+	 * ScriptedCapturesPending until its files are written.
+	 */
+	void RequestBurst(std::filesystem::path a_directory, std::uint32_t a_count, bool a_png, std::uint64_t a_minSnapshot);
 	/** @brief Any thread: whether a RequestCapture capture is still to be saved (requested, read back or being encoded). */
 	bool ScriptedCapturesPending() const { return scriptedInFlight.load(std::memory_order_acquire) != 0; }
 	bool applyCropToScreenshot = true;
@@ -110,6 +118,10 @@ private:
 		ORGScreenshot::Pixels readback;
 		uint32_t cropX = 0;
 		uint32_t cropY = 0;
+		// A burst's frame (saved as a PNG only when the burst asks), or with burstEnd its end: the worker writes its files.
+		std::shared_ptr<ScreenshotBurst::Burst> burst;
+		ScreenshotBurst::Frame burstFrame;
+		bool burstEnd = false;
 	};
 
 	std::mutex screenshotQueueMutex;
@@ -127,6 +139,7 @@ private:
 	{
 		std::filesystem::path path;
 		std::uint64_t minSnapshot = 0;
+		std::shared_ptr<ScreenshotBurst::Burst> burst;  // RequestBurst's
 	};
 	std::mutex requestedPathsMutex;
 	std::queue<RequestedCapture> requestedPaths;
@@ -142,6 +155,18 @@ private:
 	bool captureDeferred = false;
 	// Render thread only: set while the crop preview is drawn so the next frame snapshots the clean scene.
 	bool previewVisible = false;
+	// Render thread only: the burst taking captures, and the last Presents' times (for its frame time before it started).
+	std::shared_ptr<ScreenshotBurst::Burst> activeBurst;
+	std::array<double, 32> presentMs{};
+	std::uint32_t presentsTimed = 0;
+	std::uint32_t lastTimedPresent = ~0u;
+
+	/** @brief Capture()'s work. For a burst's frame it saves into the burst and returns false, with a_why, when the frame cannot be taken. */
+	bool CaptureInto(const std::shared_ptr<ScreenshotBurst::Burst>& a_burst, std::string* a_why);
+	/** @brief Once a Present: the active burst's next capture, its start, or its end. */
+	void StepBurst();
+	/** @brief The worker's part of a burst: a frame's grid (and PNG), or the files at its end. */
+	void ProcessBurstEntry(PendingScreenshot& a_screenshot);
 
 	/** @brief Polls in-flight staging copies without stalling and enqueues the finished ones for encoding. */
 	void ProcessPendingReadbacks();

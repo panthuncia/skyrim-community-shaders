@@ -9,6 +9,7 @@ import re
 import tomllib
 from pathlib import Path
 
+from .flicker import check_expect
 from .paths import CONFIG_DIR
 from .schema import ConfigError
 
@@ -23,8 +24,9 @@ FIXED = {
     "build": {"stage": str, "shader_cache": str},
     "game": {"save": str, "cell": str, "mods_off": list, "autoload_mod": str, "uncapped": bool},
     "timeouts": {"launch": int, "compile": int, "load": int, "step_wait": int},
-    # expect.shot_refs: the shots compared with their kept references after a passed run (shotref.py); the harness's, not the game's.
-    "expect": {"reach": str, "shots": list, "no_log": list, "live_frames": int, "graph_frames": dict, "shot_refs": list},
+    # expect.shot_refs: the shots compared with their kept references after a passed run (shotref.py); expect.flicker: the
+    # bursts' limits (flicker.py). Both the harness's, not the game's.
+    "expect": {"reach": str, "shots": list, "no_log": list, "live_frames": int, "graph_frames": dict, "shot_refs": list, "flicker": dict},
     # fg.presentmon: the game's presents per second from the PresentMon service, next to the [FGTEST] lines (presentmon.py).
     "fg": {"presentmon": bool},
 }
@@ -32,6 +34,8 @@ STEP_FIELDS = {"at": str, "frames": int, "do": str, "arg": str, "wait": str, "wa
 AWAITS = ("adopted",)
 # A call step's arg: <owner>.<name> or <owner>.<name>=<arg>.
 CALL_ARG = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(=.*)?", re.DOTALL)
+# A burst step's arg: <name>:<count>[:grid].
+BURST_ARG = re.compile(r"[A-Za-z0-9_-]+:[0-9]+(:grid)?")
 GRAPH_FRAMES_FIELDS = ("min",)
 # Tables taken as they are. saved_settings goes into the saved settings file for one run, prefs_ini into the profile's
 # SkyrimPrefs.ini (harness part, not the contract).
@@ -145,6 +149,9 @@ def check_fixed(merged):
     if reach and reach not in MILESTONES:
         raise ConfigError(f"expect.reach takes a milestone ({', '.join(MILESTONES)}), not {reach!r}")
     check_graph_frames(merged.get("expect", {}).get("graph_frames", {}))
+    flicker_error = check_expect(merged.get("expect", {}).get("flicker", {}))
+    if flicker_error:
+        raise ConfigError(flicker_error)
     saved = merged.get("saved_settings", {})
     if not isinstance(saved, dict):
         raise ConfigError("[saved_settings] must be a table")
@@ -205,6 +212,8 @@ def check_steps(steps):
             raise ConfigError(f"step {i + 1}: await takes {', '.join(AWAITS)}, not {awaited!r}")
         if step["do"] == "call" and not CALL_ARG.fullmatch(step.get("arg", "")):
             raise ConfigError(f"step {i + 1}: call takes <owner>.<name> or <owner>.<name>=<arg>, not {step.get('arg', '')!r}")
+        if step["do"] == "burst" and not (BURST_ARG.fullmatch(step.get("arg", "")) and 3 <= int(step["arg"].split(":")[1]) <= 600):
+            raise ConfigError(f"step {i + 1}: burst takes <name>:<count>[:grid] with a count of 3-600, not {step.get('arg', '')!r}")
         normal = {"at": at, "frames": step.get("frames", 0), "do": step["do"], "arg": step.get("arg", "")}
         for optional in ("wait", "wait_s", "await"):
             if optional in step:
@@ -325,6 +334,7 @@ def flatten(merged, schema, name):
         "stall_s": run.get("stall_s", 90),
         "label": run.get("label", ""),
         "shot_refs": list(expect.get("shot_refs", [])),
+        "flicker": dict(expect.get("flicker", {})),
         "origin": dict(sorted(origin.items())),
     }
     return contract, harness

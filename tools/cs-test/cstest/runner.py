@@ -9,7 +9,7 @@ import signal
 import time
 from pathlib import Path
 
-from . import collect, cpuload, lab as lab_mod, locks, mo2, presentmon, procs, shotref
+from . import collect, cpuload, flicker, lab as lab_mod, locks, mo2, presentmon, procs, shotref
 from .config import diff, resolve
 from .outcome import Final, Watcher, frames_after, read_status, summary_line
 from .paths import CONFIG_DIR, LOG_FILE, STATUS_FILE
@@ -160,9 +160,9 @@ def _watch_loop(slot, contract, harness, log, clock, sleep, watcher, status_path
             return final, status
 
 
-def check_expectations(contract, run_dir, status, final, refs=None):
+def check_expectations(contract, run_dir, status, final, refs=None, bursts=None):
     """The harness's own checks, after a passed run: shots on disk, forbidden log lines, the milestone reached, the graph
-    frames, and the reference shots (refs, from shotref.check_run)."""
+    frames, the reference shots (refs, from shotref.check_run) and the bursts (from flicker.check_run)."""
     if final.outcome != "passed":
         return final
     expect = contract["expect"]
@@ -184,6 +184,8 @@ def check_expectations(contract, run_dir, status, final, refs=None):
         return Final("failed", "; ".join(graph["failures"]) + " (harness)", "harness")
     if refs and refs.get("failures"):
         return Final("failed", "; ".join(refs["failures"]) + " (harness)", "harness")
+    if bursts and bursts.get("failures"):
+        return Final("failed", "; ".join(bursts["failures"]) + " (harness)", "harness")
     return final
 
 
@@ -403,7 +405,11 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
     refs = shotref.check_run(paths, harness["shot_refs"], contract["name"], run_dir) if final.outcome == "passed" else {"checked": False}
     for shot in refs.get("unreferenced", []):
         log(f"shot {shot}: no reference for {contract['name']}/{shot} (cs_test.py ref accept {run_dir.name})")
-    final = check_expectations(contract, run_dir, status, final, refs)
+    bursts = flicker.check_run(contract, harness, run_dir) if final.outcome == "passed" else {"bursts": {}, "failures": []}
+    for name, found in bursts["bursts"].items():
+        for text_line in flicker.lines(name, found):
+            log(text_line)
+    final = check_expectations(contract, run_dir, status, final, refs, bursts)
     scan = collect.scan_log(run_dir / LOG_FILE)
     fault = ((status or {}).get("fault") or {}).get("address") or scan["fault_address"]
     shots = collect.shots_in(run_dir)
@@ -417,6 +423,8 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
     detected = collect.detectors(collect.final_status(run_dir, status))
     if collect.detectors_text(detected):
         line += f" ({collect.detectors_text(detected)})"
+    if flicker.text(bursts):
+        line += f" ({flicker.text(bursts)})"
     cpu = watch.cpu.result() if watch.cpu else None
     if cpuload.text(cpu):
         line += f"; {cpuload.text(cpu)}"
@@ -439,6 +447,7 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, wait_lock=0
         "live_image": collect.live_image(run_dir, contract["expect"]),
         "graph_frames": collect.graph_frames(contract, collect.final_status(run_dir, status)),
         "shot_refs": refs,
+        "flicker": bursts,
         "detectors": detected,
         "first_error": scan["first_error"] or (status or {}).get("last_error", ""),
         "fault": (status or {}).get("fault") or ({"address": fault} if fault else {}),

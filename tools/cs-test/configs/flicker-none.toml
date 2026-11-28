@@ -1,386 +1,113 @@
-# Shadow flicker: 60 shots on consecutive frames at the autoloaded save, standing still, then exit. Score the frame-to-frame
-# changes per screen tile (a flicker is a tile that jumps and comes back). Compose it: native-vulkan+flicker, native-d3d12+flicker.
+# Shadow and foliage flicker at the suite's pinned scene (the autoloaded save, standing still) with the none upscale method: a
+# 120-frame burst (consecutive rendered frames, scored by cstest/flicker.py), then exit. Compose it: d3d11+flicker-none (the
+# reference), guest+flicker-none, native-vulkan+flicker-none, native-d3d12+flicker-none.
 extends = ["base"]
 
 [run]
 timeout_s = 420
 
+# The suite's pinned scene (update-cap30.toml): god mode, AI and combat off, time stopped at 13:00, the weather locked,
+# the Health Low tutorial closed, the player put back where the save has it.
 [[steps]]
 at = "world-ready"
-frames = 600
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tai"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "tcai"
+
+[[steps]]
+at = "previous"
+frames = 1
 do = "console"
 arg = "set timescale to 0"
 
 [[steps]]
 at = "previous"
-frames = 60
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.restoreav health 1000"
+
+[[steps]]
+at = "previous"
+frames = 30
+do = "menu"
+arg = "Tutorial Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos x 32216"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos y -16692"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos z -4446"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle x 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 200"
+
+[[steps]]
+at = "previous"
+frames = 10
 do = "upscale"
 arg = "none"
 
 [[steps]]
 at = "previous"
-frames = 1
-do = "shot"
-arg = "f00"
+frames = 290
+do = "burst"
+arg = "save:120"
 
 [[steps]]
 at = "previous"
-frames = 1
-do = "shot"
-arg = "f01"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f02"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f03"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f04"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f05"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f06"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f07"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f08"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f09"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f10"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f11"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f12"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f13"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f14"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f15"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f16"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f17"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f18"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f19"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f20"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f21"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f22"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f23"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f24"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f25"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f26"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f27"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f28"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f29"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f30"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f31"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f32"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f33"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f34"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f35"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f36"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f37"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f38"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f39"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f40"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f41"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f42"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f43"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f44"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f45"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f46"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f47"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f48"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f49"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f50"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f51"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f52"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f53"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f54"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f55"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f56"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f57"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f58"
-
-[[steps]]
-at = "previous"
-frames = 1
-do = "shot"
-arg = "f59"
-
-[[steps]]
-at = "previous"
-frames = 30
+frames = 10
 do = "exit"
 
 [expect]
 reach = "world-ready"
+
+# Calibrated on d3d11 and guest at these scenes (post-flicker.md): their worst spike was 14.8 (Riverwood's turning water
+# wheel at 25 frames a second), with at most 3 tiles flickering twice; native's flickering river reached 54 and 68-138 tiles.
+[expect.flicker]
+max_spike = 20
+max_tiles = 8
