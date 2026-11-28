@@ -1496,3 +1496,15 @@ pushes until the user is back.
      falls back to `Encoded()`. Merge check 7/9: native-interior and first-person-switch pass again; flicker-scenes' river
      caught a fresh render without sunlight (post-sun) and cadence-drop-cells' load into Dragonsreach a ghosted fresh frame
      followed by a repeat without the player (post-ghost).
+
+## 2026-11-28: sky light colours published once; per-burst flicker limits (post-sun; director accepted)
+
+258. **The rare native render with no sunlight was a race between Physical Sky and Sky Sync** (`post-sun.md`). Physical
+     Sky's per-render `Reset` (render thread in native) cleared `SkySync::workingLightColors` and refilled them ~130 lines
+     later; the game thread's Sky::Update override read them, and an update in the gap kept the weather's sunlight (about
+     five times dimmer) for one snapshot, fresh render and repeats. `Reset` now builds the colours locally and publishes
+     them once under a lock; the reader copies. A sun watch at native's world masks logs any sun input change (on change,
+     capped; PS-a). The guest/D3D12 pose jump after the save's load is the game's own animation (plain D3D11 shows it).
+     cs-test takes `[expect.flicker.bursts.<name>]` limits: cadence-drop-cells' load-riverwood gets 35 for real camera
+     settling (the missing mist it guards scored 57-79; PS-b); menu-scenes stops the guard fight and waits out the swing.
+     The second CS-state race in a day: post-race sweeps the features for more. Merge check 8/8.
