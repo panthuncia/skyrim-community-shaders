@@ -1449,3 +1449,22 @@ pushes until the user is back.
      handover: post-fatals). F2's cause is a different race (post-f2: the CPU fade stage's kick copies
      `PortalViews::Encoded()` on the render thread while the game thread rewrites it). Merge check 6/8: native-interior and
      cloud-shadows lost the device with the wait in place (snap7-devloss8).
+
+## 2026-11-28: post-load and repeat corruption fixed; bursts after loads (post-corrupt; director accepted)
+
+255. **Corruption found with post-load bursts** (`post-corrupt.md`; the user asked for real corruption to be fixed,
+     including one-frame flickers after loads). Guest drew the world under the loading menu the load hold keeps open for
+     ~30 frames after every load (black land, untextured player, the old cell's LOD): guest now holds its presents while
+     the menu is kept (PC-b); its load-out burst went from spike 127 (81 tiles) to 0.77. Native repeats drew animated effects
+     from the wrong material row (purple Dragonsreach fires, Riverwood mist missing for a frame): texture-transform rows were
+     sampled from the newest installed list across threads and sent as they stood, while a repeat keeps its ticket's older
+     payload; now the game half reads the values at each frame start keyed by material and each upload builds the rows for
+     its own render's list, with per-render pools (PC-c). snap7-devloss8 reports this mismatch also triggers the device loss
+     (resize 5/5 without the interim wait). A freed Advanced Skin material-table row now waits 16 captures before reuse
+     (PC-d; the black arm on a fresh render after repeats, cause inferred). A "Compiling Shaders 0/0" card no longer flashes
+     after loads. The white squares came from the stalled scene fixed in decision 251. Bursts with `expect.flicker` added
+     after loads in cadence-drop-cells, native-interior, land-cocs, native-tour, first-person-switch, menu-scenes and
+     update-cap240 (the save's load is burst after the pinned steps; quick keeps none: the guard fight flickers in every
+     mode). Open: a rare fresh frame without sunlight then a slow recovery (seen twice); a small one-frame pose jump in guest
+     and D3D12 load-save bursts; cadence idle motion near the 20 limit. Merge check 11/11 (native-interior Vulkan and
+     first-person-switch left out: they fail on F2 until post-f2 merges).
