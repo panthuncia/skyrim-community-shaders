@@ -155,6 +155,48 @@
     "run": "1126-185749-dir-native-vulkan-facegen-dir-s7dk-native-vulkan+facegen",
     "accepted": "2026-11-26"
   },
+  "native-vulkan+first-person-switch/first-1": {
+    "sha256": "7ff6a6b80d673a361809cde772efc2ebd3f888a861c928d0f3c96d8283106f20",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/first-2": {
+    "sha256": "b00e568eda9e5d72aeacdc6e8b5fba9c267a10e1bb6b37c6b739ee96cf634e94",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/first-3": {
+    "sha256": "bab76579fb73be2e179d311bc0eb7d8e481aa63c56bfae31046e79e5e1da035d",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/first-shadow": {
+    "sha256": "04c79719cb117bb5d6f20b21ff1cdf82f3a156515cd3d1406bcf4985f03d1b74",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/interior-first": {
+    "sha256": "e8a27e55bce70ac71b43c01b0b072bd2d15fb0c3c247c5564588e49ff742e8ad",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/interior-shadow": {
+    "sha256": "3d52184df6f6558c00cfe6da079e812b67227285586f712c1a8f0801e2991349",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
+  "native-vulkan+first-person-switch/third-1": {
+    "sha256": "fa8265a6bcac69ac5313f206ec384658f3a2f30c4f922deba07097f366365ed1",
+    "size": "1920x1080",
+    "run": "1127-185904-post-refs-native-vulkan-first-person-switch-post-refs-n1-fps",
+    "accepted": "2026-11-27"
+  },
   "native-vulkan+first-person/first": {
     "sha256": "ca882ee30bd05bf28807492cb05b7242b6c19caf90e743bb9ed5e772f1b715c0",
     "size": "1920x1080",
